@@ -1,52 +1,46 @@
 APP-BIN := dist/$(shell basename $(shell pwd))
 
-.PHONY: build
-build:
+.PHONY: build build-frontend consul-up consul-down consul-register-test consul-deregister-test darwin fresh lint linux qa release run snapshot tag test watch
+
+build-frontend:
+	cd frontend && npm install && npm run build
+
+build: build-frontend
 	goreleaser build --id $(shell go env GOOS) --single-target --snapshot --clean -o ${APP-BIN}
-.PHONY: darwin
-darwin:
+darwin: build-frontend
 	goreleaser build --id darwin --snapshot --clean
-.PHONY: linux
-linux:
+linux: build-frontend
 	goreleaser build --id linux --snapshot --clean
-.PHONY: snapshot
-snapshot:
+snapshot: build-frontend
 	goreleaser release --snapshot --clean
-.PHONY: tag
 tag:
 	git tag $(shell svu next)
 	git push --tags
-.PHONY: release
-release: tag
+release: tag build-frontend
 	goreleaser --clean
 
-.PHONY: watch
 watch:
 	gotestsum --watch --format testname
-.PHONY: lint
 lint:
 	pre-commit run --files $(shell git ls-files -m)
-.PHONY: test
 test:
 	gotestsum --format testname
-.PHONY: qa
 qa: lint test
-
-.PHONY: run
 run: ## Run binary.
 	./${APP-BIN} server
-.PHONY: fresh
 fresh: build run
-.PHONY: consul-dev
-consul-dev:
-	consul agent -dev
-.PHONY: consul-config
-consul-config:
-	consul config write scripts/failover.hcl
-	consul config write scripts/redirect.hcl
-.PHONY: nomad-dev
-nomad-dev:
-	nomad agent -dev -bind 0.0.0.0
-	sudo nomad agent -dev \
-	-bind 0.0.0.0 \
-	-network-interface='{{ GetDefaultInterfaces | attr "name" }}'
+consul-up:
+	docker run -d --rm --name consul-dev -p 8500:8500 -p 8600:8600/udp hashicorp/consul:latest agent -dev -client=0.0.0.0
+
+consul-register-test:
+	curl --request PUT \
+		--data '{"ID": "test-service", "Name": "test-service", "Tags": ["atc.enabled=true", "primary"], "Address": "127.0.0.1", "Port": 8080}' \
+		http://localhost:8500/v1/agent/service/register
+consul-deregister-test:
+	curl --request PUT \
+		http://localhost:8500/v1/agent/service/deregister/test-service
+
+consul-down:
+	docker stop consul-dev || true
+
+

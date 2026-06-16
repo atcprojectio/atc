@@ -1,217 +1,115 @@
 package atc
 
 import (
-	"github.com/grafana/dskit/modules"
-	"github.com/grafana/dskit/server"
-	"github.com/grafana/dskit/services"
+	"log/slog"
+	"slices"
+
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	promversion "github.com/prometheus/client_golang/prometheus/collectors/version"
-	"github.com/prometheus/common/version"
-	"github.com/prometheus/exporter-toolkit/web"
-	"golang.org/x/exp/slices"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/attachmentgenie/atc/pkg/atc/autoscaler"
-	"github.com/attachmentgenie/atc/pkg/atc/deployer"
-	"github.com/attachmentgenie/atc/pkg/atc/event_sink"
 	"github.com/attachmentgenie/atc/pkg/atc/forwarder"
-	"github.com/attachmentgenie/atc/pkg/atc/incident"
-	"github.com/attachmentgenie/atc/pkg/atc/radar"
-	"github.com/attachmentgenie/atc/pkg/atc/redirecter"
+	mcp_server "github.com/attachmentgenie/atc/pkg/atc/mcp"
+	"github.com/attachmentgenie/atc/pkg/atc/redirector"
 	atc_server "github.com/attachmentgenie/atc/pkg/atc/server"
 )
 
 const (
-	API        string = "api"
-	Autoscaler string = "autoscaler"
-	Boundary   string = "boundary"
-	Consul     string = "consul"
-	Deployer   string = "deployer"
-	EventSink  string = "event_sink"
 	Forwarder  string = "forwarder"
-	Incident   string = "incident"
-	Nomad      string = "nomad"
+	Redirector string = "redirector"
 	Server     string = "server"
-	Radar      string = "radar"
-	Redirecter string = "redirecter"
+	Consul     string = "consul"
 	All        string = "all"
 )
 
-func (t *Atc) initAPI() (services.Service, error) {
-	landingConfig := web.LandingConfig{
-		Name:        "ATC",
-		Description: "Atc",
-		Version:     version.Version,
-		Links: []web.LandingLinks{
-			{
-				Address: "/health",
-				Text:    "Health",
-			},
-			{
-				Address: "/metrics",
-				Text:    "Metrics",
-			},
-			{
-				Address: "/ready",
-				Text:    "Ready",
-			},
-			{
-				Address: "/services",
-				Text:    "Services",
-			},
-		},
-	}
-	landingPage, err := web.NewLandingPage(landingConfig)
-	if err != nil {
-		panic(err)
-	}
-	t.Server.HTTP.Handle("/", landingPage)
-
-	return nil, nil
+var UserVisibleModules = []string{
+	Consul,
+	Forwarder,
+	Redirector,
+	All,
 }
 
-func (t *Atc) initAutoscaler() (services.Service, error) {
-	autosclr, err := autoscaler.New(t.logger)
+func (t *Atc) initServer() error {
+	serv, err := atc_server.New(t.Cfg.Server, t.logger.With(slog.String("module", "server")))
 	if err != nil {
-		return nil, err
-	}
-	t.Autoscaler = autosclr
-	return t.Autoscaler, nil
-}
-
-func (t *Atc) initDeployer() (services.Service, error) {
-	deploy, err := deployer.New(t.logger)
-	if err != nil {
-		return nil, err
+		return err
 	}
 
-	t.Server.HTTP.Path("/v1/jobs").Methods("GET", "PUT").Handler(deploy.OkHandler())
-	t.Server.HTTP.Path("/v1/validate/job").Methods("PUT").Handler(deploy.OkHandler())
+	reg := prometheus.DefaultRegisterer
+	reg.Unregister(collectors.NewGoCollector())
+	_ = reg.Register(promversion.NewCollector(t.Cfg.Server.MetricsNamespace))
 
-	t.Deployer = deploy
-	return t.Deployer, nil
-}
-
-func (t *Atc) initEventSink() (services.Service, error) {
-	sink, err := event_sink.New(t.logger)
-	if err != nil {
-		return nil, err
-	}
-	t.EventSink = sink
-	return t.EventSink, nil
-}
-
-func (t *Atc) initForwarder() (services.Service, error) {
-	forward, err := forwarder.New(t.logger)
-	if err != nil {
-		return nil, err
-	}
-	t.Forwarder = forward
-	return t.Forwarder, nil
-}
-
-func (t *Atc) initIncident() (services.Service, error) {
-	incident, err := incident.New(t.logger)
-	if err != nil {
-		return nil, err
-	}
-	t.Incident = incident
-	return t.Incident, nil
-}
-
-func (t *Atc) initServer() (services.Service, error) {
-
-	t.Cfg.Server.RegisterInstrumentation = true
-	atc_server.DisableSignalHandling(&t.Cfg.Server)
-
-	serv, err := server.New(t.Cfg.Server)
-	if err != nil {
-		return nil, err
-	}
-	serv.Registerer.Unregister(collectors.NewGoCollector())
-	serv.Registerer.MustRegister(promversion.NewCollector(t.Cfg.Server.MetricsNamespace))
-	serv.HTTP.Path("/ready").Handler(OkHandler())
+	serv.MetricsMux.Handle("/metrics", promhttp.Handler())
+	serv.Mux.HandleFunc("/ready", OkHandler())
+	serv.Mux.HandleFunc("GET /api/services", t.apiServicesHandler)
+	serv.Mux.HandleFunc("DELETE /api/services", t.apiServicesDeleteHandler)
+	serv.Mux.Handle("/mcp", mcp_server.NewHandler(t))
 
 	t.Server = serv
-
-	servicesToWaitFor := func() []services.Service {
-		svs := []services.Service(nil)
-
-		serverDeps := t.ModuleManager.DependenciesForModule(Server)
-
-		for m, s := range t.ServiceMap {
-			// Server should not wait for itself or for any of its dependencies.
-			if m == Server {
-				continue
-			}
-
-			if slices.Contains(serverDeps, m) {
-				continue
-			}
-
-			svs = append(svs, s)
-		}
-		return svs
-	}
-
-	s := atc_server.New(t.Server, servicesToWaitFor)
-
-	return s, nil
-}
-
-func (t *Atc) initRadar() (services.Service, error) {
-	rdr, err := radar.New(t.logger)
-	if err != nil {
-		return nil, err
-	}
-	t.Radar = rdr
-	return t.Radar, nil
-}
-
-func (t *Atc) initRedirecter() (services.Service, error) {
-	redirect, err := redirecter.New(t.logger)
-	if err != nil {
-		return nil, err
-	}
-	t.Redirecter = redirect
-	return t.Redirecter, nil
-}
-
-func (t *Atc) setupModuleManager() error {
-	mm := modules.NewManager(t.logger)
-	mm.RegisterModule(Server, t.initServer, modules.UserInvisibleModule)
-	mm.RegisterModule(API, t.initAPI, modules.UserInvisibleModule)
-	mm.RegisterModule(Autoscaler, t.initAutoscaler)
-	mm.RegisterModule(Deployer, t.initDeployer)
-	mm.RegisterModule(EventSink, t.initEventSink)
-	mm.RegisterModule(Forwarder, t.initForwarder)
-	mm.RegisterModule(Incident, t.initIncident)
-	mm.RegisterModule(Radar, t.initRadar)
-	mm.RegisterModule(Redirecter, t.initRedirecter)
-	mm.RegisterModule(Boundary, nil)
-	mm.RegisterModule(Consul, nil)
-	mm.RegisterModule(Nomad, nil)
-	mm.RegisterModule(All, nil)
-
-	deps := map[string][]string{
-		API:        {Server},
-		Autoscaler: {Server},
-		Boundary:   {Incident},
-		Consul:     {Forwarder, Redirecter},
-		Deployer:   {API},
-		EventSink:  {Server},
-		Forwarder:  {Server},
-		Incident:   {API},
-		Nomad:      {Autoscaler, Deployer, EventSink},
-		Radar:      {Server},
-		Redirecter: {Server},
-		All:        {Boundary, Consul, Nomad},
-	}
-	for mod, targets := range deps {
-		if err := mm.AddDependency(mod, targets...); err != nil {
-			return err
-		}
-	}
-	t.ModuleManager = mm
-
 	return nil
+}
+
+func (t *Atc) initForwarder() error {
+	forward, err := forwarder.New(t.logger.With(slog.String("module", "forwarder")), t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC)
+	if err != nil {
+		return err
+	}
+	t.Forwarder = forward
+	return nil
+}
+
+func (t *Atc) initRedirector() error {
+	forwarderEnabled := t.enabledModules[Forwarder]
+	redirect, err := redirector.New(t.logger.With(slog.String("module", "redirector")), t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC, forwarderEnabled)
+	if err != nil {
+		return err
+	}
+	t.Redirector = redirect
+	return nil
+}
+
+// resolveModules transitively resolves module dependencies
+func resolveModules(targets []string) map[string]bool {
+	deps := map[string][]string{
+		Consul:     {Forwarder, Redirector},
+		Forwarder:  {Server},
+		Redirector: {Server},
+		All:        {Consul},
+	}
+
+	enabled := make(map[string]bool)
+	var visit func(string)
+	visit = func(mod string) {
+		if enabled[mod] {
+			return
+		}
+		enabled[mod] = true
+		for _, d := range deps[mod] {
+			visit(d)
+		}
+	}
+
+	for _, t := range targets {
+		visit(t)
+	}
+	return enabled
+}
+
+func (t *Atc) UserVisibleModuleNames() []string {
+	names := slices.Clone(UserVisibleModules)
+	slices.Sort(names)
+	return names
+}
+
+func (t *Atc) DependenciesForModule(mod string) []string {
+	enabled := resolveModules([]string{mod})
+	deps := make([]string, 0, len(enabled))
+	for k := range enabled {
+		if k != mod {
+			deps = append(deps, k)
+		}
+	}
+	slices.Sort(deps)
+	return deps
 }

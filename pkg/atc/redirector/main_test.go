@@ -1,0 +1,320 @@
+package redirector
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/hashicorp/consul/api"
+)
+
+func TestRedirectorReconcile(t *testing.T) {
+	var mu sync.Mutex
+	createdOrUpdated := make([]*api.ServiceResolverConfigEntry, 0)
+	deleted := make([]string, 0)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == "GET" && r.URL.Path == "/v1/agent/self" {
+			info := map[string]interface{}{
+				"Config": map[string]interface{}{
+					"Datacenter": "dc1",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(info)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/datacenters" {
+			dcs := []string{"dc1", "dc2"}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(dcs)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/services" {
+			services := map[string][]string{
+				"consul":    {},
+				"service-a": {"atc.enabled=true"},
+				"service-b": {"atc.enabled=true"},
+				"service-c": {"atc.enabled=true"},
+				"service-d": {"some-other-tag"},
+				// service-e and service-f are completely deleted/absent from catalog
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(services)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/config/service-resolver" {
+			// List API
+			entries := []api.ConfigEntry{
+				&api.ServiceResolverConfigEntry{
+					Kind: "service-resolver",
+					Name: "service-a",
+					Meta: map[string]string{"created-by": "atc"},
+					Redirect: &api.ServiceResolverRedirect{
+						Service:    "service-a",
+						Datacenter: "dc2",
+					},
+				},
+				&api.ServiceResolverConfigEntry{
+					Kind: "service-resolver",
+					Name: "service-b",
+					Meta: map[string]string{"created-by": "atc"},
+				},
+				&api.ServiceResolverConfigEntry{
+					Kind: "service-resolver",
+					Name: "service-d",
+					Meta: map[string]string{"created-by": "atc"},
+				},
+				&api.ServiceResolverConfigEntry{
+					Kind: "service-resolver",
+					Name: "service-e",
+					Meta: map[string]string{"created-by": "atc"},
+				},
+				&api.ServiceResolverConfigEntry{
+					Kind: "service-resolver",
+					Name: "service-f",
+					Meta: map[string]string{"created-by": "atc"},
+					Redirect: &api.ServiceResolverRedirect{
+						Service:    "service-f",
+						Datacenter: "dc2",
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(entries)
+			return
+		}
+
+		if r.Method == "PUT" && r.URL.Path == "/v1/config" {
+			var entry api.ServiceResolverConfigEntry
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &entry)
+			createdOrUpdated = append(createdOrUpdated, &entry)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/v1/config/service-resolver/") {
+			name := strings.TrimPrefix(r.URL.Path, "/v1/config/service-resolver/")
+			deleted = append(deleted, name)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.Listener.Addr().String()})
+	if err != nil {
+		t.Fatalf("Failed to create consul client: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	r, err := New(logger, server.Listener.Addr().String(), "", "", false)
+	if err != nil {
+		t.Fatalf("Failed to create redirector: %v", err)
+	}
+
+	err = r.reconcile(context.Background(), client)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Assertions:
+	// service-a: updated to remove Redirect block (since it is active locally).
+	// service-b: no update or delete (active and already clean base).
+	// service-c: created as base entry (active locally).
+	// service-d: deleted (tag was removed).
+	// service-e: updated to add Redirect (completely deleted from catalog).
+	// service-f: no update or delete (deleted from catalog and already Redirect).
+
+	if len(createdOrUpdated) != 3 {
+		t.Errorf("Expected 3 config entries to be created or updated, got %d", len(createdOrUpdated))
+	} else {
+		// Sort by name
+		slices.SortFunc(createdOrUpdated, func(a, b *api.ServiceResolverConfigEntry) int {
+			return strings.Compare(a.Name, b.Name)
+		})
+
+		// service-a must be base entry (no redirect)
+		if createdOrUpdated[0].Name != "service-a" {
+			t.Errorf("Expected first updated entry to be 'service-a', got '%s'", createdOrUpdated[0].Name)
+		} else if createdOrUpdated[0].Redirect != nil && createdOrUpdated[0].Redirect.Service != "" {
+			t.Errorf("Expected service-a to have no Redirect block")
+		}
+
+		// service-c must be base entry (no redirect)
+		if createdOrUpdated[1].Name != "service-c" {
+			t.Errorf("Expected second updated entry to be 'service-c', got '%s'", createdOrUpdated[1].Name)
+		} else if createdOrUpdated[1].Redirect != nil && createdOrUpdated[1].Redirect.Service != "" {
+			t.Errorf("Expected service-c to have no Redirect block")
+		}
+
+		// service-e must have Redirect pointing to dc2
+		if createdOrUpdated[2].Name != "service-e" {
+			t.Errorf("Expected third updated entry to be 'service-e', got '%s'", createdOrUpdated[2].Name)
+		}
+		if createdOrUpdated[2].Redirect == nil {
+			t.Errorf("Expected service-e to have Redirect block")
+		} else {
+			if createdOrUpdated[2].Redirect.Service != "service-e" {
+				t.Errorf("Expected redirect service to be 'service-e', got '%s'", createdOrUpdated[2].Redirect.Service)
+			}
+			if createdOrUpdated[2].Redirect.Datacenter != "dc2" {
+				t.Errorf("Expected redirect datacenter to be 'dc2', got '%s'", createdOrUpdated[2].Redirect.Datacenter)
+			}
+		}
+	}
+
+	if len(deleted) != 1 {
+		t.Errorf("Expected 1 config entry to be deleted, got %d", len(deleted))
+	} else if deleted[0] != "service-d" {
+		t.Errorf("Expected deleted entry to be 'service-d', got '%s'", deleted[0])
+	}
+}
+
+func TestRedirectorReconcile_ForwarderEnabled(t *testing.T) {
+	var mu sync.Mutex
+	createdOrUpdated := make([]*api.ServiceResolverConfigEntry, 0)
+	deleted := make([]string, 0)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == "GET" && r.URL.Path == "/v1/agent/self" {
+			info := map[string]interface{}{
+				"Config": map[string]interface{}{
+					"Datacenter": "dc1",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(info)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/datacenters" {
+			dcs := []string{"dc1", "dc2"}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(dcs)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/services" {
+			services := map[string][]string{
+				"consul":    {},
+				"service-a": {"atc.enabled=true"},
+				"service-b": {"atc.enabled=true"},
+				"service-c": {"atc.enabled=true"},
+				"service-d": {"some-other-tag"},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(services)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/config/service-resolver" {
+			entries := []api.ConfigEntry{
+				&api.ServiceResolverConfigEntry{
+					Kind: "service-resolver",
+					Name: "service-a",
+					Meta: map[string]string{"created-by": "atc"},
+					Redirect: &api.ServiceResolverRedirect{
+						Service:    "service-a",
+						Datacenter: "dc2",
+					},
+				},
+				&api.ServiceResolverConfigEntry{
+					Kind: "service-resolver",
+					Name: "service-b",
+					Meta: map[string]string{"created-by": "atc"},
+				},
+				&api.ServiceResolverConfigEntry{
+					Kind: "service-resolver",
+					Name: "service-d",
+					Meta: map[string]string{"created-by": "atc"},
+				},
+				&api.ServiceResolverConfigEntry{
+					Kind: "service-resolver",
+					Name: "service-e",
+					Meta: map[string]string{"created-by": "atc"},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(entries)
+			return
+		}
+
+		if r.Method == "PUT" && r.URL.Path == "/v1/config" {
+			var entry api.ServiceResolverConfigEntry
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &entry)
+			createdOrUpdated = append(createdOrUpdated, &entry)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/v1/config/service-resolver/") {
+			name := strings.TrimPrefix(r.URL.Path, "/v1/config/service-resolver/")
+			deleted = append(deleted, name)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.Listener.Addr().String()})
+	if err != nil {
+		t.Fatalf("Failed to create consul client: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	r, err := New(logger, server.Listener.Addr().String(), "", "", true) // forwarderEnabled = true
+	if err != nil {
+		t.Fatalf("Failed to create redirector: %v", err)
+	}
+
+	err = r.reconcile(context.Background(), client)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// With forwarderEnabled = true:
+	// - active services (service-a, service-b, service-c) are NOT modified by redirector
+	// - deleted service (service-e) is updated to redirect
+	// - untagged active service (service-d) resolver is deleted
+	if len(createdOrUpdated) != 1 {
+		t.Errorf("Expected only 1 config entry (service-e) to be created or updated, got %d", len(createdOrUpdated))
+	} else if createdOrUpdated[0].Name != "service-e" {
+		t.Errorf("Expected updated entry to be 'service-e', got '%s'", createdOrUpdated[0].Name)
+	}
+
+	if len(deleted) != 1 {
+		t.Errorf("Expected 1 config entry to be deleted, got %d", len(deleted))
+	} else if deleted[0] != "service-d" {
+		t.Errorf("Expected deleted entry to be 'service-d', got '%s'", deleted[0])
+	}
+}
+

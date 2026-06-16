@@ -2,66 +2,121 @@ package server
 
 import (
 	"context"
+	"embed"
+	"errors"
 	"fmt"
-	"github.com/go-kit/log/level"
-	"github.com/grafana/dskit/server"
-	"github.com/grafana/dskit/services"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
 )
 
-// New constructs service from Server component.
-// servicesToWaitFor is called when server is stopping, and should return all
-// services that need to terminate before server actually stops.
-// N.B.: this function is NOT Cortex specific, please let's keep it that way.
-// Passed server should not react on signals. Early return from Run function is considered to be an error.
-func New(serv *server.Server, servicesToWaitFor func() []services.Service) services.Service {
-	serverDone := make(chan error, 1)
+//go:embed dist/*
+var frontendFS embed.FS
 
-	runFn := func(ctx context.Context) error {
-		go func() {
-			defer close(serverDone)
-			serverDone <- serv.Run()
-		}()
+type Config struct {
+	HTTPListenPort    int    `yaml:"http_listen_port"`
+	MetricsListenPort int    `yaml:"metrics_listen_port"`
+	MetricsNamespace  string `yaml:"metrics_namespace"`
+	LogFormat         string `yaml:"log_format"`
+	LogLevel          string `yaml:"log_level"`
+}
 
-		select {
-		case <-ctx.Done():
-			return nil
-		case err := <-serverDone:
+type Server struct {
+	cfg        Config
+	logger     *slog.Logger
+	Mux        *http.ServeMux
+	MetricsMux *http.ServeMux
+}
+
+func New(cfg Config, logger *slog.Logger) (*Server, error) {
+	mux := http.NewServeMux()
+	metricsMux := http.NewServeMux()
+
+	sub, err := fs.Sub(frontendFS, "dist")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create frontend sub FS: %w", err)
+	}
+
+	fileServer := http.FileServer(http.FS(sub))
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if path != "/" {
+			f, err := sub.Open(strings.TrimPrefix(path, "/"))
 			if err != nil {
-				return err
+				r.URL.Path = "/"
+			} else {
+				_ = f.Close()
 			}
-			return fmt.Errorf("server stopped unexpectedly")
 		}
+		fileServer.ServeHTTP(w, r)
+	})
+
+	return &Server{
+		cfg:        cfg,
+		logger:     logger,
+		Mux:        mux,
+		MetricsMux: metricsMux,
+	}, nil
+}
+
+func (s *Server) Run(ctx context.Context) error {
+	mainAddr := fmt.Sprintf(":%d", s.cfg.HTTPListenPort)
+	mainServer := &http.Server{
+		Addr:              mainAddr,
+		Handler:           s.Mux,
+		ReadHeaderTimeout: 3 * time.Second,
 	}
 
-	stoppingFn := func(_ error) error {
-		// wait until all modules are done, and then shutdown server.
-		for _, s := range servicesToWaitFor() {
-			_ = s.AwaitTerminated(context.Background())
-		}
-
-		// shutdown HTTP and gRPC servers (this also unblocks Run)
-		serv.Shutdown()
-
-		// if not closed yet, wait until server stops.
-		<-serverDone
-		level.Info(serv.Log).Log("msg", "server stopped")
-		return nil
+	metricsAddr := fmt.Sprintf(":%d", s.cfg.MetricsListenPort)
+	metricsServer := &http.Server{
+		Addr:              metricsAddr,
+		Handler:           s.MetricsMux,
+		ReadHeaderTimeout: 3 * time.Second,
 	}
 
-	return services.NewBasicService(nil, runFn, stoppingFn)
-}
+	errChan := make(chan error, 2)
 
-// DisableSignalHandling puts a dummy signal handler
-func DisableSignalHandling(config *server.Config) {
-	config.SignalHandler = make(ignoreSignalHandler)
-}
+	go func() {
+		s.logger.Info("HTTP server listening", slog.String("address", mainAddr))
+		if err := mainServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errChan <- fmt.Errorf("main server error: %w", err)
+		}
+	}()
 
-type ignoreSignalHandler chan struct{}
+	go func() {
+		s.logger.Info("Metrics server listening", slog.String("address", metricsAddr))
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errChan <- fmt.Errorf("metrics server error: %w", err)
+		}
+	}()
 
-func (dh ignoreSignalHandler) Loop() {
-	<-dh
-}
+	select {
+	case <-ctx.Done():
+		s.logger.Info("shutting down HTTP and Metrics servers")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-func (dh ignoreSignalHandler) Stop() {
-	close(dh)
+		var shutdownErr error
+		if err := mainServer.Shutdown(shutdownCtx); err != nil {
+			shutdownErr = fmt.Errorf("main server shutdown error: %w", err)
+		}
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			if shutdownErr != nil {
+				shutdownErr = fmt.Errorf("%v; metrics server shutdown error: %w", shutdownErr, err)
+			} else {
+				shutdownErr = fmt.Errorf("metrics server shutdown error: %w", err)
+			}
+		}
+		return shutdownErr
+	case err := <-errChan:
+		// Attempt to shut down the other running server
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = mainServer.Shutdown(shutdownCtx)
+		_ = metricsServer.Shutdown(shutdownCtx)
+		return err
+	}
 }

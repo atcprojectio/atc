@@ -30,6 +30,11 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: "homebrew-tap"
       - uses: anchore/sbom-action@v0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build Frontend
+        run: make build-frontend
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod

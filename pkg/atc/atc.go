@@ -2,64 +2,71 @@ package atc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
+	"os/signal"
+	"slices"
 	"strings"
+	"syscall"
+	"sync/atomic"
 
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
-	"github.com/grafana/dskit/flagext"
-	"github.com/grafana/dskit/modules"
-	"github.com/grafana/dskit/server"
-	"github.com/grafana/dskit/services"
-	"github.com/grafana/dskit/signals"
-	"github.com/pkg/errors"
-	"go.uber.org/atomic"
+	"golang.org/x/sync/errgroup"
 
-	"github.com/attachmentgenie/atc/pkg/atc/autoscaler"
-	"github.com/attachmentgenie/atc/pkg/atc/deployer"
-	"github.com/attachmentgenie/atc/pkg/atc/event_sink"
 	"github.com/attachmentgenie/atc/pkg/atc/forwarder"
-	"github.com/attachmentgenie/atc/pkg/atc/incident"
-	"github.com/attachmentgenie/atc/pkg/atc/radar"
-	"github.com/attachmentgenie/atc/pkg/atc/redirecter"
+	"github.com/attachmentgenie/atc/pkg/atc/redirector"
+	atc_server "github.com/attachmentgenie/atc/pkg/atc/server"
+	"github.com/hashicorp/consul/api"
 )
 
 type Config struct {
-	Name   string                 `yaml:"service"`
-	Server server.Config          `yaml:"server"`
-	Target flagext.StringSliceCSV `yaml:"target"`
+	Name        string            `yaml:"service"`
+	Server      atc_server.Config `yaml:"server"`
+	Target      []string          `yaml:"target"`
+	ConsulAddr  string            `yaml:"consul_addr"`
+	ConsulToken string            `yaml:"consul_token"`
+	ConsulDC    string            `yaml:"consul_dc"`
 }
 
 type Atc struct {
-	Cfg    Config
-	logger log.Logger
-	Server *server.Server
+	Cfg            Config
+	logger         *slog.Logger
+	coreLogger     *slog.Logger
+	Server         *atc_server.Server
+	enabledModules map[string]bool
 
-	Autoscaler *autoscaler.Autoscaler
-	Deployer   *deployer.Deployer
-	EventSink  *event_sink.EventSink
 	Forwarder  *forwarder.Forwarder
-	Incident   *incident.Incident
-	Radar      *radar.Radar
-	Redirecter *redirecter.Redirecter
-
-	// set during initialization
-	ServiceMap    map[string]services.Service
-	ModuleManager *modules.Manager
+	Redirector *redirector.Redirector
 }
 
 func New(cfg Config) (*Atc, error) {
 	logger := initLogger(cfg.Server.LogFormat, cfg.Server.LogLevel)
-	cfg.Server.Log = logger
 
 	atc := &Atc{
-		Cfg:    cfg,
-		logger: logger,
+		Cfg:            cfg,
+		logger:         logger,
+		coreLogger:     logger.With(slog.String("module", "core")),
+		enabledModules: resolveModules(cfg.Target),
 	}
 
-	if err := atc.setupModuleManager(); err != nil {
-		return nil, err
+	if atc.enabledModules[Server] {
+		if err := atc.initServer(); err != nil {
+			return nil, err
+		}
+	}
+
+	if atc.enabledModules[Forwarder] {
+		if err := atc.initForwarder(); err != nil {
+			return nil, err
+		}
+	}
+
+	if atc.enabledModules[Redirector] {
+		if err := atc.initRedirector(); err != nil {
+			return nil, err
+		}
 	}
 
 	return atc, nil
@@ -67,114 +74,256 @@ func New(cfg Config) (*Atc, error) {
 
 func (t *Atc) Run() error {
 	for _, module := range t.Cfg.Target {
-		if !t.ModuleManager.IsTargetableModule(module) {
-			return fmt.Errorf("selected target (%s) is an internal module, which is not allowed", module)
+		if !slices.Contains(UserVisibleModules, module) {
+			return fmt.Errorf("selected target (%s) is an internal module or invalid target, which is not allowed", module)
 		}
 	}
 
-	var err error
-	t.ServiceMap, err = t.ModuleManager.InitModuleServices(t.Cfg.Target...)
-	if err != nil {
-		return err
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	g, ctx := errgroup.WithContext(signalCtx)
+
+	var shutdownRequested atomic.Bool
+
+	if t.Server != nil {
+		t.Server.Mux.HandleFunc("/health", t.healthHandler(&shutdownRequested))
+		t.Server.Mux.HandleFunc("GET /services", t.servicesHandler)
 	}
 
-	// get all services, create service manager and tell it to start
-	servs := []services.Service(nil)
-	for _, s := range t.ServiceMap {
-		servs = append(servs, s)
+	if t.Server != nil {
+		g.Go(func() error {
+			return t.Server.Run(ctx)
+		})
+	}
+	if t.Forwarder != nil {
+		g.Go(func() error {
+			return t.Forwarder.Run(ctx)
+		})
+	}
+	if t.Redirector != nil {
+		g.Go(func() error {
+			return t.Redirector.Run(ctx)
+		})
 	}
 
-	sm, err := services.NewManager(servs...)
-	if err != nil {
-		return err
-	}
+	t.coreLogger.Info("Application started")
 
-	// Used to delay shutdown but return "not ready" during this delay.
-	shutdownRequested := atomic.NewBool(false)
-	t.Server.HTTP.Path("/health").Handler(t.healthHandler(sm, shutdownRequested))
-	t.Server.HTTP.Path("/services").Methods("GET").Handler(http.HandlerFunc(t.servicesHandler))
-
-	// Let's listen for events from this manager, and log them.
-	healthy := func() { level.Info(t.logger).Log("msg", "Application started") }
-	stopped := func() { level.Info(t.logger).Log("msg", "Application stopped") }
-	serviceFailed := func(service services.Service) {
-		// if any service fails, stop entire Mimir
-		sm.StopAsync()
-
-		// let's find out which module failed
-		for m, s := range t.ServiceMap {
-			if s == service {
-				if errors.Is(service.FailureCase(), modules.ErrStopProcess) {
-					level.Info(t.logger).Log("msg", "received stop signal via return error", "module", m, "err", service.FailureCase())
-				} else {
-					level.Error(t.logger).Log("msg", "module failed", "module", m, "err", service.FailureCase())
-				}
-				return
-			}
-		}
-
-		level.Error(t.logger).Log("msg", "module failed", "module", "unknown", "err", service.FailureCase())
-	}
-
-	sm.AddListener(services.NewManagerListener(healthy, stopped, serviceFailed))
-
-	handler := signals.NewHandler(t.logger)
 	go func() {
-		handler.Loop()
-
+		<-ctx.Done()
 		shutdownRequested.Store(true)
-		t.Server.HTTPServer.SetKeepAlivesEnabled(false)
-
-		sm.StopAsync()
 	}()
 
-	// Start all services. This can really only fail if some service is already
-	// in other state than New, which should not be the case.
-	err = sm.StartAsync(context.Background())
-	if err == nil {
-		// Wait until service manager stops. It can stop in two ways:
-		// 1) Signal is received and manager is stopped.
-		// 2) Any service fails.
-		err = sm.AwaitStopped(context.Background())
+	err := g.Wait()
+	if err != nil {
+		t.coreLogger.Error("Application stopped with error", slog.Any("err", err))
+	} else {
+		t.coreLogger.Info("Application stopped gracefully")
 	}
 
-	// If there is no error yet (= service manager started and then stopped without problems),
-	// but any service failed, report that failure as an error to caller.
-	if err == nil {
-		if failed := sm.ServicesByState()[services.Failed]; len(failed) > 0 {
-			for _, f := range failed {
-				if !errors.Is(f.FailureCase(), modules.ErrStopProcess) {
-					// Details were reported via failure listener before
-					err = errors.New("failed services")
-					break
-				}
-			}
-		}
-	}
 	return err
 }
 
-func (t *Atc) healthHandler(sm *services.Manager, shutdownRequested *atomic.Bool) http.HandlerFunc {
+func (t *Atc) healthHandler(shutdownRequested *atomic.Bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if shutdownRequested.Load() {
-			level.Debug(t.logger).Log("msg", "application is stopping")
+			t.coreLogger.Debug("application is stopping")
 			http.Error(w, "Application is stopping", http.StatusServiceUnavailable)
-			return
-		}
-
-		if !sm.IsHealthy() {
-			var serviceNamesStates []string
-			for name, s := range t.ServiceMap {
-				if s.State() != services.Running {
-					serviceNamesStates = append(serviceNamesStates, fmt.Sprintf("%s: %s", name, s.State()))
-				}
-			}
-
-			level.Debug(t.logger).Log("msg", "some services are not Running", "services", strings.Join(serviceNamesStates, ", "))
-			httpResponse := "Some services are not Running:\n" + strings.Join(serviceNamesStates, "\n")
-			http.Error(w, httpResponse, http.StatusServiceUnavailable)
 			return
 		}
 		fmt.Fprintf(w, "OK")
 	}
+}
+
+func (t *Atc) GetEnabledModulesTable() string {
+	return RenderServicesTable(t.enabledModules)
+}
+
+func (t *Atc) GetAtcEnabledServices(ctx context.Context) ([]string, error) {
+	client, err := api.NewClient(consulCfg(t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC))
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to consul: %w", err)
+	}
+
+	services, _, err := client.Catalog().Services((&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch consul services: %w", err)
+	}
+
+	var enabled []string
+	for svcName, tags := range services {
+		if slices.Contains(tags, "atc.enabled=true") {
+			enabled = append(enabled, svcName)
+		}
+	}
+	slices.Sort(enabled)
+	return enabled, nil
+}
+
+func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
+	client, err := api.NewClient(consulCfg(t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to connect to consul: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	services, _, err := client.Catalog().Services((&api.QueryOptions{}).WithContext(r.Context()))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to fetch services: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Fetch all service-resolver config entries to find deleted ones
+	entries, _, err := client.ConfigEntries().List("service-resolver", (&api.QueryOptions{}).WithContext(r.Context()))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to list config entries: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	existingResolverEntries := make(map[string]*api.ServiceResolverConfigEntry)
+	for _, entry := range entries {
+		if res, ok := entry.(*api.ServiceResolverConfigEntry); ok {
+			existingResolverEntries[res.Name] = res
+		}
+	}
+
+	type ServiceItem struct {
+		Name         string   `json:"name"`
+		Tags         []string `json:"tags"`
+		ResolverType string   `json:"resolver_type"`
+		Status       string   `json:"status"` // "active" or "deleted"
+	}
+
+	resultMap := make(map[string]ServiceItem)
+
+	// 1. Process active catalog services
+	for svcName, tags := range services {
+		if slices.Contains(tags, "atc.enabled=true") {
+			resType := "none"
+			if existing, exists := existingResolverEntries[svcName]; exists {
+				if len(existing.Failover) > 0 {
+					resType = "failover"
+				} else if existing.Redirect != nil && existing.Redirect.Service != "" {
+					resType = "redirect"
+				}
+			} else {
+				// Fallback if config entry does not exist yet
+				if t.enabledModules[Forwarder] {
+					resType = "failover"
+				} else if t.enabledModules[Redirector] {
+					resType = "none"
+				}
+			}
+
+			resultMap[svcName] = ServiceItem{
+				Name:         svcName,
+				Tags:         tags,
+				ResolverType: resType,
+				Status:       "active",
+			}
+		}
+	}
+
+	// 2. Process config entries to find deleted services that are being redirected
+	for _, entry := range entries {
+		if res, ok := entry.(*api.ServiceResolverConfigEntry); ok {
+			if res.Meta != nil && res.Meta["created-by"] == "atc" {
+				if _, active := resultMap[res.Name]; !active {
+					// Check if completely absent from catalog
+					if _, exists := services[res.Name]; !exists {
+						resType := "redirect"
+						if len(res.Failover) > 0 {
+							resType = "failover"
+						}
+						resultMap[res.Name] = ServiceItem{
+							Name:         res.Name,
+							Tags:         []string{"atc.enabled=true", "status:deleted"},
+							ResolverType: resType,
+							Status:       "deleted",
+						}
+					}
+				}
+			}
+		}
+	}
+
+	result := make([]ServiceItem, 0, len(resultMap))
+	for _, item := range resultMap {
+		result = append(result, item)
+	}
+
+	slices.SortFunc(result, func(a, b ServiceItem) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+func (t *Atc) PurgeServiceResolver(ctx context.Context, name string) error {
+	client, err := api.NewClient(consulCfg(t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC))
+	if err != nil {
+		return fmt.Errorf("failed to connect to consul: %w", err)
+	}
+
+	entry, _, err := client.ConfigEntries().Get("service-resolver", name, nil)
+	if err != nil {
+		return fmt.Errorf("failed to fetch config entry: %w", err)
+	}
+
+	resolver, ok := entry.(*api.ServiceResolverConfigEntry)
+	if !ok || resolver.Meta == nil || resolver.Meta["created-by"] != "atc" {
+		return fmt.Errorf("entry was not created by ATC")
+	}
+
+	_, err = client.ConfigEntries().Delete("service-resolver", name, (&api.WriteOptions{}).WithContext(ctx))
+	if err != nil {
+		return fmt.Errorf("failed to delete config entry: %w", err)
+	}
+
+	return nil
+}
+
+func (t *Atc) apiServicesDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	svcName := r.URL.Query().Get("name")
+	if svcName == "" {
+		http.Error(w, "Missing 'name' query parameter", http.StatusBadRequest)
+		return
+	}
+
+	err := t.PurgeServiceResolver(r.Context(), svcName)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if strings.Contains(err.Error(), "not created by ATC") {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func consulCfg(addr, token, dc string) *api.Config {
+	cfg := api.DefaultConfig()
+	if addr != "" {
+		cfg.Address = addr
+	}
+	if token != "" {
+		cfg.Token = token
+	}
+	if dc != "" {
+		cfg.Datacenter = dc
+	}
+	return cfg
 }

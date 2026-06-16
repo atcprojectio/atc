@@ -3,7 +3,7 @@ package atc
 import (
 	"fmt"
 	"net/http"
-	"sort"
+	"slices"
 
 	"github.com/jedib0t/go-pretty/v6/table"
 )
@@ -15,34 +15,29 @@ func OkHandler() http.HandlerFunc {
 }
 
 func (t *Atc) servicesHandler(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(200)
 	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprint(w, RenderServicesTable(t.enabledModules))
+}
 
-	svcNames := make([]string, 0, len(t.ServiceMap))
-	for name := range t.ServiceMap {
-		svcNames = append(svcNames, name)
+func RenderServicesTable(enabledModules map[string]bool) string {
+	svcNames := make([]string, 0, len(enabledModules))
+	for name, enabled := range enabledModules {
+		if enabled {
+			svcNames = append(svcNames, name)
+		}
 	}
-
-	sort.Strings(svcNames)
+	slices.Sort(svcNames)
 
 	x := table.NewWriter()
-	x.SetOutputMirror(w)
-	x.AppendHeader(table.Row{"service name", "status", "failure case"})
+	x.AppendHeader(table.Row{"service name", "status"})
 
 	for _, name := range svcNames {
-		service := t.ServiceMap[name]
-
-		var e string
-
-		if err := service.FailureCase(); err != nil {
-			e = err.Error()
-		}
-
 		x.AppendRows([]table.Row{
-			{name, service.State(), e},
+			{name, "running"},
 		})
 	}
 
 	x.AppendSeparator()
-	x.Render()
+	return x.Render()
 }

@@ -10,16 +10,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build Frontend
+        run: make build-frontend
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.5
+          version: v2.12.2
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build Frontend
+        run: make build-frontend
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -33,6 +43,11 @@ jobs:
       DOCKER_CLI_EXPERIMENTAL: "enabled"
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build Frontend
+        run: make build-frontend
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod

@@ -3,9 +3,10 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	"github.com/attachmentgenie/atc/pkg/atc"
 )
@@ -15,14 +16,14 @@ var modulesCmd = &cobra.Command{
 	Short: "List available values that can be used as target.",
 	Long:  "List available values that can be used as target.",
 	Run: func(cmd *cobra.Command, args []string) {
+		logLevel := viper.GetString("log_level")
 		cfg := atc.Config{}
-		_ = cfg.Server.LogLevel.Set(logLevel)
+		cfg.Server.LogLevel = logLevel
 		t, _ := atc.New(cfg)
-		allDeps := t.ModuleManager.DependenciesForModule(atc.All)
+		allDeps := t.DependenciesForModule(atc.All)
 
-		for _, m := range t.ModuleManager.UserVisibleModuleNames() {
-			ix := sort.SearchStrings(allDeps, m)
-			included := ix < len(allDeps) && allDeps[ix] == m
+		for _, m := range t.UserVisibleModuleNames() {
+			included := slices.Contains(allDeps, m)
 
 			if included {
 				fmt.Fprintln(os.Stdout, m, "*")
