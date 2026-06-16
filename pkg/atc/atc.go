@@ -10,14 +10,16 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
-	"syscall"
 	"sync/atomic"
+	"syscall"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/attachmentgenie/atc/pkg/atc/forwarder"
 	"github.com/attachmentgenie/atc/pkg/atc/redirector"
 	atc_server "github.com/attachmentgenie/atc/pkg/atc/server"
+	"github.com/attachmentgenie/atc/pkg/atc/telemetry"
 	"github.com/hashicorp/consul/api"
 )
 
@@ -36,6 +38,7 @@ type Atc struct {
 	coreLogger     *slog.Logger
 	Server         *atc_server.Server
 	enabledModules map[string]bool
+	otelShutdown   func(context.Context) error
 
 	Forwarder  *forwarder.Forwarder
 	Redirector *redirector.Redirector
@@ -44,11 +47,17 @@ type Atc struct {
 func New(cfg Config) (*Atc, error) {
 	logger := initLogger(cfg.Server.LogFormat, cfg.Server.LogLevel)
 
+	otelShutdown, err := telemetry.Init(context.Background(), "atc")
+	if err != nil {
+		logger.Warn("Failed to initialize OpenTelemetry SDK", slog.Any("error", err))
+	}
+
 	atc := &Atc{
 		Cfg:            cfg,
 		logger:         logger,
 		coreLogger:     logger.With(slog.String("module", "core")),
 		enabledModules: resolveModules(cfg.Target),
+		otelShutdown:   otelShutdown,
 	}
 
 	if atc.enabledModules[Server] {
@@ -84,6 +93,16 @@ func (t *Atc) Run() error {
 
 	g, ctx := errgroup.WithContext(signalCtx)
 
+	if t.otelShutdown != nil {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := t.otelShutdown(shutdownCtx); err != nil {
+				t.coreLogger.ErrorContext(ctx, "OpenTelemetry SDK shutdown failed", slog.Any("error", err))
+			}
+		}()
+	}
+
 	var shutdownRequested atomic.Bool
 
 	if t.Server != nil {
@@ -107,7 +126,7 @@ func (t *Atc) Run() error {
 		})
 	}
 
-	t.coreLogger.Info("Application started")
+	t.coreLogger.InfoContext(ctx, "Application started")
 
 	go func() {
 		<-ctx.Done()
@@ -116,9 +135,9 @@ func (t *Atc) Run() error {
 
 	err := g.Wait()
 	if err != nil {
-		t.coreLogger.Error("Application stopped with error", slog.Any("err", err))
+		t.coreLogger.ErrorContext(ctx, "Application stopped with error", slog.Any("err", err))
 	} else {
-		t.coreLogger.Info("Application stopped gracefully")
+		t.coreLogger.InfoContext(ctx, "Application stopped gracefully")
 	}
 
 	return err

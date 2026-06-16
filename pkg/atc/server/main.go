@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 //go:embed dist/*
@@ -66,7 +68,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mainAddr := fmt.Sprintf(":%d", s.cfg.HTTPListenPort)
 	mainServer := &http.Server{
 		Addr:              mainAddr,
-		Handler:           s.Mux,
+		Handler:           otelhttp.NewHandler(s.Mux, "atc-server"),
 		ReadHeaderTimeout: 3 * time.Second,
 	}
 
@@ -80,14 +82,14 @@ func (s *Server) Run(ctx context.Context) error {
 	errChan := make(chan error, 2)
 
 	go func() {
-		s.logger.Info("HTTP server listening", slog.String("address", mainAddr))
+		s.logger.InfoContext(ctx, "HTTP server listening", slog.String("address", mainAddr))
 		if err := mainServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- fmt.Errorf("main server error: %w", err)
 		}
 	}()
 
 	go func() {
-		s.logger.Info("Metrics server listening", slog.String("address", metricsAddr))
+		s.logger.InfoContext(ctx, "Metrics server listening", slog.String("address", metricsAddr))
 		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- fmt.Errorf("metrics server error: %w", err)
 		}
@@ -95,7 +97,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		s.logger.Info("shutting down HTTP and Metrics servers")
+		s.logger.InfoContext(ctx, "shutting down HTTP and Metrics servers")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 

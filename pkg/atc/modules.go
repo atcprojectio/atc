@@ -4,15 +4,11 @@ import (
 	"log/slog"
 	"slices"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/collectors"
-	promversion "github.com/prometheus/client_golang/prometheus/collectors/version"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-
 	"github.com/attachmentgenie/atc/pkg/atc/forwarder"
 	mcp_server "github.com/attachmentgenie/atc/pkg/atc/mcp"
 	"github.com/attachmentgenie/atc/pkg/atc/redirector"
 	atc_server "github.com/attachmentgenie/atc/pkg/atc/server"
+	"github.com/attachmentgenie/atc/pkg/atc/telemetry"
 )
 
 const (
@@ -36,11 +32,10 @@ func (t *Atc) initServer() error {
 		return err
 	}
 
-	reg := prometheus.DefaultRegisterer
-	reg.Unregister(collectors.NewGoCollector())
-	_ = reg.Register(promversion.NewCollector(t.Cfg.Server.MetricsNamespace))
+	if telemetry.GlobalPrometheusHandler != nil {
+		serv.MetricsMux.Handle("/metrics", telemetry.GlobalPrometheusHandler)
+	}
 
-	serv.MetricsMux.Handle("/metrics", promhttp.Handler())
 	serv.Mux.HandleFunc("/ready", OkHandler())
 	serv.Mux.HandleFunc("GET /api/services", t.apiServicesHandler)
 	serv.Mux.HandleFunc("DELETE /api/services", t.apiServicesDeleteHandler)

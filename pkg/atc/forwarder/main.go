@@ -10,6 +10,23 @@ import (
 	"github.com/attachmentgenie/atc/pkg/atc/watcher"
 	"github.com/hashicorp/consul/api"
 	"golang.org/x/sync/errgroup"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+)
+
+var (
+	tracer = otel.Tracer("atc/forwarder")
+	meter  = otel.Meter("atc/forwarder")
+
+	reconcileCounter, _ = meter.Int64Counter(
+		"atc_forwarder_reconcile_runs_total",
+		metric.WithDescription("Total number of forwarder reconciliation runs"),
+	)
+	reconcileDuration, _ = meter.Float64Histogram(
+		"atc_forwarder_reconcile_duration_seconds",
+		metric.WithDescription("Duration of forwarder reconciliation runs in seconds"),
+	)
 )
 
 type Forwarder struct {
@@ -46,9 +63,9 @@ func (f *Forwarder) Run(ctx context.Context) error {
 	})
 
 	g.Go(func() error {
-		f.logger.Info("Starting initial forwarder catalog reconciliation")
+		f.logger.InfoContext(ctx, "Starting initial forwarder catalog reconciliation")
 		if err := f.reconcile(ctx, client); err != nil {
-			f.logger.Error("Initial reconciliation failed", slog.Any("error", err))
+			f.logger.ErrorContext(ctx, "Initial reconciliation failed", slog.Any("error", err))
 		}
 
 		for {
@@ -59,9 +76,9 @@ func (f *Forwarder) Run(ctx context.Context) error {
 				if !ok {
 					return nil
 				}
-				f.logger.Info("Received watcher event, running reconciliation", slog.String("event", msg))
+				f.logger.InfoContext(ctx, "Received watcher event, running reconciliation", slog.String("event", msg))
 				if err := f.reconcile(ctx, client); err != nil {
-					f.logger.Error("Reconciliation failed", slog.Any("error", err))
+					f.logger.ErrorContext(ctx, "Reconciliation failed", slog.Any("error", err))
 				}
 			}
 		}
@@ -70,7 +87,26 @@ func (f *Forwarder) Run(ctx context.Context) error {
 	return g.Wait()
 }
 
-func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) error {
+func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err error) {
+	ctx, span := tracer.Start(ctx, "reconcile")
+	defer span.End()
+
+	startTime := time.Now()
+	defer func() {
+		duration := time.Since(startTime).Seconds()
+		status := "success"
+		if err != nil {
+			status = "failure"
+			span.RecordError(err)
+		}
+		reconcileCounter.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("status", status),
+		))
+		reconcileDuration.Record(ctx, duration, metric.WithAttributes(
+			attribute.String("status", status),
+		))
+	}()
+
 	services, _, err := client.Catalog().Services((&api.QueryOptions{}).WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("failed to fetch consul services: %w", err)
@@ -116,7 +152,7 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) error {
 			}
 
 			if needsCreateOrUpdate {
-				f.logger.Info("Creating/Updating failover service-resolver for active service", slog.String("service", svcName), slog.String("datacenter", targetDC))
+				f.logger.InfoContext(ctx, "Creating/Updating failover service-resolver for active service", slog.String("service", svcName), slog.String("datacenter", targetDC))
 				entry := &api.ServiceResolverConfigEntry{
 					Kind: "service-resolver",
 					Name: svcName,
@@ -135,9 +171,9 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) error {
 						},
 					},
 				}
-				_, _, err := client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+				_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
 				if err != nil {
-					f.logger.Error("Failed to set failover service-resolver", slog.String("service", svcName), slog.Any("error", err))
+					f.logger.ErrorContext(ctx, "Failed to set failover service-resolver", slog.String("service", svcName), slog.Any("error", err))
 				}
 			}
 		} else {
@@ -145,10 +181,10 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) error {
 			// If we created a config entry, we must delete it.
 			if existing, exists := existingResolverEntries[svcName]; exists {
 				if existing.Meta != nil && existing.Meta["created-by"] == "atc" {
-					f.logger.Info("Deleting service-resolver because atc.enabled tag was removed", slog.String("service", svcName))
-					_, err := client.ConfigEntries().Delete("service-resolver", svcName, (&api.WriteOptions{}).WithContext(ctx))
+					f.logger.InfoContext(ctx, "Deleting service-resolver because atc.enabled tag was removed", slog.String("service", svcName))
+					_, err = client.ConfigEntries().Delete("service-resolver", svcName, (&api.WriteOptions{}).WithContext(ctx))
 					if err != nil {
-						f.logger.Error("Failed to delete service-resolver", slog.String("service", svcName), slog.Any("error", err))
+						f.logger.ErrorContext(ctx, "Failed to delete service-resolver", slog.String("service", svcName), slog.Any("error", err))
 					}
 				}
 			}
