@@ -27,10 +27,13 @@ test:
 	gotestsum --format testname
 qa: lint test
 run: ## Run binary.
-	./${APP-BIN} server
+	OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./${APP-BIN} server
 fresh: build run
 consul-up:
-	docker run -d --rm --name consul-dev -p 8500:8500 -p 8600:8600/udp hashicorp/consul:latest agent -dev -client=0.0.0.0
+	docker compose up -d consul
+
+obs-up:
+	docker compose up -d
 
 consul-register-test:
 	curl --request PUT \
@@ -41,6 +44,9 @@ consul-deregister-test:
 		http://localhost:8500/v1/agent/service/deregister/test-service
 
 consul-down:
-	docker stop consul-dev || true
+	docker compose stop consul || true
+
+obs-down:
+	docker compose down
 
 
