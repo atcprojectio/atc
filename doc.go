@@ -24,7 +24,7 @@ HTTP Endpoints:
 ATC server hosts two separate HTTP port listeners:
 	- Main Port (default :8088): Serves the React frontend dashboard at `/`, exposes /ready,
 	  /services, JSON API service list (/api/services), and the MCP server interface.
-	- Metrics Port (default :8089): Exposes standard Prometheus /metrics scrapes.
+	- Metrics Port (default :8089): Exposes OpenTelemetry metrics in Prometheus format at `/metrics`.
 
 API & MCP Integration:
 

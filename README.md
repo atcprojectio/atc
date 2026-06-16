@@ -14,10 +14,11 @@ Originally based on a heavy dependency kit, ATC has been modernised to run nativ
 - **Consul Catalog Failover**: Automatically monitors Consul catalog changes and registers Prepared Queries (`atc-<service-name>`) with geo-failover to the nearest 2 datacenters for tagged services.
 - **Embedded React Dashboard**: Stunning glassmorphic web dashboard served at `/` that displays tracked services, their prepared queries, active tags, and failover status.
 - **Native Concurrency**: Powered by Go standard library `context`, `sync`, and `golang.org/x/sync/errgroup` for safe, coordinated background execution.
-- **log/slog Structured Logging**: Built-in structured, level-filtered logging using standard Go `"log/slog"`.
-- **Dual HTTP Ports**: Isolates application API endpoints from Prometheus metrics for production security:
+- **OpenTelemetry Integration**: Full support for OpenTelemetry Traces, Metrics, and Logs. Traces and logs are automatically correlated and exported via OTLP, and metrics are exposed via OTLP and a Prometheus bridge.
+- **log/slog Structured Logging**: Multiplexed structured, level-filtered logging using standard Go `"log/slog"` that outputs to console/Stderr and propagates context to OpenTelemetry.
+- **Dual HTTP Ports**: Isolates application API endpoints from metrics for production security:
   - **Main HTTP Port** (default `:8088`): Serves the React dashboard at `/`, exposes `/ready`, `/services`, `/api/services`, and the MCP interface.
-  - **Metrics HTTP Port** (default `:8089`): Serves standard Prometheus format scrapes at `/metrics`.
+  - **Metrics HTTP Port** (default `:8089`): Serves OpenTelemetry metrics in Prometheus format at `/metrics`.
 - **Model Context Protocol (MCP) Server**: Hosts a native MCP server over Streamable HTTP transport at `/mcp` to expose system state directly to LLM agents and AI clients.
 
 > [!IMPORTANT]
@@ -59,12 +60,19 @@ Start the ATC background watcher process:
 ### Key Flags
 
 - `--port` (int): Port to expose main service endpoints on (default: `8088`).
-- `--metrics_port` (int): Port to expose Prometheus metrics on (default: `8089`).
+- `--metrics_port` (int): Port to expose Prometheus-formatted metrics on (default: `8089`).
 - `--log_level` (string): Only log messages with this severity or above (`debug`, `info`, `warn`, `error`) (default: `info`).
 - `--target` (strings): Comma-separated list of components to run (`consul`, `forwarder`, `redirector`, `server`, `all`) (default: `all`).
 - `--consul_addr` (string): Consul HTTP endpoint address.
 - `--consul_token` (string): Consul ACL token.
 - `--consul_dc` (string): Consul target datacenter.
+
+### Environment Variables
+
+OpenTelemetry exporters can be configured using standard OpenTelemetry environment variables:
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: Target OTel collector endpoint (default: `http://localhost:4318` via HTTP).
+- `OTEL_SERVICE_NAME`: The name of the service (default: `atc`).
+- `OTEL_SDK_DISABLED`: Set to `true` to completely disable telemetry collection.
 
 ---
 
@@ -80,7 +88,7 @@ Start the ATC background watcher process:
 
 ### Metrics API (Port 8089)
 
-- `/metrics` (GET): Standard Prometheus metric scrapes.
+- `/metrics` (GET): OpenTelemetry metrics in Prometheus format.
 
 ---
 
