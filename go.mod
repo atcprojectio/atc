@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/hashicorp/consul/api v1.34.3
-	github.com/jedib0t/go-pretty/v6 v6.8.0
+	github.com/jedib0t/go-pretty/v6 v6.8.1
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/common v0.68.1
