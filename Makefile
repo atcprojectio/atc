@@ -27,7 +27,7 @@ test:
 	gotestsum --format testname
 qa: lint test
 run: ## Run binary.
-	OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./${APP-BIN} server
+	OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./${APP-BIN} server --config deploy/observability/strategies.yaml
 fresh: build run
 consul-up:
 	docker compose up -d consul
@@ -37,7 +37,7 @@ obs-up:
 
 consul-register-test:
 	curl --request PUT \
-		--data '{"ID": "test-service", "Name": "test-service", "Tags": ["atc.enabled=true", "primary"], "Address": "127.0.0.1", "Port": 8080}' \
+		--data '{"ID": "test-service", "Name": "test-service", "Tags": ["atc.enabled=true", "primary", "atc.failover=multi-region-failover", "atc.redirect=geo-redirect"], "Address": "127.0.0.1", "Port": 8080}' \
 		http://localhost:8500/v1/agent/service/register
 consul-deregister-test:
 	curl --request PUT \

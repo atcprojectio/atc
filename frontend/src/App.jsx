@@ -217,21 +217,54 @@ function App() {
                       </span>
                     </div>
 
+                    {svc.resolver_type === 'failover' && svc.failover_strategy && (
+                      <div className="detail-item">
+                        <span className="detail-label">Failover Strategy</span>
+                        <span className="strategy-badge failover-strategy">
+                          {svc.failover_strategy}
+                        </span>
+                      </div>
+                    )}
+
+                    {svc.resolver_type === 'redirect' && svc.redirect_strategy && (
+                      <div className="detail-item">
+                        <span className="detail-label">Redirect Strategy</span>
+                        <span className="strategy-badge redirect-strategy">
+                          {svc.redirect_strategy}
+                        </span>
+                      </div>
+                    )}
+
                     <div className="failover-visualization">
                       {svc.resolver_type === 'redirect' ? (
                         <>
-                          <div className="failover-node current">Local DC</div>
+                          <div className="failover-node current">Local</div>
                           <div className="failover-arrow">➔</div>
-                          <div className="failover-node target redirect-node">Remote DC</div>
+                          <div className="failover-node target redirect-node">
+                            {svc.redirect_target ? `${svc.redirect_target.service} (${svc.redirect_target.datacenter})` : 'Remote DC'}
+                          </div>
+                        </>
+                      ) : svc.resolver_type === 'failover' ? (
+                        <>
+                          <div className="failover-node current">Local</div>
+                          {svc.failover_targets && svc.failover_targets.length > 0 ? (
+                            svc.failover_targets.map((target, idx) => (
+                              <React.Fragment key={idx}>
+                                <div className="failover-arrow">➔</div>
+                                <div className="failover-node target">
+                                  {target.service} ({target.datacenter})
+                                </div>
+                              </React.Fragment>
+                            ))
+                          ) : (
+                            <>
+                              <div className="failover-arrow">➔</div>
+                              <div className="failover-node target">Remote DC</div>
+                            </>
+                          )}
                         </>
                       ) : (
-                        <>
-                          <div className="failover-node current">Local DC</div>
-                          <div className="failover-arrow">➔</div>
-                          <div className="failover-node target">Nearest DC 1</div>
-                          <div className="failover-arrow">➔</div>
-                          <div className="failover-node target">Nearest DC 2</div>
-                        </>
+                        <div className="failover-node current">Local (Standalone)</div>
                       )}
                     </div>
 

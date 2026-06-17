@@ -118,7 +118,7 @@ func TestForwarderReconcile(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	f, err := New(logger, server.Listener.Addr().String(), "", "")
+	f, err := New(logger, server.Listener.Addr().String(), "", "", nil)
 	if err != nil {
 		t.Fatalf("Failed to create forwarder: %v", err)
 	}
@@ -171,3 +171,124 @@ func TestForwarderReconcile(t *testing.T) {
 		t.Errorf("Expected deleted entry to be 'service-d', got '%s'", deleted[0])
 	}
 }
+
+func TestForwarderReconcile_WithStrategy(t *testing.T) {
+	var mu sync.Mutex
+	createdOrUpdated := make([]*api.ServiceResolverConfigEntry, 0)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == "GET" && r.URL.Path == "/v1/agent/self" {
+			info := map[string]interface{}{
+				"Config": map[string]interface{}{
+					"Datacenter": "dc1",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(info)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/datacenters" {
+			dcs := []string{"dc1", "dc2"}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(dcs)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/services" {
+			services := map[string][]string{
+				"service-a": {"atc.enabled=true", "atc.failover=custom-strategy"},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(services)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/config/service-resolver" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]api.ConfigEntry{})
+			return
+		}
+
+		if r.Method == "PUT" && r.URL.Path == "/v1/config" {
+			var entry api.ServiceResolverConfigEntry
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &entry)
+			createdOrUpdated = append(createdOrUpdated, &entry)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.Listener.Addr().String()})
+	if err != nil {
+		t.Fatalf("Failed to create consul client: %v", err)
+	}
+
+	strategies := map[string]FailoverStrategy{
+		"custom-strategy": {
+			ConnectTimeout: "12s",
+			Targets: []FailoverTarget{
+				{
+					Service:    "fallback-svc",
+					Datacenter: "dc3",
+				},
+			},
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	f, err := New(logger, server.Listener.Addr().String(), "", "", strategies)
+	if err != nil {
+		t.Fatalf("Failed to create forwarder: %v", err)
+	}
+
+	err = f.reconcile(context.Background(), client)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(createdOrUpdated) != 1 {
+		t.Fatalf("Expected 1 config entry to be updated, got %d", len(createdOrUpdated))
+	}
+
+	entry := createdOrUpdated[0]
+	if entry.Name != "service-a" {
+		t.Errorf("Expected entry name 'service-a', got '%s'", entry.Name)
+	}
+
+	if entry.ConnectTimeout != 12*time.Second {
+		t.Errorf("Expected ConnectTimeout 12s, got %v", entry.ConnectTimeout)
+	}
+
+	if entry.Meta["failover-strategy"] != "custom-strategy" {
+		t.Errorf("Expected failover-strategy metadata 'custom-strategy', got '%s'", entry.Meta["failover-strategy"])
+	}
+
+	if entry.Meta["redirect-strategy"] != "" {
+		t.Errorf("Expected redirect-strategy metadata to be empty, got '%s'", entry.Meta["redirect-strategy"])
+	}
+
+	fo, ok := entry.Failover["*"]
+	if !ok {
+		t.Fatalf("Expected Failover map for '*' to be present")
+	}
+
+	if len(fo.Targets) != 1 {
+		t.Fatalf("Expected 1 target, got %d", len(fo.Targets))
+	}
+
+	if fo.Targets[0].Service != "fallback-svc" || fo.Targets[0].Datacenter != "dc3" {
+		t.Errorf("Expected target fallback-svc in dc3, got %s in %s", fo.Targets[0].Service, fo.Targets[0].Datacenter)
+	}
+}
+

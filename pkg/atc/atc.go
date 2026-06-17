@@ -23,13 +23,19 @@ import (
 	"github.com/hashicorp/consul/api"
 )
 
+type StrategiesConfig struct {
+	Failover map[string]forwarder.FailoverStrategy `yaml:"failover" json:"failover" mapstructure:"failover"`
+	Redirect map[string]redirector.RedirectStrategy `yaml:"redirect" json:"redirect" mapstructure:"redirect"`
+}
+
 type Config struct {
-	Name        string            `yaml:"service"`
-	Server      atc_server.Config `yaml:"server"`
-	Target      []string          `yaml:"target"`
-	ConsulAddr  string            `yaml:"consul_addr"`
-	ConsulToken string            `yaml:"consul_token"`
-	ConsulDC    string            `yaml:"consul_dc"`
+	Name        string            `yaml:"service" mapstructure:"service"`
+	Server      atc_server.Config `yaml:"server" mapstructure:"server"`
+	Target      []string          `yaml:"target" mapstructure:"target"`
+	ConsulAddr  string            `yaml:"consul_addr" mapstructure:"consul_addr"`
+	ConsulToken string            `yaml:"consul_token" mapstructure:"consul_token"`
+	ConsulDC    string            `yaml:"consul_dc" mapstructure:"consul_dc"`
+	Strategies  StrategiesConfig  `yaml:"strategies" json:"strategies" mapstructure:"strategies"`
 }
 
 type Atc struct {
@@ -206,11 +212,20 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	type TargetItem struct {
+		Service    string `json:"service"`
+		Datacenter string `json:"datacenter"`
+	}
+
 	type ServiceItem struct {
-		Name         string   `json:"name"`
-		Tags         []string `json:"tags"`
-		ResolverType string   `json:"resolver_type"`
-		Status       string   `json:"status"` // "active" or "deleted"
+		Name             string       `json:"name"`
+		Tags             []string     `json:"tags"`
+		ResolverType     string       `json:"resolver_type"`
+		Status           string       `json:"status"` // "active" or "deleted"
+		FailoverStrategy string       `json:"failover_strategy"`
+		RedirectStrategy string       `json:"redirect_strategy"`
+		FailoverTargets  []TargetItem `json:"failover_targets,omitempty"`
+		RedirectTarget   *TargetItem  `json:"redirect_target,omitempty"`
 	}
 
 	resultMap := make(map[string]ServiceItem)
@@ -219,11 +234,40 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 	for svcName, tags := range services {
 		if slices.Contains(tags, "atc.enabled=true") {
 			resType := "none"
+			failoverStrategy := getStrategyFromTags(tags, "atc.failover=")
+			redirectStrategy := getStrategyFromTags(tags, "atc.redirect=")
+			var failoverTargets []TargetItem
+			var redirectTarget *TargetItem
+
 			if existing, exists := existingResolverEntries[svcName]; exists {
 				if len(existing.Failover) > 0 {
 					resType = "failover"
 				} else if existing.Redirect != nil && existing.Redirect.Service != "" {
 					resType = "redirect"
+				}
+				if existing.Meta != nil {
+					if failoverStrategy == "" {
+						failoverStrategy = existing.Meta["failover-strategy"]
+					}
+					if redirectStrategy == "" {
+						redirectStrategy = existing.Meta["redirect-strategy"]
+					}
+				}
+				if existing.Failover != nil {
+					if fo, ok := existing.Failover["*"]; ok {
+						for _, target := range fo.Targets {
+							failoverTargets = append(failoverTargets, TargetItem{
+								Service:    target.Service,
+								Datacenter: target.Datacenter,
+							})
+						}
+					}
+				}
+				if existing.Redirect != nil {
+					redirectTarget = &TargetItem{
+						Service:    existing.Redirect.Service,
+						Datacenter: existing.Redirect.Datacenter,
+					}
 				}
 			} else {
 				// Fallback if config entry does not exist yet
@@ -235,10 +279,14 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			resultMap[svcName] = ServiceItem{
-				Name:         svcName,
-				Tags:         tags,
-				ResolverType: resType,
-				Status:       "active",
+				Name:             svcName,
+				Tags:             tags,
+				ResolverType:     resType,
+				Status:           "active",
+				FailoverStrategy: failoverStrategy,
+				RedirectStrategy: redirectStrategy,
+				FailoverTargets:  failoverTargets,
+				RedirectTarget:   redirectTarget,
 			}
 		}
 	}
@@ -254,11 +302,53 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 						if len(res.Failover) > 0 {
 							resType = "failover"
 						}
+						failoverStrategy := res.Meta["failover-strategy"]
+						if failoverStrategy == "" {
+							if t.Forwarder != nil {
+								failoverStrategy, _ = t.Forwarder.GetCachedStrategies(res.Name)
+							}
+							if failoverStrategy == "" && t.Redirector != nil {
+								failoverStrategy, _ = t.Redirector.GetCachedStrategies(res.Name)
+							}
+						}
+						redirectStrategy := res.Meta["redirect-strategy"]
+						if redirectStrategy == "" {
+							if t.Redirector != nil {
+								_, redirectStrategy = t.Redirector.GetCachedStrategies(res.Name)
+							}
+							if redirectStrategy == "" && t.Forwarder != nil {
+								_, redirectStrategy = t.Forwarder.GetCachedStrategies(res.Name)
+							}
+						}
+						var failoverTargets []TargetItem
+						var redirectTarget *TargetItem
+
+						if res.Failover != nil {
+							if fo, ok := res.Failover["*"]; ok {
+								for _, target := range fo.Targets {
+									failoverTargets = append(failoverTargets, TargetItem{
+										Service:    target.Service,
+										Datacenter: target.Datacenter,
+									})
+								}
+							}
+						}
+						if res.Redirect != nil {
+							redirectTarget = &TargetItem{
+								Service:    res.Redirect.Service,
+								Datacenter: res.Redirect.Datacenter,
+							}
+						}
+
 						resultMap[res.Name] = ServiceItem{
-							Name:         res.Name,
-							Tags:         []string{"atc.enabled=true", "status:deleted"},
-							ResolverType: resType,
-							Status:       "deleted",
+							Name:             res.Name,
+							Tags:             []string{"atc.enabled=true", "status:deleted"},
+							ResolverType:     resType,
+							Status:           "deleted",
+							FailoverStrategy: failoverStrategy,
+							RedirectStrategy: redirectStrategy,
+							FailoverTargets:  failoverTargets,
+							RedirectTarget:   redirectTarget,
 						}
 					}
 				}
@@ -345,4 +435,16 @@ func consulCfg(addr, token, dc string) *api.Config {
 		cfg.Datacenter = dc
 	}
 	return cfg
+}
+
+func getStrategyFromTags(tags []string, prefix string) string {
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, prefix) {
+			parts := strings.SplitN(tag, "=", 2)
+			if len(parts) == 2 {
+				return parts[1]
+			}
+		}
+	}
+	return ""
 }

@@ -18,11 +18,11 @@ import (
 var frontendFS embed.FS
 
 type Config struct {
-	HTTPListenPort    int    `yaml:"http_listen_port"`
-	MetricsListenPort int    `yaml:"metrics_listen_port"`
-	MetricsNamespace  string `yaml:"metrics_namespace"`
-	LogFormat         string `yaml:"log_format"`
-	LogLevel          string `yaml:"log_level"`
+	HTTPListenPort    int    `yaml:"http_listen_port" mapstructure:"http_listen_port"`
+	MetricsListenPort int    `yaml:"metrics_listen_port" mapstructure:"metrics_listen_port"`
+	MetricsNamespace  string `yaml:"metrics_namespace" mapstructure:"metrics_namespace"`
+	LogFormat         string `yaml:"log_format" mapstructure:"log_format"`
+	LogLevel          string `yaml:"log_level" mapstructure:"log_level"`
 }
 
 type Server struct {

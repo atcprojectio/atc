@@ -1,0 +1,18 @@
+strategies:
+  failover:
+    standard-failover:
+      connect_timeout: "10s"
+      targets:
+        - datacenter: "dc2"
+    multi-region-failover:
+      connect_timeout: "5s"
+      targets:
+        - datacenter: "dc2"
+        - datacenter: "dc3"
+          service: "fallback-service"
+  redirect:
+    standard-redirect:
+      datacenter: "dc2"
+    geo-redirect:
+      service: "geo-fallback"
+      datacenter: "dc3"

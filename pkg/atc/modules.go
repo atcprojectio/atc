@@ -46,7 +46,7 @@ func (t *Atc) initServer() error {
 }
 
 func (t *Atc) initForwarder() error {
-	forward, err := forwarder.New(t.logger.With(slog.String("module", "forwarder")), t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC)
+	forward, err := forwarder.New(t.logger.With(slog.String("module", "forwarder")), t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC, t.Cfg.Strategies.Failover)
 	if err != nil {
 		return err
 	}
@@ -56,7 +56,7 @@ func (t *Atc) initForwarder() error {
 
 func (t *Atc) initRedirector() error {
 	forwarderEnabled := t.enabledModules[Forwarder]
-	redirect, err := redirector.New(t.logger.With(slog.String("module", "redirector")), t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC, forwarderEnabled)
+	redirect, err := redirector.New(t.logger.With(slog.String("module", "redirector")), t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC, forwarderEnabled, t.Cfg.Strategies.Redirect)
 	if err != nil {
 		return err
 	}

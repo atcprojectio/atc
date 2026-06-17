@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/attachmentgenie/atc/pkg/atc/watcher"
@@ -29,24 +31,52 @@ var (
 	)
 )
 
-type Redirector struct {
-	logger           *slog.Logger
-	consulAddr       string
-	consulToken      string
-	consulDC         string
-	watcher          *watcher.ConsulWatcher
-	forwarderEnabled bool
+type RedirectStrategy struct {
+	Service       string `yaml:"service" json:"service" mapstructure:"service"`
+	Datacenter    string `yaml:"datacenter" json:"datacenter" mapstructure:"datacenter"`
+	Namespace     string `yaml:"namespace" json:"namespace" mapstructure:"namespace"`
+	ServiceSubset string `yaml:"service_subset" json:"service_subset" mapstructure:"service_subset"`
 }
 
-func New(logger *slog.Logger, consulAddr, consulToken, consulDC string, forwarderEnabled bool) (*Redirector, error) {
+type cachedStrategies struct {
+	failover string
+	redirect string
+}
+
+type Redirector struct {
+	// ...
+	logger             *slog.Logger
+	consulAddr         string
+	consulToken        string
+	consulDC           string
+	watcher            *watcher.ConsulWatcher
+	forwarderEnabled   bool
+	redirectStrategies map[string]RedirectStrategy
+
+	mu              sync.RWMutex
+	strategiesCache map[string]cachedStrategies
+}
+
+func New(logger *slog.Logger, consulAddr, consulToken, consulDC string, forwarderEnabled bool, redirectStrategies map[string]RedirectStrategy) (*Redirector, error) {
 	return &Redirector{
-		logger:           logger,
-		consulAddr:       consulAddr,
-		consulToken:      consulToken,
-		consulDC:         consulDC,
-		watcher:          watcher.New(logger, consulAddr, consulToken, consulDC),
-		forwarderEnabled: forwarderEnabled,
+		logger:             logger,
+		consulAddr:         consulAddr,
+		consulToken:        consulToken,
+		consulDC:           consulDC,
+		watcher:            watcher.New(logger, consulAddr, consulToken, consulDC),
+		forwarderEnabled:   forwarderEnabled,
+		redirectStrategies: redirectStrategies,
+		strategiesCache:    make(map[string]cachedStrategies),
 	}, nil
+}
+
+func (r *Redirector) GetCachedStrategies(svcName string) (string, string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if c, ok := r.strategiesCache[svcName]; ok {
+		return c.failover, c.redirect
+	}
+	return "", ""
 }
 
 func (r *Redirector) Run(ctx context.Context) error {
@@ -133,12 +163,24 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 		}
 	}
 
+	// Update cache
+	r.mu.Lock()
+	for svcName, tags := range services {
+		if slices.Contains(tags, "atc.enabled=true") {
+			r.strategiesCache[svcName] = cachedStrategies{
+				failover: getStrategyFromTags(tags, "atc.failover="),
+				redirect: getStrategyFromTags(tags, "atc.redirect="),
+			}
+		}
+	}
+	r.mu.Unlock()
+
 	// 2. Reconcile active catalog services
 	for svcName, tags := range services {
 		if slices.Contains(tags, "atc.enabled=true") {
-			// Service is active locally and enabled.
-			// It must NOT have a Redirect configuration block.
-			// If it has a Redirect block, or doesn't exist, we must create/update a base entry to preserve the audit trail.
+			// Determine failover strategy name
+			failoverStrategyName := getStrategyFromTags(tags, "atc.failover=")
+
 			existing, exists := existingResolverEntries[svcName]
 			var needsSet bool
 			if r.forwarderEnabled {
@@ -147,7 +189,9 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 				needsSet = !exists ||
 					existing.Meta == nil ||
 					existing.Meta["created-by"] != "atc" ||
-					(existing.Redirect != nil && existing.Redirect.Service != "")
+					(existing.Redirect != nil && existing.Redirect.Service != "") ||
+					existing.Meta["failover-strategy"] != failoverStrategyName ||
+					existing.Meta["redirect-strategy"] != ""
 			}
 
 			if needsSet {
@@ -156,7 +200,8 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 					Kind: "service-resolver",
 					Name: svcName,
 					Meta: map[string]string{
-						"created-by": "atc",
+						"created-by":        "atc",
+						"failover-strategy": failoverStrategyName,
 					},
 				}
 				_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
@@ -183,23 +228,60 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 	for name, existing := range existingResolverEntries {
 		if _, exists := services[name]; !exists {
 			// Service is completely absent from the catalog.
-			// If it was created by us, we must ensure it is a Redirect resolver entry pointing to the target DC.
+			// If it was created by us, we must ensure it is a Redirect resolver entry.
 			if existing.Meta != nil && existing.Meta["created-by"] == "atc" {
+				// First check in-memory cache for redirect-strategy
+				var redirectStrategyName string
+				if _, cachedRedirect := r.GetCachedStrategies(name); cachedRedirect != "" {
+					redirectStrategyName = cachedRedirect
+				} else {
+					// Fallback to existing metadata
+					redirectStrategyName = existing.Meta["redirect-strategy"]
+				}
+
+				// Default values
+				targetSvc := name
+				targetDCVal := targetDC
+				var targetNamespace string
+				var targetServiceSubset string
+ 
+				if redirectStrategyName != "" {
+					if strategy, ok := r.redirectStrategies[redirectStrategyName]; ok {
+						targetSvc = strategy.Service
+						if targetSvc == "" {
+							targetSvc = name
+						}
+						targetDCVal = strategy.Datacenter
+						if targetDCVal == "" {
+							targetDCVal = targetDC
+						}
+						targetNamespace = strategy.Namespace
+						targetServiceSubset = strategy.ServiceSubset
+					}
+				}
+ 
 				needsUpdate := existing.Redirect == nil ||
-					existing.Redirect.Service != name ||
-					existing.Redirect.Datacenter != targetDC
+					existing.Redirect.Service != targetSvc ||
+					existing.Redirect.Datacenter != targetDCVal ||
+					existing.Redirect.Namespace != targetNamespace ||
+					existing.Redirect.ServiceSubset != targetServiceSubset ||
+					existing.Meta["failover-strategy"] != "" ||
+					existing.Meta["redirect-strategy"] != redirectStrategyName
 
 				if needsUpdate {
-					r.logger.InfoContext(ctx, "Creating/Updating redirect service-resolver for deleted service", slog.String("service", name), slog.String("datacenter", targetDC))
+					r.logger.InfoContext(ctx, "Creating/Updating redirect service-resolver for deleted service", slog.String("service", name), slog.String("redirect-strategy", redirectStrategyName))
 					entry := &api.ServiceResolverConfigEntry{
 						Kind: "service-resolver",
 						Name: name,
 						Meta: map[string]string{
-							"created-by": "atc",
+							"created-by":        "atc",
+							"redirect-strategy": redirectStrategyName,
 						},
 						Redirect: &api.ServiceResolverRedirect{
-							Service:    name,
-							Datacenter: targetDC,
+							Service:       targetSvc,
+							Datacenter:    targetDCVal,
+							Namespace:     targetNamespace,
+							ServiceSubset: targetServiceSubset,
 						},
 					}
 					_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
@@ -240,6 +322,18 @@ func findTargetDatacenter(client *api.Client, localDC string) (string, error) {
 		}
 	}
 	return "dc2", nil
+}
+
+func getStrategyFromTags(tags []string, prefix string) string {
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, prefix) {
+			parts := strings.SplitN(tag, "=", 2)
+			if len(parts) == 2 {
+				return parts[1]
+			}
+		}
+	}
+	return ""
 }
 
 func consulCfg(addr, token, dc string) *api.Config {

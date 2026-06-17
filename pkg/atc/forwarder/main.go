@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/attachmentgenie/atc/pkg/atc/watcher"
@@ -29,22 +31,54 @@ var (
 	)
 )
 
-type Forwarder struct {
-	logger      *slog.Logger
-	consulAddr  string
-	consulToken string
-	consulDC    string
-	watcher     *watcher.ConsulWatcher
+type FailoverTarget struct {
+	Service       string `yaml:"service" json:"service" mapstructure:"service"`
+	Datacenter    string `yaml:"datacenter" json:"datacenter" mapstructure:"datacenter"`
+	Namespace     string `yaml:"namespace" json:"namespace" mapstructure:"namespace"`
+	ServiceSubset string `yaml:"service_subset" json:"service_subset" mapstructure:"service_subset"`
 }
 
-func New(logger *slog.Logger, consulAddr, consulToken, consulDC string) (*Forwarder, error) {
+type FailoverStrategy struct {
+	ConnectTimeout string           `yaml:"connect_timeout" json:"connect_timeout" mapstructure:"connect_timeout"`
+	Targets        []FailoverTarget `yaml:"targets" json:"targets" mapstructure:"targets"`
+}
+
+type cachedStrategies struct {
+	failover string
+	redirect string
+}
+
+type Forwarder struct {
+	logger             *slog.Logger
+	consulAddr         string
+	consulToken        string
+	consulDC           string
+	watcher            *watcher.ConsulWatcher
+	failoverStrategies map[string]FailoverStrategy
+
+	mu              sync.RWMutex
+	strategiesCache map[string]cachedStrategies
+}
+
+func New(logger *slog.Logger, consulAddr, consulToken, consulDC string, failoverStrategies map[string]FailoverStrategy) (*Forwarder, error) {
 	return &Forwarder{
-		logger:      logger,
-		consulAddr:  consulAddr,
-		consulToken: consulToken,
-		consulDC:    consulDC,
-		watcher:     watcher.New(logger, consulAddr, consulToken, consulDC),
+		logger:             logger,
+		consulAddr:         consulAddr,
+		consulToken:        consulToken,
+		consulDC:           consulDC,
+		watcher:            watcher.New(logger, consulAddr, consulToken, consulDC),
+		failoverStrategies: failoverStrategies,
+		strategiesCache:    make(map[string]cachedStrategies),
 	}, nil
+}
+
+func (f *Forwarder) GetCachedStrategies(svcName string) (string, string) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if c, ok := f.strategiesCache[svcName]; ok {
+		return c.failover, c.redirect
+	}
+	return "", ""
 }
 
 func (f *Forwarder) Run(ctx context.Context) error {
@@ -131,43 +165,102 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 		}
 	}
 
+	// Update cache
+	f.mu.Lock()
+	for svcName, tags := range services {
+		if slices.Contains(tags, "atc.enabled=true") {
+			f.strategiesCache[svcName] = cachedStrategies{
+				failover: getStrategyFromTags(tags, "atc.failover="),
+				redirect: getStrategyFromTags(tags, "atc.redirect="),
+			}
+		}
+	}
+	f.mu.Unlock()
+
 	// 2. Reconcile active catalog services
 	for svcName, tags := range services {
 		if slices.Contains(tags, "atc.enabled=true") {
-			// Service is active locally and enabled.
-			// It must have a Failover resolver entry.
+			// Determine failover strategy name
+			failoverStrategyName := getStrategyFromTags(tags, "atc.failover=")
+
+			var targets []api.ServiceResolverFailoverTarget
+			connectTimeout := 15 * time.Second
+
+			if failoverStrategyName != "" {
+				if strategy, ok := f.failoverStrategies[failoverStrategyName]; ok {
+					if strategy.ConnectTimeout != "" {
+						if d, err := time.ParseDuration(strategy.ConnectTimeout); err == nil {
+							connectTimeout = d
+						}
+					}
+					for _, target := range strategy.Targets {
+						tSvc := target.Service
+						if tSvc == "" {
+							tSvc = svcName
+						}
+						tDC := target.Datacenter
+						if tDC == "" {
+							tDC = targetDC
+						}
+						targets = append(targets, api.ServiceResolverFailoverTarget{
+							Service:       tSvc,
+							Datacenter:    tDC,
+							Namespace:     target.Namespace,
+							ServiceSubset: target.ServiceSubset,
+						})
+					}
+				}
+			}
+
+			if len(targets) == 0 {
+				targets = []api.ServiceResolverFailoverTarget{
+					{
+						Service:    svcName,
+						Datacenter: targetDC,
+					},
+				}
+			}
+
 			existing, exists := existingResolverEntries[svcName]
 			needsCreateOrUpdate := !exists ||
 				existing.Meta == nil ||
 				existing.Meta["created-by"] != "atc" ||
 				existing.Failover == nil ||
-				len(existing.Failover) == 0
+				len(existing.Failover) == 0 ||
+				existing.Meta["failover-strategy"] != failoverStrategyName ||
+				existing.Meta["redirect-strategy"] != "" ||
+				existing.ConnectTimeout != connectTimeout
 
-			// Also check if target DC matches
 			if !needsCreateOrUpdate && existing.Failover != nil {
 				fo, ok := existing.Failover["*"]
-				if !ok || len(fo.Targets) != 1 || fo.Targets[0].Datacenter != targetDC || fo.Targets[0].Service != svcName {
+				if !ok || len(fo.Targets) != len(targets) {
 					needsCreateOrUpdate = true
+				} else {
+					for i, t := range fo.Targets {
+						if t.Service != targets[i].Service ||
+							t.Datacenter != targets[i].Datacenter ||
+							t.Namespace != targets[i].Namespace ||
+							t.ServiceSubset != targets[i].ServiceSubset {
+							needsCreateOrUpdate = true
+							break
+						}
+					}
 				}
 			}
 
 			if needsCreateOrUpdate {
-				f.logger.InfoContext(ctx, "Creating/Updating failover service-resolver for active service", slog.String("service", svcName), slog.String("datacenter", targetDC))
+				f.logger.InfoContext(ctx, "Creating/Updating failover service-resolver for active service", slog.String("service", svcName), slog.String("failover-strategy", failoverStrategyName))
 				entry := &api.ServiceResolverConfigEntry{
 					Kind: "service-resolver",
 					Name: svcName,
 					Meta: map[string]string{
-						"created-by": "atc",
+						"created-by":        "atc",
+						"failover-strategy": failoverStrategyName,
 					},
-					ConnectTimeout: 15 * time.Second,
+					ConnectTimeout: connectTimeout,
 					Failover: map[string]api.ServiceResolverFailover{
 						"*": {
-							Targets: []api.ServiceResolverFailoverTarget{
-								{
-									Service:    svcName,
-									Datacenter: targetDC,
-								},
-							},
+							Targets: targets,
 						},
 					},
 				}
@@ -220,6 +313,18 @@ func findTargetDatacenter(client *api.Client, localDC string) (string, error) {
 		}
 	}
 	return "dc2", nil
+}
+
+func getStrategyFromTags(tags []string, prefix string) string {
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, prefix) {
+			parts := strings.SplitN(tag, "=", 2)
+			if len(parts) == 2 {
+				return parts[1]
+			}
+		}
+	}
+	return ""
 }
 
 func consulCfg(addr, token, dc string) *api.Config {

@@ -124,7 +124,7 @@ func TestRedirectorReconcile(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, server.Listener.Addr().String(), "", "", false)
+	r, err := New(logger, server.Listener.Addr().String(), "", "", false, nil)
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestRedirectorReconcile_ForwarderEnabled(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, server.Listener.Addr().String(), "", "", true) // forwarderEnabled = true
+	r, err := New(logger, server.Listener.Addr().String(), "", "", true, nil) // forwarderEnabled = true
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
@@ -315,6 +315,128 @@ func TestRedirectorReconcile_ForwarderEnabled(t *testing.T) {
 		t.Errorf("Expected 1 config entry to be deleted, got %d", len(deleted))
 	} else if deleted[0] != "service-d" {
 		t.Errorf("Expected deleted entry to be 'service-d', got '%s'", deleted[0])
+	}
+}
+
+func TestRedirectorReconcile_WithStrategy(t *testing.T) {
+	var mu sync.Mutex
+	createdOrUpdated := make([]*api.ServiceResolverConfigEntry, 0)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == "GET" && r.URL.Path == "/v1/agent/self" {
+			info := map[string]interface{}{
+				"Config": map[string]interface{}{
+					"Datacenter": "dc1",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(info)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/datacenters" {
+			dcs := []string{"dc1", "dc2"}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(dcs)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/services" {
+			// service-e is deleted/absent from catalog
+			services := map[string][]string{
+				"consul": {},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(services)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/config/service-resolver" {
+			// existing service-resolver with redirect-strategy in metadata
+			entries := []api.ConfigEntry{
+				&api.ServiceResolverConfigEntry{
+					Kind: "service-resolver",
+					Name: "service-e",
+					Meta: map[string]string{
+						"created-by":        "atc",
+						"redirect-strategy": "custom-redirect",
+					},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(entries)
+			return
+		}
+
+		if r.Method == "PUT" && r.URL.Path == "/v1/config" {
+			var entry api.ServiceResolverConfigEntry
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &entry)
+			createdOrUpdated = append(createdOrUpdated, &entry)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.Listener.Addr().String()})
+	if err != nil {
+		t.Fatalf("Failed to create consul client: %v", err)
+	}
+
+	strategies := map[string]RedirectStrategy{
+		"custom-redirect": {
+			Service:       "redirected-svc",
+			Datacenter:    "dc3",
+			Namespace:     "custom-ns",
+			ServiceSubset: "custom-sub",
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	r, err := New(logger, server.Listener.Addr().String(), "", "", false, strategies)
+	if err != nil {
+		t.Fatalf("Failed to create redirector: %v", err)
+	}
+
+	err = r.reconcile(context.Background(), client)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(createdOrUpdated) != 1 {
+		t.Fatalf("Expected 1 config entry to be updated, got %d", len(createdOrUpdated))
+	}
+
+	entry := createdOrUpdated[0]
+	if entry.Name != "service-e" {
+		t.Errorf("Expected entry name 'service-e', got '%s'", entry.Name)
+	}
+
+	if entry.Meta["redirect-strategy"] != "custom-redirect" {
+		t.Errorf("Expected redirect-strategy metadata 'custom-redirect', got '%s'", entry.Meta["redirect-strategy"])
+	}
+
+	if entry.Meta["failover-strategy"] != "" {
+		t.Errorf("Expected failover-strategy metadata to be empty, got '%s'", entry.Meta["failover-strategy"])
+	}
+
+	if entry.Redirect == nil {
+		t.Fatalf("Expected Redirect block to be present")
+	}
+
+	if entry.Redirect.Service != "redirected-svc" || entry.Redirect.Datacenter != "dc3" ||
+		entry.Redirect.Namespace != "custom-ns" || entry.Redirect.ServiceSubset != "custom-sub" {
+		t.Errorf("Expected redirect to redirected-svc in dc3 (ns: custom-ns, subset: custom-sub), got service: %s, dc: %s, ns: %s, subset: %s",
+			entry.Redirect.Service, entry.Redirect.Datacenter, entry.Redirect.Namespace, entry.Redirect.ServiceSubset)
 	}
 }
 

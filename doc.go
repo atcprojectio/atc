@@ -31,6 +31,13 @@ API & MCP Integration:
 ATC server hosts a Model Context Protocol (MCP) server over Streamable HTTP transport at the `/mcp` route
 for seamless integration with AI models and agents.
 
+Predefined Strategies:
+
+ATC supports predefined failover and redirect strategies defined by admins in a YAML config file.
+Teams can assign these strategies to their Consul services using tags (e.g., `atc.failover=strategy-name`
+and `atc.redirect=strategy-name`). ATC's forwarder and redirector apply these strategies dynamically and persist
+them in the service-resolver configuration entry metadata.
+
 Architectural Design Rule:
 - NOTE: For every HTTP API endpoint exposed by the ATC server, a corresponding MCP tool MUST be registered.
 

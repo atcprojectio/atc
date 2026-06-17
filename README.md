@@ -66,6 +66,7 @@ Start the ATC background watcher process:
 - `--consul_addr` (string): Consul HTTP endpoint address.
 - `--consul_token` (string): Consul ACL token.
 - `--consul_dc` (string): Consul target datacenter.
+- `--config` (string): Path to ATC configuration file.
 
 ### Environment Variables
 
@@ -73,6 +74,43 @@ OpenTelemetry exporters can be configured using standard OpenTelemetry environme
 - `OTEL_EXPORTER_OTLP_ENDPOINT`: Target OTel collector endpoint (default: `http://localhost:4318` via HTTP).
 - `OTEL_SERVICE_NAME`: The name of the service (default: `atc`).
 - `OTEL_SDK_DISABLED`: Set to `true` to completely disable telemetry collection.
+
+---
+
+## Predefined Routing & Failover Strategies
+
+ATC supports predefined routing strategies that admins can configure in a YAML file loaded via the `--config` flag. Predefined strategies are defined under `strategies.failover` and `strategies.redirect`.
+
+### Configuration Example (`strategies.yaml`)
+
+```yaml
+strategies:
+  failover:
+    standard-failover:
+      connect_timeout: "10s"
+      targets:
+        - datacenter: "dc2"
+    multi-region-failover:
+      connect_timeout: "5s"
+      targets:
+        - datacenter: "dc2"
+        - datacenter: "dc3"
+          service: "fallback-service"
+  redirect:
+    standard-redirect:
+      datacenter: "dc2"
+    geo-redirect:
+      service: "geo-fallback"
+      datacenter: "dc3"
+```
+
+### Invoking Strategies via Consul Tags
+
+Teams can apply these predefined strategies to their Consul services using the following tags in the service definition:
+- `atc.failover=<strategy-name>`: Specifies the predefined failover strategy to use. If omitted or not found, it defaults to failing over to the dynamically resolved target datacenter for the same service.
+- `atc.redirect=<strategy-name>`: Specifies the predefined redirection strategy to use when the service goes offline (is deleted from the catalog). If omitted or not found, it defaults to redirecting to the dynamically resolved target datacenter for the same service.
+
+When a service is active, the strategy names are persisted in the Consul `service-resolver` entry metadata, which allows the redirector to apply the correct redirect strategy even after the service is removed from the Consul catalog.
 
 ---
 
