@@ -1,8 +1,8 @@
-# ATC (Air Traffic Control)
+# ATC (Active Traffic Control)
 
 ![goreleaser](https://github.com/attachmentgenie/atc/actions/workflows/publish.yml/badge.svg)
 
-ATC is a lightweight, high-performance Go service that automates the creation and management of Consul service-resolver configurations. Like air traffic control, ATC monitors the state of your Consul endpoints and automatically publishes failover or redirect rules when failing services are detected.
+ATC is a lightweight, high-performance Go service that automates the creation and management of Consul service-resolver configurations. Like Active Traffic Control, ATC monitors the state of your Consul endpoints and automatically publishes failover or redirect rules when failing services are detected.
 
 Originally based on a heavy dependency kit, ATC has been modernised to run natively on Go standard library primitives, making it extremely lightweight and secure with a minimal dependency tree.
 

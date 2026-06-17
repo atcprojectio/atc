@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ATC - Active Traffic Control</title>
+  
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  
+  <!-- Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- Prism JS for Code Highlighting -->
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
+  
+  <!-- Custom Styles -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Top glow decorations -->
+  <div class="decor-glow glow-top-left"></div>
+  <div class="decor-glow glow-bottom-right"></div>
+
+  <!-- Header -->
+  <header class="site-header">
+    <div class="header-container">
+      <a href="#" class="logo-link">
+        <div class="logo-icon-container">
+          <div class="logo-pulse"></div>
+          <span class="logo-symbol">📡</span>
+        </div>
+        <span class="logo-text">ATC <span class="logo-subtext">Active Traffic Control</span></span>
+      </a>
+      
+      <div class="header-actions">
+        <div class="search-wrapper">
+          <i class="fa-solid fa-magnifying-glass search-icon"></i>
+          <input type="text" id="docs-search" placeholder="Quick search..." autocomplete="off">
+        </div>
+        <a href="https://github.com/attachmentgenie/atc" class="btn btn-github" target="_blank">
+          <i class="fa-brands fa-github"></i> GitHub
+        </a>
+        <button id="mobile-menu-btn" class="mobile-btn" aria-label="Toggle navigation">
+          <i class="fa-solid fa-bars"></i>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <div class="docs-layout">
+    <!-- Left Navigation Sidebar -->
+    <aside class="sidebar-nav" id="sidebar">
+      <nav class="nav-menu">
+        <div class="nav-section">
+          <h4>Getting Started</h4>
+          <ul>
+            <li><a href="#overview" class="active"><i class="fa-solid fa-house"></i> Overview</a></li>
+            <li><a href="#architecture"><i class="fa-solid fa-network-wired"></i> Architecture</a></li>
+            <li><a href="#installation"><i class="fa-solid fa-download"></i> Installation</a></li>
+          </ul>
+        </div>
+        
+        <div class="nav-section">
+          <h4>Configuration</h4>
+          <ul>
+            <li><a href="#strategies-config"><i class="fa-solid fa-sliders"></i> Strategies Config</a></li>
+            <li><a href="#consul-integration"><i class="fa-solid fa-tags"></i> Consul Service Tags</a></li>
+          </ul>
+        </div>
+
+        <div class="nav-section">
+          <h4>Modules</h4>
+          <ul>
+            <li><a href="#forwarder-module"><i class="fa-solid fa-share-all"></i> Forwarder Module</a></li>
+            <li><a href="#redirector-module"><i class="fa-solid fa-shuffle"></i> Redirector Module</a></li>
+          </ul>
+        </div>
+
+        <div class="nav-section">
+          <h4>Observability</h4>
+          <ul>
+            <li><a href="#opentelemetry"><i class="fa-solid fa-chart-line"></i> OpenTelemetry</a></li>
+            <li><a href="#docker-stack"><i class="fa-solid fa-cubes"></i> Observability Stack</a></li>
+          </ul>
+        </div>
+
+        <div class="nav-section">
+          <h4>Dashboard & API</h4>
+          <ul>
+            <li><a href="#dashboard-ui"><i class="fa-solid fa-gauge"></i> Live Dashboard</a></li>
+            <li><a href="#api-reference"><i class="fa-solid fa-code"></i> API Reference</a></li>
+          </ul>
+        </div>
+      </nav>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="docs-content">
+      <!-- Overview Section -->
+      <section id="overview" class="content-section active-section">
+        <div class="badge">Docs</div>
+        <h1>Overview</h1>
+        <p class="lead">Active Traffic Control (ATC) is a routing orchestration daemon for multi-datacenter Consul Connect service meshes. It bridges the gap between active routing (with health-aware failover) and offline routing (with automated fallback redirects).</p>
+        
+        <div class="card-grid">
+          <div class="docs-card">
+            <i class="fa-solid fa-shield-halved card-icon"></i>
+            <h3>Automated Resiliency</h3>
+            <p>Ensure client requests are dynamically rerouted to alternative datacenters or fallback systems if local service instances experience outages or fail connection timeouts.</p>
+          </div>
+          <div class="docs-card">
+            <i class="fa-solid fa-route card-icon"></i>
+            <h3>Fallback Redirections</h3>
+            <p>Automatically redirect all service mesh consumers to a static fallback service or custom disaster recovery landing page the moment a service goes completely offline.</p>
+          </div>
+          <div class="docs-card">
+            <i class="fa-solid fa-chart-bar card-icon"></i>
+            <h3>Deep Observability</h3>
+            <p>ATC is built with native OpenTelemetry integrations, exposing detailed application metrics, structured logs, and distributed traces to Prometheus, Tempo, and Loki.</p>
+          </div>
+        </div>
+
+        <h2>Why ATC?</h2>
+        <p>In standard microservice architectures built on top of Consul Connect, failing services or services scheduled for deletion require complex manual configuration updates. Client applications usually run into connection timeouts or 503 service unavailable errors before traffic switches over. ATC automates this process by dynamically maintaining Service Resolver configuration entries in Consul based on active catalog changes and predefined policies.</p>
+      </section>
+
+      <!-- Architecture Section -->
+      <section id="architecture" class="content-section">
+        <div class="badge">System</div>
+        <h1>Architecture</h1>
+        <p>ATC operates as a lightweight stateless daemon that coordinates traffic routing policies directly through the Consul Config Entries API. It splits responsibility into two main operational loops: the <strong>Forwarder</strong> and the <strong>Redirector</strong>.</p>
+        
+        <div class="architecture-diagram glass-panel">
+          <div class="dia-column">
+            <div class="dia-box active-node">
+              <span class="dia-icon">🛡️</span>
+              <h4>Active Service</h4>
+              <p>Registered in Consul</p>
+            </div>
+            <div class="dia-arrow">➔</div>
+            <div class="dia-box atc-daemon">
+              <span class="dia-icon">⚙️</span>
+              <h4>ATC Daemon</h4>
+              <p>Forwarder & Redirector</p>
+            </div>
+          </div>
+          
+          <div class="dia-column">
+            <div class="dia-arrow-fork">
+              <div class="fork-up">
+                <span class="fork-label">Active Failover</span>
+                <div class="dia-box consul-resolver">
+                  <span class="dia-icon">Consul</span>
+                  <h4>Service Resolver</h4>
+                  <p>Failover Targets: DC2, DC3</p>
+                  <span class="meta-indicator">Meta: failover-strategy</span>
+                </div>
+              </div>
+              <div class="fork-down">
+                <span class="fork-label">Offline / Deleted</span>
+                <div class="dia-box consul-resolver">
+                  <span class="dia-icon">Consul</span>
+                  <h4>Service Resolver</h4>
+                  <p>Redirect: fallback (DC3)</p>
+                  <span class="meta-indicator">Meta: redirect-strategy</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <h2>Operational Modes</h2>
+        <h3>1. Active State (Failover Routing)</h3>
+        <p>When instances of a service exist in the local catalog, ATC's <strong>Forwarder</strong> ensures a <code>service-resolver</code> config entry exists. If a failover strategy is specified via tags, the forwarder configures Consul to forward requests to backup datacenters or standby services if local instances fail healthchecks or connection timeouts are reached.</p>
+        
+        <h3>2. Offline State (Redirect Routing)</h3>
+        <p>When a service goes completely offline (all instances deregistered from Consul), catalog tags disappear. The <strong>Redirector</strong> detects this deletion. It retrieves the service's redirect policy from its in-memory cache (or falls back to metadata on the existing config entry) and rewrites the Consul <code>service-resolver</code> entry to a <code>Redirect</code> type, gracefully routing traffic to the backup target.</p>
+      </section>
+
+      <!-- Installation Section -->
+      <section id="installation" class="content-section">
+        <div class="badge">Deployment</div>
+        <h1>Installation & Quickstart</h1>
+        <p>ATC is written in Go and compiles to a single static binary. It can be run on VM-based environments alongside Consul agents or deployed to Kubernetes containers.</p>
+
+        <h2>1. Build from Source</h2>
+        <p>Building ATC requires Go 1.22+ and Node.js (for compiling the embedded live dashboard frontend).</p>
+        <pre><code class="language-bash"># Clone the repository
+git clone https://github.com/attachmentgenie/atc.git
+cd atc
+
+# Compile the frontend and Go binary
+make build</code></pre>
+        <p>This generates the static binary under <code>dist/atc</code>.</p>
+
+        <h2>2. Running the Daemon</h2>
+        <p>Launch the server command by passing the path to the predefined strategies configuration file:</p>
+        <pre><code class="language-bash">./dist/atc server --config deploy/observability/strategies.yaml</code></pre>
+        
+        <h2>Available CLI Flags</h2>
+        <table class="docs-table">
+          <thead>
+            <tr>
+              <th>Flag</th>
+              <th>Environment Variable</th>
+              <th>Default</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>--config</code></td>
+              <td>-</td>
+              <td>""</td>
+              <td>Path to YAML configuration file containing predefined strategies.</td>
+            </tr>
+            <tr>
+              <td><code>--port</code></td>
+              <td><code>PORT</code></td>
+              <td>8088</td>
+              <td>Port to expose the dashboard UI and services API.</td>
+            </tr>
+            <tr>
+              <td><code>--metrics_port</code></td>
+              <td><code>METRICS_PORT</code></td>
+              <td>8089</td>
+              <td>Port to expose the Prometheus scraping endpoint.</td>
+            </tr>
+            <tr>
+              <td><code>--consul_addr</code></td>
+              <td><code>CONSUL_HTTP_ADDR</code></td>
+              <td>localhost:8500</td>
+              <td>The Consul agent HTTP address.</td>
+            </tr>
+            <tr>
+              <td><code>--consul_dc</code></td>
+              <td><code>CONSUL_DC</code></td>
+              <td>""</td>
+              <td>Consul Datacenter. Defaults to local agent DC.</td>
+            </tr>
+            <tr>
+              <td><code>--consul_token</code></td>
+              <td><code>CONSUL_HTTP_TOKEN</code></td>
+              <td>""</td>
+              <td>ACL token for authenticating with Consul.</td>
+            </tr>
+            <tr>
+              <td><code>--target</code></td>
+              <td>-</td>
+              <td>"all"</td>
+              <td>Comma-separated list of components to run (<code>forwarder</code>, <code>redirector</code>, <code>server</code>).</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- Strategies Configuration Section -->
+      <section id="strategies-config" class="content-section">
+        <div class="badge">Policies</div>
+        <h1>Strategies Configuration</h1>
+        <p>ATC admins define predefined routing strategies in a YAML configuration file. This file separates policies into <code>failover</code> strategies (for active services) and <code>redirect</code> strategies (for deleted/offline services).</p>
+
+        <h2>YAML Schema</h2>
+        <pre><code class="language-yaml">strategies:
+  failover:
+    # A standard failover strategy routing to another datacenter
+    standard-failover:
+      connect_timeout: "10s"
+      targets:
+        - datacenter: "dc2"
+
+    # Multi-datacenter targets with fallback services
+    multi-region-failover:
+      connect_timeout: "5s"
+      targets:
+        - datacenter: "dc2"
+        - datacenter: "dc3"
+          service: "fallback-service"
+
+  redirect:
+    # Redirect traffic to the same service name in dc2
+    standard-redirect:
+      datacenter: "dc2"
+
+    # Redirect to a disaster recovery web service in dc3
+    geo-redirect:
+      service: "geo-fallback"
+      datacenter: "dc3"</code></pre>
+
+        <h2>Strategy Fields</h2>
+        <h3>Failover Strategy</h3>
+        <ul>
+          <li><code>connect_timeout</code>: The connect timeout duration (e.g. <code>5s</code>, <code>10s</code>) applied to the resolver.</li>
+          <li><code>targets</code>: A list of targets to failover to. If <code>service</code> is omitted, it defaults to the active service's name. If <code>datacenter</code> is omitted, it defaults to the primary fallback datacenter.</li>
+        </ul>
+        
+        <h3>Redirect Strategy</h3>
+        <ul>
+          <li><code>service</code>: The target service to redirect traffic to. Defaults to the offline service's name.</li>
+          <li><code>datacenter</code>: The target datacenter for redirection.</li>
+        </ul>
+      </section>
+
+      <!-- Consul Integration Section -->
+      <section id="consul-integration" class="content-section">
+        <div class="badge">Consul</div>
+        <h1>Consul Service Integration</h1>
+        <p>Service teams opt-in to ATC automation and associate failover/redirect strategies using tags in their Consul service registration.</p>
+
+        <h2>Opt-in Tags</h2>
+        <ul>
+          <li><code>atc.enabled=true</code>: Enrolls the service in ATC reconciliation. Without this tag, ATC will not touch the service.</li>
+          <li><code>atc.failover=&lt;strategy-name&gt;</code>: Binds the service to a predefined failover strategy defined in the config.</li>
+          <li><code>atc.redirect=&lt;strategy-name&gt;</code>: Binds the service to a predefined redirect strategy defined in the config.</li>
+        </ul>
+
+        <h2>YAML Registration Example</h2>
+        <pre><code class="language-yaml">service:
+  name: "payments-service"
+  port: 8443
+  tags:
+    - "atc.enabled=true"
+    - "atc.failover=multi-region-failover"
+    - "atc.redirect=geo-redirect"</code></pre>
+
+        <h2>Consul Metadata Management</h2>
+        <p>ATC ensures that Consul config entry metadata conforms strictly to the strategy currently in effect in the service resolver:</p>
+        <ul>
+          <li><strong>When Active:</strong> The resolver is configured for failover. The metadata reports <code>failover-strategy</code> and removes <code>redirect-strategy</code>.</li>
+          <li><strong>When Offline:</strong> The resolver is configured for redirect. The metadata reports <code>redirect-strategy</code> and removes <code>failover-strategy</code>.</li>
+        </ul>
+      </section>
+
+      <!-- Forwarder Module Section -->
+      <section id="forwarder-module" class="content-section">
+        <div class="badge">Reconciler</div>
+        <h1>Forwarder Module</h1>
+        <p>The <strong>Forwarder</strong> manages the active state of enrolled services in the Consul registry. It ensures that the mesh routing layers are prepared to divert failing traffic instantly.</p>
+
+        <h2>Behavior Loop</h2>
+        <ol>
+          <li>Listens to Consul catalog updates from the watcher.</li>
+          <li>Identifies active services tagged with <code>atc.enabled=true</code>.</li>
+          <li>Caches configured strategy tags (failover & redirect) in-memory for downstream recovery.</li>
+          <li>Evaluates the designated <code>atc.failover</code> strategy. If the strategy contains no custom targets, it defaults to routing to the primary remote datacenter.</li>
+          <li>Checks if the existing <code>service-resolver</code> entry in Consul matches the strategy. If it does not, or does not exist, the forwarder updates/creates it.</li>
+          <li>Sets metadata to only include <code>failover-strategy</code>, ensuring the inactive redirect policy is not reported in Consul.</li>
+        </ol>
+      </section>
+
+      <!-- Redirector Module Section -->
+      <section id="redirector-module" class="content-section">
+        <div class="badge">Reconciler</div>
+        <h1>Redirector Module</h1>
+        <p>The <strong>Redirector</strong> handles the lifecycle transition when a service goes completely offline. It switches the service-resolver from load-balancing mode to direct redirection.</p>
+
+        <h2>Behavior Loop</h2>
+        <ol>
+          <li>Listens to catalog updates and identifies services that have been deleted/deregistered from the catalog.</li>
+          <li>Filters deleted services that possess a resolver entry created by <code>atc</code>.</li>
+          <li>Determines the redirect strategy:
+            <ul>
+              <li>Reads the strategy name from the in-memory cache populated while the service was active.</li>
+              <li>If the cache is empty (e.g. following a daemon restart), it falls back to the last known <code>redirect-strategy</code> in the resolver entry metadata.</li>
+            </ul>
+          </li>
+          <li>Updates the Consul <code>service-resolver</code> entry to a <code>Redirect</code> resolver block.</li>
+          <li>Sets the metadata map on the entry to only report <code>redirect-strategy</code>, removing <code>failover-strategy</code>.</li>
+        </ol>
+      </section>
+
+      <!-- OpenTelemetry Section -->
+      <section id="opentelemetry" class="content-section">
+        <div class="badge">Telemetry</div>
+        <h1>OpenTelemetry Instrumentation</h1>
+        <p>ATC is built with native cloud-observability support. It uses the OpenTelemetry SDK to emit structured logs, standard runtime and application metrics, and distributed trace spans.</p>
+
+        <h2>Trace Spans</h2>
+        <p>All reconciliation runs, watchers, and API handlers generate tracing spans. They propagate context using standard headers, allowing developers to trace reconciliation latency and Consul client overhead.</p>
+
+        <h2>Metrics Exposed</h2>
+        <table class="docs-table">
+          <thead>
+            <tr>
+              <th>Metric Name</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>atc_forwarder_reconcile_runs_total</code></td>
+              <td>Counter</td>
+              <td>Total number of forwarder reconciliation runs, labeled by status (<code>success</code>, <code>failure</code>).</td>
+            </tr>
+            <tr>
+              <td><code>atc_forwarder_reconcile_duration_seconds</code></td>
+              <td>Histogram</td>
+              <td>Duration of forwarder reconciliation loops.</td>
+            </tr>
+            <tr>
+              <td><code>atc_redirector_reconcile_runs_total</code></td>
+              <td>Counter</td>
+              <td>Total number of redirector reconciliation runs, labeled by status.</td>
+            </tr>
+            <tr>
+              <td><code>atc_redirector_reconcile_duration_seconds</code></td>
+              <td>Histogram</td>
+              <td>Duration of redirector reconciliation loops.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- Docker Observability Stack Section -->
+      <section id="docker-stack" class="content-section">
+        <div class="badge">Docker</div>
+        <h1>Local Observability Stack</h1>
+        <p>ATC provides a complete Docker Compose environment to spin up a fully integrated developer sandbox containing Consul, ATC, and the LGTM (Loki, Grafana, Tempo, Mimir/Prometheus) observability stack.</p>
+
+        <h2>Starting the Stack</h2>
+        <pre><code class="language-bash"># Start all containers in the background
+make obs-up</code></pre>
+        <p>This launches the following endpoints locally:</p>
+        <ul>
+          <li><strong>Grafana:</strong> <code>http://localhost:3000</code> (preconfigured with Loki, Prometheus, and Tempo datasources)</li>
+          <li><strong>Consul UI:</strong> <code>http://localhost:8500</code></li>
+          <li><strong>ATC Dashboard:</strong> <code>http://localhost:8088</code></li>
+          <li><strong>Prometheus:</strong> <code>http://localhost:9090</code></li>
+        </ul>
+
+        <h2>Docker Architecture</h2>
+        <p>The ATC binary sends OTLP metrics, traces, and logs directly to the OpenTelemetry Collector container listening on port <code>4317</code> (gRPC) and <code>4318</code> (HTTP). The Collector filters and distributes these signals to Prometheus, Tempo, and Loki respectively.</p>
+      </section>
+
+      <!-- Live Dashboard UI Section -->
+      <section id="dashboard-ui" class="content-section">
+        <div class="badge">UI</div>
+        <h1>Live Dashboard UI</h1>
+        <p>The ATC Web Dashboard is a premium glassmorphic React interface embedded directly inside the Go binary. It provides ATC administrators and platform teams with a real-time visualization of service mesh routing paths.</p>
+
+        <div class="dashboard-preview glass-panel">
+          <div class="preview-header">
+            <span class="preview-dot dot-red"></span>
+            <span class="preview-dot dot-yellow"></span>
+            <span class="preview-dot dot-green"></span>
+            <span class="preview-title">ATC Live Dashboard</span>
+          </div>
+          <div class="preview-body">
+            <div class="preview-card">
+              <div class="card-head">
+                <span class="status-dot dot-active"></span>
+                <strong>orders-service</strong>
+                <span class="badge-type failover">FAILOVER</span>
+              </div>
+              <div class="card-details">
+                <p>Failover Strategy: <code class="strat">multi-region-failover</code></p>
+                <div class="vis-path">
+                  <span>Local</span> <i class="fa-solid fa-arrow-right"></i> <span>orders-service (dc2)</span> <i class="fa-solid fa-arrow-right"></i> <span>fallback-service (dc3)</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="preview-card card-offline">
+              <div class="card-head">
+                <span class="status-dot dot-offline"></span>
+                <strong>payments-service</strong>
+                <span class="badge-type redirect">REDIRECT</span>
+                <span class="badge-offline">Offline</span>
+              </div>
+              <div class="card-details">
+                <p>Redirect Strategy: <code class="strat">geo-redirect</code></p>
+                <div class="vis-path">
+                  <span>Local</span> <i class="fa-solid fa-arrow-right"></i> <span class="node-red">geo-fallback (dc3)</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <h2>Features</h2>
+        <ul>
+          <li><strong>Real-time status indicators:</strong> Instantly view if a service is actively balancing local instances, failing over, or redirecting.</li>
+          <li><strong>Dynamic target path visualizers:</strong> Traces and visualizes the target paths of active failover configurations or redirect paths.</li>
+          <li><strong>Orphan Purging:</strong> Allows platform administrators to clean up orphaned resolver configurations from Consul directly via the dashboard with a single click.</li>
+        </ul>
+      </section>
+
+      <!-- API Reference Section -->
+      <section id="api-reference" class="content-section">
+        <div class="badge">Reference</div>
+        <h1>API Reference</h1>
+        <p>ATC exposes REST API endpoints for monitoring and lifecycle actions on port <code>8088</code>.</p>
+
+        <h2>1. GET /api/services</h2>
+        <p>Returns a list of all services enrolled in ATC, their current operational status, active resolver types, strategy definitions, and targets.</p>
+        
+        <h3>Response Schema</h3>
+        <pre><code class="language-json">[
+  {
+    "name": "test-service",
+    "tags": [
+      "atc.enabled=true",
+      "primary",
+      "atc.failover=multi-region-failover",
+      "atc.redirect=geo-redirect"
+    ],
+    "resolver_type": "failover",
+    "status": "active",
+    "failover_strategy": "multi-region-failover",
+    "redirect_strategy": "geo-redirect",
+    "failover_targets": [
+      {
+        "service": "test-service",
+        "datacenter": "dc2"
+      },
+      {
+        "service": "fallback-service",
+        "datacenter": "dc3"
+      }
+    ]
+  }
+]</code></pre>
+
+        <h2>2. DELETE /api/services?name=&lt;service-name&gt;</h2>
+        <p>Purges the <code>service-resolver</code> configuration entry for the specified service from Consul. Used to clean up orphaned entries.</p>
+        
+        <h3>Query Parameters</h3>
+        <ul>
+          <li><code>name</code> (required): The name of the service to purge.</li>
+        </ul>
+
+        <h3>Response Codes</h3>
+        <ul>
+          <li><code>204 No Content</code>: Purge succeeded.</li>
+          <li><code>400 Bad Request</code>: Missing service name parameter.</li>
+          <li><code>403 Forbidden</code>: The entry was not created by ATC (cannot purge).</li>
+          <li><code>404 Not Found</code>: The config entry does not exist in Consul.</li>
+        </ul>
+      </section>
+    </main>
+
+    <!-- Right Sidebar Table of Contents -->
+    <aside class="sidebar-toc">
+      <div class="toc-container">
+        <h4>On This Page</h4>
+        <ul id="toc-list">
+          <!-- Populated dynamically by script.js -->
+        </ul>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="site-footer">
+    <div class="footer-container">
+      <p>&copy; 2026 ATC Project. Released under the Apache 2.0 License.</p>
+      <p>Built for highly resilient service mesh routing.</p>
+    </div>
+  </footer>
+
+  <!-- Prism JS -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+  
+  <!-- Custom JS -->
+  <script src="script.js"></script>
+</body>
+</html>

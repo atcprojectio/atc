@@ -1,5 +1,5 @@
 /*
-Package main represents the entrypoint for the ATC (Air Traffic Control) command-line utility.
+Package main represents the entrypoint for the ATC (Active Traffic Control) command-line utility.
 
 ATC automates the creation and management of Consul service-resolver configurations to control
 routing of ingress requests for failing services. By watching service checks and endpoints,
@@ -13,18 +13,18 @@ Usage:
 
 Targets:
 
-	- consul: Runs both the Forwarder and Redirector watcher services.
-	- forwarder: Watches Consul endpoints to automatically configure request forwarding.
-	- redirector: Watches Consul endpoints to automatically configure geo-failover prepared queries.
-	- server: Spins up the internal HTTP handler (health, metrics, services).
-	- all: Resolves to 'consul' (runs all services).
+  - consul: Runs both the Forwarder and Redirector watcher services.
+  - forwarder: Watches Consul endpoints to automatically configure request forwarding.
+  - redirector: Watches Consul endpoints to automatically configure geo-failover prepared queries.
+  - server: Spins up the internal HTTP handler (health, metrics, services).
+  - all: Resolves to 'consul' (runs all services).
 
 HTTP Endpoints:
 
 ATC server hosts two separate HTTP port listeners:
-	- Main Port (default :8088): Serves the React frontend dashboard at `/`, exposes /ready,
-	  /services, JSON API service list (/api/services), and the MCP server interface.
-	- Metrics Port (default :8089): Exposes OpenTelemetry metrics in Prometheus format at `/metrics`.
+  - Main Port (default :8088): Serves the React frontend dashboard at `/`, exposes /ready,
+    /services, JSON API service list (/api/services), and the MCP server interface.
+  - Metrics Port (default :8089): Exposes OpenTelemetry metrics in Prometheus format at `/metrics`.
 
 API & MCP Integration:
 
