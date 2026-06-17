@@ -8,7 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/attachmentgenie/atc/pkg/atc"
+	"github.com/atcprojectio/atc/pkg/atc"
 )
 
 var modulesCmd = &cobra.Command{

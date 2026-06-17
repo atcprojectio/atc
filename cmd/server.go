@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/attachmentgenie/atc/pkg/atc"
+	"github.com/atcprojectio/atc/pkg/atc"
 )
 
 var serverCmd = &cobra.Command{
@@ -61,16 +61,16 @@ var serverCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(serverCmd)
-	
+
 	serverCmd.PersistentFlags().Int("port", 8088, "port to expose service on.")
 	_ = viper.BindPFlag("port", serverCmd.PersistentFlags().Lookup("port"))
 
 	serverCmd.PersistentFlags().Int("metrics_port", 8089, "port to expose metrics on.")
 	_ = viper.BindPFlag("metrics_port", serverCmd.PersistentFlags().Lookup("metrics_port"))
-	
+
 	serverCmd.PersistentFlags().StringSlice("target", []string{"all"}, "Comma-separated list of components to include in the instantiated process. Use the 'modules' command line flag to get a list of available components, and to see which components are included with 'all'. (default all)")
 	_ = viper.BindPFlag("target", serverCmd.PersistentFlags().Lookup("target"))
-	
+
 	serverCmd.PersistentFlags().String("log_level", "info", "Only log messages with the given severity or above.")
 	_ = viper.BindPFlag("log_level", serverCmd.PersistentFlags().Lookup("log_level"))
 

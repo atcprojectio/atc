@@ -16,15 +16,15 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/attachmentgenie/atc/pkg/atc/forwarder"
-	"github.com/attachmentgenie/atc/pkg/atc/redirector"
-	atc_server "github.com/attachmentgenie/atc/pkg/atc/server"
-	"github.com/attachmentgenie/atc/pkg/atc/telemetry"
+	"github.com/atcprojectio/atc/pkg/atc/forwarder"
+	"github.com/atcprojectio/atc/pkg/atc/redirector"
+	atc_server "github.com/atcprojectio/atc/pkg/atc/server"
+	"github.com/atcprojectio/atc/pkg/atc/telemetry"
 	"github.com/hashicorp/consul/api"
 )
 
 type StrategiesConfig struct {
-	Failover map[string]forwarder.FailoverStrategy `yaml:"failover" json:"failover" mapstructure:"failover"`
+	Failover map[string]forwarder.FailoverStrategy  `yaml:"failover" json:"failover" mapstructure:"failover"`
 	Redirect map[string]redirector.RedirectStrategy `yaml:"redirect" json:"redirect" mapstructure:"redirect"`
 }
 

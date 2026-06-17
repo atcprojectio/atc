@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/attachmentgenie/atc/pkg/atc/watcher"
+	"github.com/atcprojectio/atc/pkg/atc/watcher"
 	"github.com/hashicorp/consul/api"
-	"golang.org/x/sync/errgroup"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"golang.org/x/sync/errgroup"
 )
 
 var (

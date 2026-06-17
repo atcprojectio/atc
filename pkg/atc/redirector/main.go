@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/attachmentgenie/atc/pkg/atc/watcher"
+	"github.com/atcprojectio/atc/pkg/atc/watcher"
 	"github.com/hashicorp/consul/api"
-	"golang.org/x/sync/errgroup"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -244,7 +244,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 				targetDCVal := targetDC
 				var targetNamespace string
 				var targetServiceSubset string
- 
+
 				if redirectStrategyName != "" {
 					if strategy, ok := r.redirectStrategies[redirectStrategyName]; ok {
 						targetSvc = strategy.Service
@@ -259,7 +259,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 						targetServiceSubset = strategy.ServiceSubset
 					}
 				}
- 
+
 				needsUpdate := existing.Redirect == nil ||
 					existing.Redirect.Service != targetSvc ||
 					existing.Redirect.Datacenter != targetDCVal ||

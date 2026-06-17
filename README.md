@@ -1,6 +1,6 @@
 # ATC (Active Traffic Control)
 
-![goreleaser](https://github.com/attachmentgenie/atc/actions/workflows/publish.yml/badge.svg)
+![goreleaser](https://github.com/atcprojectio/atc/actions/workflows/publish.yml/badge.svg)
 
 ATC is a lightweight, high-performance Go service that automates the creation and management of Consul service-resolver configurations. Like Active Traffic Control, ATC monitors the state of your Consul endpoints and automatically publishes failover or redirect rules when failing services are detected.
 
@@ -32,15 +32,15 @@ Originally based on a heavy dependency kit, ATC has been modernised to run nativ
 ### macOS
 
 ```bash
-brew tap attachmentgenie/tap
-brew install attachmentgenie/tap/atc
+brew tap atcprojectio/tap
+brew install atcprojectio/tap/atc
 ```
 
 ### From Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/attachmentgenie/atc.git
+git clone https://github.com/atcprojectio/atc.git
 cd atc
 
 # Compile the binary

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/attachmentgenie/atc/cmd"
+	"github.com/atcprojectio/atc/cmd"
 )
 
 func main() {

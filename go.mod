@@ -1,4 +1,4 @@
-module github.com/attachmentgenie/atc
+module github.com/atcprojectio/atc
 
 go 1.26
 

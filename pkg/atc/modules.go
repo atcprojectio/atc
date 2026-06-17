@@ -4,11 +4,11 @@ import (
 	"log/slog"
 	"slices"
 
-	"github.com/attachmentgenie/atc/pkg/atc/forwarder"
-	mcp_server "github.com/attachmentgenie/atc/pkg/atc/mcp"
-	"github.com/attachmentgenie/atc/pkg/atc/redirector"
-	atc_server "github.com/attachmentgenie/atc/pkg/atc/server"
-	"github.com/attachmentgenie/atc/pkg/atc/telemetry"
+	"github.com/atcprojectio/atc/pkg/atc/forwarder"
+	mcp_server "github.com/atcprojectio/atc/pkg/atc/mcp"
+	"github.com/atcprojectio/atc/pkg/atc/redirector"
+	atc_server "github.com/atcprojectio/atc/pkg/atc/server"
+	"github.com/atcprojectio/atc/pkg/atc/telemetry"
 )
 
 const (
