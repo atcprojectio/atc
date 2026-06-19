@@ -60,6 +60,7 @@
             <li><a href="#overview" class="active"><i class="fa-solid fa-house"></i> Overview</a></li>
             <li><a href="#architecture"><i class="fa-solid fa-network-wired"></i> Architecture</a></li>
             <li><a href="#installation"><i class="fa-solid fa-download"></i> Installation</a></li>
+            <li><a href="#demo-project"><i class="fa-solid fa-play"></i> Demo Project</a></li>
           </ul>
         </div>
         
@@ -68,6 +69,8 @@
           <ul>
             <li><a href="#strategies-config"><i class="fa-solid fa-sliders"></i> Strategies Config</a></li>
             <li><a href="#consul-integration"><i class="fa-solid fa-tags"></i> Consul Service Tags</a></li>
+            <li><a href="#hysteresis"><i class="fa-solid fa-clock-rotate-left"></i> Hysteresis (Dampening)</a></li>
+            <li><a href="#high-availability"><i class="fa-solid fa-server"></i> High Availability</a></li>
           </ul>
         </div>
 
@@ -196,7 +199,15 @@ cd atc
 make build</code></pre>
         <p>This generates the static binary under <code>dist/atc</code>.</p>
 
-        <h2>2. Running the Daemon</h2>
+        <h2>2. Install using Homebrew</h2>
+        <p>ATC can be installed on macOS and Linux using Homebrew via the official tap:</p>
+        <pre><code class="language-bash"># Tap the repository
+brew tap atcprojectio/tap
+
+# Install ATC
+brew install atc</code></pre>
+
+        <h2>3. Running the Daemon</h2>
         <p>Launch the server command by passing the path to the predefined strategies configuration file:</p>
         <pre><code class="language-bash">./dist/atc server --config deploy/observability/strategies.yaml</code></pre>
         
@@ -255,6 +266,43 @@ make build</code></pre>
             </tr>
           </tbody>
         </table>
+      </section>
+
+      <!-- Demo Project Section -->
+      <section id="demo-project" class="content-section">
+        <div class="badge">Demo</div>
+        <h1>Consul 2.0.1 Demo Project</h1>
+        <p class="lead">ATC includes a fully automated, multi-datacenter federated Consul 2.0.1 demo environment. It showcases how ATC dynamically generates and updates <code>service-resolver</code> configuration entries during service failovers and redirects.</p>
+        
+        <h2>Demo Features</h2>
+        <ul>
+          <li><strong>Consul 2.0.1 WAN Federation:</strong> Runs two Consul servers (<code>dc1</code> and <code>dc2</code>) federated over WAN.</li>
+          <li><strong>HTTP Echo Servers:</strong> Mock payment services running in both datacenters to simulate actual routing targets.</li>
+          <li><strong>Smart Traffic Client:</strong> A lightweight Python traffic client that queries Consul and fetches the active routing output, verifying routing decisions in real-time.</li>
+          <li><strong>Automated CLI Walkthrough:</strong> A single command (<code>make run-demo</code>) runs a complete failover, redirect, recovery, and purge lifecycle.</li>
+        </ul>
+
+        <h2>Running the Demo</h2>
+        <p>Ensure you have Docker and Python 3 installed, then execute the following tasks:</p>
+        <pre><code class="language-bash"># Navigate to the demo directory
+cd atc-demo
+
+# Build the custom ATC image (including React compiler)
+make build
+
+# Start the Consul 2.0.1 cluster and Mock backends
+make up
+
+# Run the interactive routing walkthrough
+make run-demo</code></pre>
+
+        <h2>Demo Lifecycle Output</h2>
+        <p>When running the walkthrough, you will see output demonstrating dynamic failover:</p>
+        <ol>
+          <li><strong>Local DC1 Healthy:</strong> Traffic resolves locally and prints: <br><code>[Traffic Router] Local DC1 healthy -> Routing to payment-service in DC1... [DC1 Instance] Payment processed successfully!</code></li>
+          <li><strong>Simulated Outage (DC1 offline):</strong> ATC immediately rewrites the resolver to a <code>Redirect</code> to <code>dc2</code>. Traffic client prints: <br><code>[Traffic Router] Redirect Rule Active -> Target DC: dc2, Service: payment-service [DC2 Instance] Payment processed successfully!</code></li>
+          <li><strong>Recovery (DC1 restored):</strong> ATC restores the <code>Failover</code> rule and traffic client resumes local routing.</li>
+        </ol>
       </section>
 
       <!-- Strategies Configuration Section -->
@@ -331,6 +379,52 @@ make build</code></pre>
         <ul>
           <li><strong>When Active:</strong> The resolver is configured for failover. The metadata reports <code>failover-strategy</code> and removes <code>redirect-strategy</code>.</li>
           <li><strong>When Offline:</strong> The resolver is configured for redirect. The metadata reports <code>redirect-strategy</code> and removes <code>failover-strategy</code>.</li>
+        </ul>
+      </section>
+
+      <!-- Hysteresis Section -->
+      <section id="hysteresis" class="content-section">
+        <div class="badge">Stability</div>
+        <h1>Oscillation Dampening (Hysteresis)</h1>
+        <p>ATC includes built-in oscillation dampening (hysteresis) to prevent configuration churn in Consul. If a service's health flaps or catalog state oscillates rapidly, ATC debounces the writes to protect the Consul leader from excessive write operations.</p>
+
+        <h2>How Hysteresis Works</h2>
+        <p>When a state change occurs (e.g. service goes offline or recovers), ATC schedules the configuration write after a dampening period. If a new state change arrives before the dampening timer fires (e.g. the service recovers during the dampening window), the pending write is canceled, and the transition is debounced.</p>
+
+        <h2>Dampening Settings</h2>
+        <ul>
+          <li><strong>Global Default:</strong> Set via <code>dampening_period</code> in the main config (e.g. <code>5s</code>).</li>
+          <li><strong>Service Tag Override:</strong> Bypassed or customized on a per-service basis using the tag <code>atc.dampening=&lt;duration&gt;</code> (e.g. <code>atc.dampening=10s</code> or <code>atc.dampening=0s</code>).</li>
+          <li><strong>Immediate Updates:</strong> A tag value of <code>0s</code> or <code>0</code> disables dampening, triggering immediate failover or redirects.</li>
+          <li><strong>Safety Boundary:</strong> Set via <code>min_dampening_period</code> in the main config. All custom tags are clamped to this minimum limit to prevent users from bypassing operator safety settings.</li>
+        </ul>
+      </section>
+
+      <!-- High Availability Section -->
+      <section id="high-availability" class="content-section">
+        <div class="badge">Cluster</div>
+        <h1>Active-Passive High Availability</h1>
+        <p>To run ATC in a high-availability production environment, multiple ATC daemons can be deployed in active-passive mode. Leadership is coordinated dynamically through Consul KV Session locks.</p>
+
+        <h2>HA Architecture</h2>
+        <ul>
+          <li><strong>Single Active Leader:</strong> Only the active leader instance registers Consul watches, tracks catalog changes, and performs configuration writes to Consul.</li>
+          <li><strong>Standby Nodes:</strong> Passive standby instances keep their HTTP/metrics servers running to serve read-only APIs and dashboards, but suspend all catalog watch reconciliations.</li>
+          <li><strong>Failover:</strong> If the active leader fails or experiences network partitions, the Consul session lock expires (governed by the session TTL). A standby instance instantly acquires leadership and resumes reconciliation with zero data loss.</li>
+        </ul>
+
+        <h2>HA Configuration</h2>
+        <pre><code class="language-yaml">ha:
+  enabled: true
+  lock_key: "atc/leader/lock"
+  session_ttl: "15s"</code></pre>
+
+        <h2>WAN Federation Indicators</h2>
+        <p>ATC queries the local Consul agent's WAN coordinate/member list (via the `/api/federation` endpoint) to verify that configured target datacenters are WAN-federated and reachable. Status badges are rendered directly in the failover visualization path on the dashboard:</p>
+        <ul>
+          <li><strong>● Green Indicator:</strong> Datacenter is healthy and WAN-federated (status is <code>alive</code>).</li>
+          <li><strong>▲ Red Indicator:</strong> Gossip connection to the datacenter has failed (status is <code>failed</code>).</li>
+          <li><strong>⚠️ Yellow Warning:</strong> Datacenter is completely missing from WAN members list (status is <code>unfederated</code>).</li>
         </ul>
       </section>
 
@@ -526,7 +620,7 @@ make obs-up</code></pre>
 ]</code></pre>
 
         <h2>2. DELETE /api/services?name=&lt;service-name&gt;</h2>
-        <p>Purges the <code>service-resolver</code> configuration entry for the specified service from Consul. Used to clean up orphaned entries.</p>
+        <p>Purges the <code>service-resolver</code> configuration entry for the specified service from Consul. Used to clean up orphaned entries or clear manual overrides.</p>
         
         <h3>Query Parameters</h3>
         <ul>
@@ -539,6 +633,23 @@ make obs-up</code></pre>
           <li><code>400 Bad Request</code>: Missing service name parameter.</li>
           <li><code>403 Forbidden</code>: The entry was not created by ATC (cannot purge).</li>
           <li><code>404 Not Found</code>: The config entry does not exist in Consul.</li>
+        </ul>
+
+        <h2>3. POST /api/overrides</h2>
+        <p>Manually overrides service routing behavior. Writes a Consul <code>service-resolver</code> configuration entry tagged with <code>"created-by": "atc-override"</code>, causing ATC automated reconcilers to bypass this service. To restore automated watcher reconciliation, call the <code>DELETE /api/services?name=&lt;service-name&gt;</code> endpoint.</p>
+        
+        <h3>Request Body</h3>
+        <pre><code class="language-json">{
+  "service": "payment-service",
+  "type": "failover|redirect",
+  "target_dc": "dc2"
+}</code></pre>
+
+        <h3>Response Codes</h3>
+        <ul>
+          <li><code>200 OK</code>: Override successfully applied.</li>
+          <li><code>400 Bad Request</code>: Invalid body, missing fields, or invalid type.</li>
+          <li><code>500 Internal Server Error</code>: Consul write failed.</li>
         </ul>
       </section>
     </main>

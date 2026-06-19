@@ -38,13 +38,17 @@ type RedirectStrategy struct {
 	ServiceSubset string `yaml:"service_subset" json:"service_subset" mapstructure:"service_subset"`
 }
 
+type writeCanceler interface {
+	CancelPendingWrite(svcName string)
+}
+
 type cachedStrategies struct {
-	failover string
-	redirect string
+	failover  string
+	redirect  string
+	dampening string
 }
 
 type Redirector struct {
-	// ...
 	logger             *slog.Logger
 	consulAddr         string
 	consulToken        string
@@ -52,12 +56,20 @@ type Redirector struct {
 	watcher            *watcher.ConsulWatcher
 	forwarderEnabled   bool
 	redirectStrategies map[string]RedirectStrategy
+	dampeningPeriod    string
+	minDampeningPeriod string
 
 	mu              sync.RWMutex
 	strategiesCache map[string]cachedStrategies
+
+	// Hysteresis scheduling state
+	schedMu       sync.Mutex
+	pendingWrites map[string]*api.ServiceResolverConfigEntry
+	writeTimers   map[string]*time.Timer
+	forwarder     writeCanceler
 }
 
-func New(logger *slog.Logger, consulAddr, consulToken, consulDC string, forwarderEnabled bool, redirectStrategies map[string]RedirectStrategy) (*Redirector, error) {
+func New(logger *slog.Logger, consulAddr, consulToken, consulDC string, forwarderEnabled bool, redirectStrategies map[string]RedirectStrategy, dampeningPeriod, minDampeningPeriod string) (*Redirector, error) {
 	return &Redirector{
 		logger:             logger,
 		consulAddr:         consulAddr,
@@ -66,8 +78,28 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC string, forwarde
 		watcher:            watcher.New(logger, consulAddr, consulToken, consulDC),
 		forwarderEnabled:   forwarderEnabled,
 		redirectStrategies: redirectStrategies,
+		dampeningPeriod:    dampeningPeriod,
+		minDampeningPeriod: minDampeningPeriod,
 		strategiesCache:    make(map[string]cachedStrategies),
+		pendingWrites:      make(map[string]*api.ServiceResolverConfigEntry),
+		writeTimers:        make(map[string]*time.Timer),
 	}, nil
+}
+
+func (r *Redirector) SetForwarder(f writeCanceler) {
+	r.schedMu.Lock()
+	defer r.schedMu.Unlock()
+	r.forwarder = f
+}
+
+func (r *Redirector) CancelPendingWrite(svcName string) {
+	r.schedMu.Lock()
+	defer r.schedMu.Unlock()
+	if timer, ok := r.writeTimers[svcName]; ok {
+		timer.Stop()
+		delete(r.writeTimers, svcName)
+	}
+	delete(r.pendingWrites, svcName)
 }
 
 func (r *Redirector) GetCachedStrategies(svcName string) (string, string) {
@@ -163,21 +195,37 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 		}
 	}
 
-	// Update cache
+	// Update cache and get config snapshot
 	r.mu.Lock()
 	for svcName, tags := range services {
 		if slices.Contains(tags, "atc.enabled=true") {
 			r.strategiesCache[svcName] = cachedStrategies{
-				failover: getStrategyFromTags(tags, "atc.failover="),
-				redirect: getStrategyFromTags(tags, "atc.redirect="),
+				failover:  getStrategyFromTags(tags, "atc.failover="),
+				redirect:  getStrategyFromTags(tags, "atc.redirect="),
+				dampening: getStrategyFromTags(tags, "atc.dampening="),
 			}
 		}
 	}
+	redirectStrategies := r.redirectStrategies
+	dampeningPeriod := r.dampeningPeriod
+	minDampeningPeriod := r.minDampeningPeriod
 	r.mu.Unlock()
 
 	// 2. Reconcile active catalog services
 	for svcName, tags := range services {
 		if slices.Contains(tags, "atc.enabled=true") {
+			if existing, exists := existingResolverEntries[svcName]; exists {
+				if existing.Meta != nil && existing.Meta["created-by"] == "atc-override" {
+					r.logger.DebugContext(ctx, "Skipping reconciliation because service-resolver has an active manual override", slog.String("service", svcName))
+					continue
+				}
+			}
+
+			// Cancel any pending writes in forwarder
+			if r.forwarder != nil {
+				r.forwarder.CancelPendingWrite(svcName)
+			}
+
 			// Determine failover strategy name
 			failoverStrategyName := getStrategyFromTags(tags, "atc.failover=")
 
@@ -195,7 +243,6 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 			}
 
 			if needsSet {
-				r.logger.InfoContext(ctx, "Ensuring base/failover service-resolver for active service", slog.String("service", svcName))
 				entry := &api.ServiceResolverConfigEntry{
 					Kind: "service-resolver",
 					Name: svcName,
@@ -204,15 +251,27 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 						"failover-strategy": failoverStrategyName,
 					},
 				}
-				_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
-				if err != nil {
-					r.logger.ErrorContext(ctx, "Failed to set base service-resolver", slog.String("service", svcName), slog.Any("error", err))
+
+				dampening := getDampeningDuration(tags, dampeningPeriod, minDampeningPeriod)
+				if dampening <= 0 {
+					r.CancelPendingWrite(svcName)
+					r.logger.InfoContext(ctx, "Creating/Updating base service-resolver immediately", slog.String("service", svcName))
+					_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+					if err != nil {
+						r.logger.ErrorContext(ctx, "Failed to set base service-resolver", slog.String("service", svcName), slog.Any("error", err))
+					}
+				} else {
+					r.logger.InfoContext(ctx, "Scheduling base service-resolver write", slog.String("service", svcName), slog.Duration("dampening", dampening))
+					r.scheduleWrite(svcName, entry, dampening)
 				}
 			}
 		} else {
 			// Service exists locally but does not have the tag.
 			// If we created a config entry, we must delete it.
 			if existing, exists := existingResolverEntries[svcName]; exists {
+				if existing.Meta != nil && existing.Meta["created-by"] == "atc-override" {
+					continue
+				}
 				if existing.Meta != nil && existing.Meta["created-by"] == "atc" {
 					r.logger.InfoContext(ctx, "Deleting service-resolver because atc.enabled tag was removed", slog.String("service", svcName))
 					_, err = client.ConfigEntries().Delete("service-resolver", svcName, (&api.WriteOptions{}).WithContext(ctx))
@@ -229,12 +288,26 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 		if _, exists := services[name]; !exists {
 			// Service is completely absent from the catalog.
 			// If it was created by us, we must ensure it is a Redirect resolver entry.
+			if existing.Meta != nil && existing.Meta["created-by"] == "atc-override" {
+				continue
+			}
 			if existing.Meta != nil && existing.Meta["created-by"] == "atc" {
-				// First check in-memory cache for redirect-strategy
+				// Cancel any pending writes in forwarder
+				if r.forwarder != nil {
+					r.forwarder.CancelPendingWrite(name)
+				}
+
+				// First check in-memory cache for redirect-strategy and dampening tag
 				var redirectStrategyName string
-				if _, cachedRedirect := r.GetCachedStrategies(name); cachedRedirect != "" {
-					redirectStrategyName = cachedRedirect
-				} else {
+				var dampeningTag string
+				r.mu.RLock()
+				if c, ok := r.strategiesCache[name]; ok {
+					redirectStrategyName = c.redirect
+					dampeningTag = c.dampening
+				}
+				r.mu.RUnlock()
+
+				if redirectStrategyName == "" {
 					// Fallback to existing metadata
 					redirectStrategyName = existing.Meta["redirect-strategy"]
 				}
@@ -246,7 +319,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 				var targetServiceSubset string
 
 				if redirectStrategyName != "" {
-					if strategy, ok := r.redirectStrategies[redirectStrategyName]; ok {
+					if strategy, ok := redirectStrategies[redirectStrategyName]; ok {
 						targetSvc = strategy.Service
 						if targetSvc == "" {
 							targetSvc = name
@@ -269,7 +342,6 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 					existing.Meta["redirect-strategy"] != redirectStrategyName
 
 				if needsUpdate {
-					r.logger.InfoContext(ctx, "Creating/Updating redirect service-resolver for deleted service", slog.String("service", name), slog.String("redirect-strategy", redirectStrategyName))
 					entry := &api.ServiceResolverConfigEntry{
 						Kind: "service-resolver",
 						Name: name,
@@ -284,9 +356,18 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 							ServiceSubset: targetServiceSubset,
 						},
 					}
-					_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
-					if err != nil {
-						r.logger.ErrorContext(ctx, "Failed to set redirect service-resolver", slog.String("service", name), slog.Any("error", err))
+
+					dampening := getDampeningDuration([]string{"atc.dampening=" + dampeningTag}, dampeningPeriod, minDampeningPeriod)
+					if dampening <= 0 {
+						r.CancelPendingWrite(name)
+						r.logger.InfoContext(ctx, "Creating/Updating redirect service-resolver immediately", slog.String("service", name), slog.String("redirect-strategy", redirectStrategyName))
+						_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+						if err != nil {
+							r.logger.ErrorContext(ctx, "Failed to set redirect service-resolver", slog.String("service", name), slog.Any("error", err))
+						}
+					} else {
+						r.logger.InfoContext(ctx, "Scheduling redirect service-resolver write", slog.String("service", name), slog.Duration("dampening", dampening))
+						r.scheduleWrite(name, entry, dampening)
 					}
 				}
 			}
@@ -348,4 +429,126 @@ func consulCfg(addr, token, dc string) *api.Config {
 		cfg.Datacenter = dc
 	}
 	return cfg
+}
+
+func getDampeningDuration(tags []string, globalDefault, minLimit string) time.Duration {
+	d := 0 * time.Second
+	if globalDefault != "" {
+		if val, err := time.ParseDuration(globalDefault); err == nil {
+			d = val
+		}
+	}
+
+	tagVal := getStrategyFromTags(tags, "atc.dampening=")
+	if tagVal != "" {
+		if val, err := time.ParseDuration(tagVal); err == nil {
+			d = val
+		}
+	}
+
+	if minLimit != "" {
+		if minVal, err := time.ParseDuration(minLimit); err == nil {
+			if d < minVal {
+				d = minVal
+			}
+		}
+	}
+	return d
+}
+
+func entriesEqual(a, b *api.ServiceResolverConfigEntry) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Name != b.Name || a.ConnectTimeout != b.ConnectTimeout {
+		return false
+	}
+	if len(a.Meta) != len(b.Meta) {
+		return false
+	}
+	for k, v := range a.Meta {
+		if b.Meta[k] != v {
+			return false
+		}
+	}
+	// Compare Failovers
+	if len(a.Failover) != len(b.Failover) {
+		return false
+	}
+	for k, v := range a.Failover {
+		vb, ok := b.Failover[k]
+		if !ok || len(v.Targets) != len(vb.Targets) {
+			return false
+		}
+		for i, t := range v.Targets {
+			tb := vb.Targets[i]
+			if t.Service != tb.Service || t.Datacenter != tb.Datacenter || t.Namespace != tb.Namespace || t.ServiceSubset != tb.ServiceSubset {
+				return false
+			}
+		}
+	}
+	// Compare Redirects
+	if (a.Redirect == nil) != (b.Redirect == nil) {
+		return false
+	}
+	if a.Redirect != nil && b.Redirect != nil {
+		if a.Redirect.Service != b.Redirect.Service || a.Redirect.Datacenter != b.Redirect.Datacenter || a.Redirect.Namespace != b.Redirect.Namespace || a.Redirect.ServiceSubset != b.Redirect.ServiceSubset {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Redirector) scheduleWrite(svcName string, entry *api.ServiceResolverConfigEntry, dampening time.Duration) {
+	r.schedMu.Lock()
+	defer r.schedMu.Unlock()
+
+	if timer, ok := r.writeTimers[svcName]; ok {
+		if !entriesEqual(r.pendingWrites[svcName], entry) {
+			r.pendingWrites[svcName] = entry
+			timer.Reset(dampening)
+		}
+	} else {
+		r.pendingWrites[svcName] = entry
+		r.writeTimers[svcName] = time.AfterFunc(dampening, func() {
+			r.executeScheduledWrite(svcName)
+		})
+	}
+}
+
+func (r *Redirector) executeScheduledWrite(svcName string) {
+	r.schedMu.Lock()
+	entry, ok := r.pendingWrites[svcName]
+	delete(r.pendingWrites, svcName)
+	delete(r.writeTimers, svcName)
+	r.schedMu.Unlock()
+
+	if !ok || entry == nil {
+		return
+	}
+
+	client, err := api.NewClient(consulCfg(r.consulAddr, r.consulToken, r.consulDC))
+	if err != nil {
+		r.logger.Error("Failed to create Consul client for scheduled write", slog.String("service", svcName), slog.Any("error", err))
+		return
+	}
+
+	r.logger.Info("Executing scheduled redirect write for service-resolver", slog.String("service", svcName))
+	_, _, err = client.ConfigEntries().Set(entry, nil)
+	if err != nil {
+		r.logger.Error("Failed to write scheduled redirect service-resolver entry", slog.String("service", svcName), slog.Any("error", err))
+	}
+}
+
+func (r *Redirector) UpdateConfig(redirectStrategies map[string]RedirectStrategy, dampeningPeriod, minDampeningPeriod string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.redirectStrategies = redirectStrategies
+	r.dampeningPeriod = dampeningPeriod
+	r.minDampeningPeriod = minDampeningPeriod
+	r.logger.Info("Redirector configuration reloaded dynamically",
+		slog.Int("strategies_count", len(redirectStrategies)),
+		slog.String("dampening_period", dampeningPeriod),
+		slog.String("min_dampening_period", minDampeningPeriod),
+	)
 }

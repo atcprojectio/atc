@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -28,18 +29,28 @@ type StrategiesConfig struct {
 	Redirect map[string]redirector.RedirectStrategy `yaml:"redirect" json:"redirect" mapstructure:"redirect"`
 }
 
+type HaConfig struct {
+	Enabled    bool   `yaml:"enabled" json:"enabled" mapstructure:"enabled"`
+	LockKey    string `yaml:"lock_key" json:"lock_key" mapstructure:"lock_key"`
+	SessionTTL string `yaml:"session_ttl" json:"session_ttl" mapstructure:"session_ttl"`
+}
+
 type Config struct {
-	Name        string            `yaml:"service" mapstructure:"service"`
-	Server      atc_server.Config `yaml:"server" mapstructure:"server"`
-	Target      []string          `yaml:"target" mapstructure:"target"`
-	ConsulAddr  string            `yaml:"consul_addr" mapstructure:"consul_addr"`
-	ConsulToken string            `yaml:"consul_token" mapstructure:"consul_token"`
-	ConsulDC    string            `yaml:"consul_dc" mapstructure:"consul_dc"`
-	Strategies  StrategiesConfig  `yaml:"strategies" json:"strategies" mapstructure:"strategies"`
+	Name               string            `yaml:"service" mapstructure:"service"`
+	Server             atc_server.Config `yaml:"server" mapstructure:"server"`
+	Target             []string          `yaml:"target" mapstructure:"target"`
+	ConsulAddr         string            `yaml:"consul_addr" mapstructure:"consul_addr"`
+	ConsulToken        string            `yaml:"consul_token" mapstructure:"consul_token"`
+	ConsulDC           string            `yaml:"consul_dc" mapstructure:"consul_dc"`
+	DampeningPeriod    string            `yaml:"dampening_period" mapstructure:"dampening_period"`
+	MinDampeningPeriod string            `yaml:"min_dampening_period" mapstructure:"min_dampening_period"`
+	Strategies         StrategiesConfig  `yaml:"strategies" json:"strategies" mapstructure:"strategies"`
+	HA                 HaConfig          `yaml:"ha" json:"ha" mapstructure:"ha"`
 }
 
 type Atc struct {
 	Cfg            Config
+	cfgMu          sync.RWMutex
 	logger         *slog.Logger
 	coreLogger     *slog.Logger
 	Server         *atc_server.Server
@@ -48,6 +59,8 @@ type Atc struct {
 
 	Forwarder  *forwarder.Forwarder
 	Redirector *redirector.Redirector
+
+	isLeader atomic.Bool
 }
 
 func New(cfg Config) (*Atc, error) {
@@ -82,6 +95,11 @@ func New(cfg Config) (*Atc, error) {
 		if err := atc.initRedirector(); err != nil {
 			return nil, err
 		}
+	}
+
+	if atc.Forwarder != nil && atc.Redirector != nil {
+		atc.Forwarder.SetRedirector(atc.Redirector)
+		atc.Redirector.SetForwarder(atc.Forwarder)
 	}
 
 	return atc, nil
@@ -121,15 +139,22 @@ func (t *Atc) Run() error {
 			return t.Server.Run(ctx)
 		})
 	}
-	if t.Forwarder != nil {
+
+	if t.Cfg.HA.Enabled {
 		g.Go(func() error {
-			return t.Forwarder.Run(ctx)
+			return t.runLeaderElection(ctx)
 		})
-	}
-	if t.Redirector != nil {
-		g.Go(func() error {
-			return t.Redirector.Run(ctx)
-		})
+	} else {
+		if t.Forwarder != nil {
+			g.Go(func() error {
+				return t.Forwarder.Run(ctx)
+			})
+		}
+		if t.Redirector != nil {
+			g.Go(func() error {
+				return t.Redirector.Run(ctx)
+			})
+		}
 	}
 
 	t.coreLogger.InfoContext(ctx, "Application started")
@@ -149,6 +174,112 @@ func (t *Atc) Run() error {
 	return err
 }
 
+func (t *Atc) IsLeader() bool {
+	t.cfgMu.RLock()
+	haEnabled := t.Cfg.HA.Enabled
+	t.cfgMu.RUnlock()
+	if !haEnabled {
+		return true
+	}
+	return t.isLeader.Load()
+}
+
+func (t *Atc) runLeaderElection(ctx context.Context) error {
+	client, err := t.getConsulClient(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create consul client for lock: %w", err)
+	}
+
+	t.cfgMu.RLock()
+	lockKey := t.Cfg.HA.LockKey
+	sessionTTL := t.Cfg.HA.SessionTTL
+	name := t.Cfg.Name
+	t.cfgMu.RUnlock()
+
+	if lockKey == "" {
+		lockKey = "atc/leader/lock"
+	}
+	if sessionTTL == "" {
+		sessionTTL = "15s"
+	}
+	if name == "" {
+		if hn, err := os.Hostname(); err == nil && hn != "" {
+			name = "atc-node-" + hn
+		} else {
+			name = "atc-node"
+		}
+	}
+
+	opts := &api.LockOptions{
+		Key:         lockKey,
+		Value:       []byte(name),
+		SessionTTL:  sessionTTL,
+		SessionName: "atc-leader-election",
+	}
+
+	lock, err := client.LockOpts(opts)
+	if err != nil {
+		return fmt.Errorf("failed to configure consul lock: %w", err)
+	}
+
+	t.coreLogger.InfoContext(ctx, "HA mode enabled. Starting leader election loop", slog.String("lock_key", lockKey))
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		t.coreLogger.InfoContext(ctx, "Attempting to acquire leadership lock...")
+		lostCh, err := lock.Lock(ctx.Done())
+		if err != nil {
+			t.coreLogger.ErrorContext(ctx, "Error acquiring leadership lock, retrying in 5s", slog.Any("error", err))
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(5 * time.Second):
+				continue
+			}
+		}
+
+		if lostCh == nil {
+			continue
+		}
+
+		t.isLeader.Store(true)
+		t.coreLogger.InfoContext(ctx, "Leadership acquired. Starting reconcilers...")
+
+		leaderCtx, cancelLeader := context.WithCancel(ctx)
+
+		var reconcilerWg errgroup.Group
+		if t.Forwarder != nil {
+			reconcilerWg.Go(func() error {
+				return t.Forwarder.Run(leaderCtx)
+			})
+		}
+		if t.Redirector != nil {
+			reconcilerWg.Go(func() error {
+				return t.Redirector.Run(leaderCtx)
+			})
+		}
+
+		select {
+		case <-ctx.Done():
+			cancelLeader()
+			_ = lock.Unlock()
+			t.isLeader.Store(false)
+			_ = reconcilerWg.Wait()
+			return nil
+		case <-lostCh:
+			t.coreLogger.WarnContext(ctx, "Leadership lock lost. Stopping reconcilers and reverting to standby...")
+			cancelLeader()
+			t.isLeader.Store(false)
+			_ = reconcilerWg.Wait()
+		}
+	}
+}
+
 func (t *Atc) healthHandler(shutdownRequested *atomic.Bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if shutdownRequested.Load() {
@@ -165,7 +296,7 @@ func (t *Atc) GetEnabledModulesTable() string {
 }
 
 func (t *Atc) GetAtcEnabledServices(ctx context.Context) ([]string, error) {
-	client, err := api.NewClient(consulCfg(t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC))
+	client, err := t.getConsulClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to consul: %w", err)
 	}
@@ -186,7 +317,7 @@ func (t *Atc) GetAtcEnabledServices(ctx context.Context) ([]string, error) {
 }
 
 func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
-	client, err := api.NewClient(consulCfg(t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC))
+	client, err := t.getConsulClient(r.Context())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to connect to consul: %v", err), http.StatusInternalServerError)
 		return
@@ -371,7 +502,7 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (t *Atc) PurgeServiceResolver(ctx context.Context, name string) error {
-	client, err := api.NewClient(consulCfg(t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC))
+	client, err := t.getConsulClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to connect to consul: %w", err)
 	}
@@ -382,7 +513,7 @@ func (t *Atc) PurgeServiceResolver(ctx context.Context, name string) error {
 	}
 
 	resolver, ok := entry.(*api.ServiceResolverConfigEntry)
-	if !ok || resolver.Meta == nil || resolver.Meta["created-by"] != "atc" {
+	if !ok || resolver.Meta == nil || (resolver.Meta["created-by"] != "atc" && resolver.Meta["created-by"] != "atc-override") {
 		return fmt.Errorf("entry was not created by ATC")
 	}
 
@@ -391,6 +522,66 @@ func (t *Atc) PurgeServiceResolver(ctx context.Context, name string) error {
 		return fmt.Errorf("failed to delete config entry: %w", err)
 	}
 
+	return nil
+}
+
+func (t *Atc) ApplyFailoverOverride(ctx context.Context, service string, targetDc string) error {
+	client, err := t.getConsulClient(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to connect to consul: %w", err)
+	}
+
+	entry := &api.ServiceResolverConfigEntry{
+		Kind: "service-resolver",
+		Name: service,
+		Meta: map[string]string{
+			"created-by": "atc-override",
+		},
+		Failover: map[string]api.ServiceResolverFailover{
+			"*": {
+				Targets: []api.ServiceResolverFailoverTarget{
+					{
+						Service:    service,
+						Datacenter: targetDc,
+					},
+				},
+			},
+		},
+	}
+
+	_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+	if err != nil {
+		return fmt.Errorf("failed to set failover override: %w", err)
+	}
+
+	t.coreLogger.InfoContext(ctx, "Applied manual failover override", slog.String("service", service), slog.String("target_dc", targetDc))
+	return nil
+}
+
+func (t *Atc) TriggerManualRedirect(ctx context.Context, service string, redirectDc string) error {
+	client, err := t.getConsulClient(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to connect to consul: %w", err)
+	}
+
+	entry := &api.ServiceResolverConfigEntry{
+		Kind: "service-resolver",
+		Name: service,
+		Meta: map[string]string{
+			"created-by": "atc-override",
+		},
+		Redirect: &api.ServiceResolverRedirect{
+			Service:    service,
+			Datacenter: redirectDc,
+		},
+	}
+
+	_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+	if err != nil {
+		return fmt.Errorf("failed to set redirect override: %w", err)
+	}
+
+	t.coreLogger.InfoContext(ctx, "Applied manual redirect override", slog.String("service", service), slog.String("redirect_dc", redirectDc))
 	return nil
 }
 
@@ -447,4 +638,69 @@ func getStrategyFromTags(tags []string, prefix string) string {
 		}
 	}
 	return ""
+}
+
+func (t *Atc) getConsulClient(ctx context.Context) (*api.Client, error) {
+	t.cfgMu.RLock()
+	addr := t.Cfg.ConsulAddr
+	token := t.Cfg.ConsulToken
+	dc := t.Cfg.ConsulDC
+	t.cfgMu.RUnlock()
+	return api.NewClient(consulCfg(addr, token, dc))
+}
+
+func (t *Atc) GetFederationStatus(ctx context.Context) (map[string]string, error) {
+	client, err := t.getConsulClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to consul: %w", err)
+	}
+
+	members, err := client.Agent().Members(true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch consul WAN members: %w", err)
+	}
+
+	dcMap := make(map[string]string)
+	for _, m := range members {
+		dc := m.Tags["dc"]
+		if dc == "" {
+			continue
+		}
+		var statusStr string
+		switch m.Status {
+		case 1:
+			statusStr = "alive"
+		case 4:
+			statusStr = "failed"
+		default:
+			statusStr = "offline"
+		}
+		if dcMap[dc] != "alive" {
+			dcMap[dc] = statusStr
+		}
+	}
+	return dcMap, nil
+}
+
+func (t *Atc) ReloadConfig(cfg Config) {
+	t.cfgMu.Lock()
+	t.Cfg = cfg
+	t.cfgMu.Unlock()
+
+	t.coreLogger.Info("Configuration reloaded dynamically from file watcher")
+
+	if t.Forwarder != nil {
+		t.Forwarder.UpdateConfig(
+			cfg.Strategies.Failover,
+			cfg.DampeningPeriod,
+			cfg.MinDampeningPeriod,
+		)
+	}
+	if t.Redirector != nil {
+		t.Redirector.UpdateConfig(
+			cfg.Strategies.Redirect,
+			cfg.DampeningPeriod,
+			cfg.MinDampeningPeriod,
+		)
+	}
 }

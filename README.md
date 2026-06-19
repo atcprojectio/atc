@@ -12,14 +12,16 @@ Originally based on a heavy dependency kit, ATC has been modernised to run nativ
 
 - **Consul Automation**: Automatically watches service health checks and resolves configurations to create failover (`failover.hcl`) and redirection (`redirect.hcl`) service resolvers.
 - **Consul Catalog Failover**: Automatically monitors Consul catalog changes and registers Prepared Queries (`atc-<service-name>`) with geo-failover to the nearest 2 datacenters for tagged services.
-- **Embedded React Dashboard**: Stunning glassmorphic web dashboard served at `/` that displays tracked services, their prepared queries, active tags, and failover status.
+- **Oscillation Dampening (Hysteresis)**: Protects Consul from configuration churn by debouncing catalog flapping. Supports global defaults, custom tag overrides, and operator safety boundaries.
+- **Active-Passive High Availability**: Run multiple ATC instances in active-passive mode. Dynamic leadership is coordinated via Consul KV Session Locks, with standby nodes serving read-only dashboards and metrics.
+- **Embedded React Dashboard**: Stunning glassmorphic web dashboard served at `/` that displays tracked services, their prepared queries, active tags, failover status, and active leader designation.
 - **Native Concurrency**: Powered by Go standard library `context`, `sync`, and `golang.org/x/sync/errgroup` for safe, coordinated background execution.
 - **OpenTelemetry Integration**: Full support for OpenTelemetry Traces, Metrics, and Logs. Traces and logs are automatically correlated and exported via OTLP, and metrics are exposed via OTLP and a Prometheus bridge.
 - **log/slog Structured Logging**: Multiplexed structured, level-filtered logging using standard Go `"log/slog"` that outputs to console/Stderr and propagates context to OpenTelemetry.
 - **Dual HTTP Ports**: Isolates application API endpoints from metrics for production security:
-  - **Main HTTP Port** (default `:8088`): Serves the React dashboard at `/`, exposes `/ready`, `/services`, `/api/services`, and the MCP interface.
+  - **Main HTTP Port** (default `:8088`): Serves the React dashboard at `/`, exposes `/ready`, `/services`, `/api/services`, `/api/overrides`, `/api/leader`, and the MCP interface.
   - **Metrics HTTP Port** (default `:8089`): Serves OpenTelemetry metrics in Prometheus format at `/metrics`.
-- **Model Context Protocol (MCP) Server**: Hosts a native MCP server over Streamable HTTP transport at `/mcp` to expose system state directly to LLM agents and AI clients.
+- **Model Context Protocol (MCP) Server**: Hosts a native MCP server over Streamable HTTP transport at `/mcp` to expose system state and manual write actions directly to LLM agents and AI clients.
 
 > [!IMPORTANT]
 > **API-to-MCP Tool Mapping Rule**
@@ -84,6 +86,14 @@ ATC supports predefined routing strategies that admins can configure in a YAML f
 ### Configuration Example (`strategies.yaml`)
 
 ```yaml
+dampening_period: "5s"
+min_dampening_period: "0s"
+
+ha:
+  enabled: true
+  lock_key: "atc/leader/lock"
+  session_ttl: "15s"
+
 strategies:
   failover:
     standard-failover:
@@ -104,13 +114,14 @@ strategies:
       datacenter: "dc3"
 ```
 
-### Invoking Strategies via Consul Tags
+### Invoking Strategies and Hysteresis via Consul Tags
 
-Teams can apply these predefined strategies to their Consul services using the following tags in the service definition:
+Teams can apply these predefined strategies and override dampening boundaries to their Consul services using the following tags in the service definition:
 - `atc.failover=<strategy-name>`: Specifies the predefined failover strategy to use. If omitted or not found, it defaults to failing over to the dynamically resolved target datacenter for the same service.
 - `atc.redirect=<strategy-name>`: Specifies the predefined redirection strategy to use when the service goes offline (is deleted from the catalog). If omitted or not found, it defaults to redirecting to the dynamically resolved target datacenter for the same service.
+- `atc.dampening=<duration>`: Custom hysteresis override (e.g. `atc.dampening=10s` or `atc.dampening=0s` for immediate mode). Clamped to `min_dampening_period`.
 
-When a service is active, the strategy names are persisted in the Consul `service-resolver` entry metadata, which allows the redirector to apply the correct redirect strategy even after the service is removed from the Consul catalog.
+When a service is active, the strategy and dampening tag values are persisted in the Consul `service-resolver` entry metadata, which allows the redirector to apply the correct policies even after the service is removed from the Consul catalog.
 
 ---
 
@@ -122,7 +133,25 @@ When a service is active, the strategy names are persisted in the Consul `servic
 - `/ready` (GET): Simple readiness check (`200 OK`).
 - `/services` (GET): Prints a formatted ASCII table showing the status of all active components.
 - `/api/services` (GET): JSON list of active Consul services tagged with `atc.enabled=true`.
-- `/mcp` (GET/POST): Streamable HTTP endpoint for Model Context Protocol interactions.
+- `/api/leader` (GET): JSON representing leadership status (`{"leader":true/false}`).
+- `/api/federation` (GET): JSON list of WAN-federated datacenters and connection statuses.
+- `/api/overrides` (POST): Manually override automatic failover/redirect routes in Consul.
+  - JSON payload:
+    ```json
+    {
+      "service": "payment-service",
+      "type": "failover|redirect",
+      "target_dc": "dc2"
+    }
+    ```
+- `/mcp` (GET/POST): Streamable HTTP endpoint for Model Context Protocol interactions. Offers tools:
+  - `check_readiness`
+  - `check_leadership`
+  - `list_atc_enabled_services`
+  - `list_wan_federation_status`
+  - `purge_redirect_config`
+  - `apply_failover_override`
+  - `trigger_manual_redirect`
 
 ### Metrics API (Port 8089)
 
@@ -171,5 +200,7 @@ To enable the ATC Model Context Protocol (MCP) server in **Claude Desktop**, you
 
 3. Restart Claude Desktop. The agent will now have access to the following tools:
    - `check_readiness`
-   - `list_services`
    - `list_atc_enabled_services`
+   - `purge_redirect_config`
+   - `check_leadership`
+   - `list_wan_federation_status`

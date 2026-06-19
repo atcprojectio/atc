@@ -13,6 +13,11 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+      - name: Lint Frontend
+        run: |
+          cd frontend
+          npm install
+          npm run lint
       - name: Build Frontend
         run: make build-frontend
       - uses: actions/setup-go@v6

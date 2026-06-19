@@ -39,6 +39,9 @@ func (t *Atc) initServer() error {
 	serv.Mux.HandleFunc("/ready", OkHandler())
 	serv.Mux.HandleFunc("GET /api/services", t.apiServicesHandler)
 	serv.Mux.HandleFunc("DELETE /api/services", t.apiServicesDeleteHandler)
+	serv.Mux.HandleFunc("GET /api/leader", t.apiLeaderHandler)
+	serv.Mux.HandleFunc("GET /api/federation", t.apiFederationHandler)
+	serv.Mux.HandleFunc("POST /api/overrides", t.apiOverridesHandler)
 	serv.Mux.Handle("/mcp", mcp_server.NewHandler(t))
 
 	t.Server = serv
@@ -46,7 +49,15 @@ func (t *Atc) initServer() error {
 }
 
 func (t *Atc) initForwarder() error {
-	forward, err := forwarder.New(t.logger.With(slog.String("module", "forwarder")), t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC, t.Cfg.Strategies.Failover)
+	forward, err := forwarder.New(
+		t.logger.With(slog.String("module", "forwarder")),
+		t.Cfg.ConsulAddr,
+		t.Cfg.ConsulToken,
+		t.Cfg.ConsulDC,
+		t.Cfg.Strategies.Failover,
+		t.Cfg.DampeningPeriod,
+		t.Cfg.MinDampeningPeriod,
+	)
 	if err != nil {
 		return err
 	}
@@ -56,7 +67,16 @@ func (t *Atc) initForwarder() error {
 
 func (t *Atc) initRedirector() error {
 	forwarderEnabled := t.enabledModules[Forwarder]
-	redirect, err := redirector.New(t.logger.With(slog.String("module", "redirector")), t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC, forwarderEnabled, t.Cfg.Strategies.Redirect)
+	redirect, err := redirector.New(
+		t.logger.With(slog.String("module", "redirector")),
+		t.Cfg.ConsulAddr,
+		t.Cfg.ConsulToken,
+		t.Cfg.ConsulDC,
+		forwarderEnabled,
+		t.Cfg.Strategies.Redirect,
+		t.Cfg.DampeningPeriod,
+		t.Cfg.MinDampeningPeriod,
+	)
 	if err != nil {
 		return err
 	}

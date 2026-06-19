@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/consul/api"
 )
@@ -124,7 +125,7 @@ func TestRedirectorReconcile(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, server.Listener.Addr().String(), "", "", false, nil)
+	r, err := New(logger, server.Listener.Addr().String(), "", "", false, nil, "", "")
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
@@ -288,7 +289,7 @@ func TestRedirectorReconcile_ForwarderEnabled(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, server.Listener.Addr().String(), "", "", true, nil) // forwarderEnabled = true
+	r, err := New(logger, server.Listener.Addr().String(), "", "", true, nil, "", "") // forwarderEnabled = true
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
@@ -399,7 +400,7 @@ func TestRedirectorReconcile_WithStrategy(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, server.Listener.Addr().String(), "", "", false, strategies)
+	r, err := New(logger, server.Listener.Addr().String(), "", "", false, strategies, "", "")
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
@@ -440,3 +441,51 @@ func TestRedirectorReconcile_WithStrategy(t *testing.T) {
 	}
 }
 
+func TestRedirectorUpdateConfigRace(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	r, err := New(logger, "", "", "", false, nil, "5s", "0s")
+	if err != nil {
+		t.Fatalf("Failed to create redirector: %v", err)
+	}
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					r.mu.Lock()
+					_ = r.redirectStrategies
+					_ = r.dampeningPeriod
+					_ = r.minDampeningPeriod
+					r.mu.Unlock()
+				}
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			r.UpdateConfig(
+				map[string]RedirectStrategy{
+					"test": {Datacenter: "dc2"},
+				},
+				"10s",
+				"1s",
+			)
+			time.Sleep(1 * time.Microsecond)
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(done)
+	wg.Wait()
+}

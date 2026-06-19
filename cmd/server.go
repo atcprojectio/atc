@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
@@ -53,6 +54,40 @@ var serverCmd = &cobra.Command{
 		t, err := atc.New(cfg)
 		if err != nil {
 			return err
+		}
+
+		if configFile != "" {
+			viper.OnConfigChange(func(e fsnotify.Event) {
+				var newCfg atc.Config
+				if err := viper.Unmarshal(&newCfg); err != nil {
+					return
+				}
+				if newCfg.Server.HTTPListenPort == 0 {
+					newCfg.Server.HTTPListenPort = viper.GetInt("port")
+				}
+				if newCfg.Server.MetricsListenPort == 0 {
+					newCfg.Server.MetricsListenPort = viper.GetInt("metrics_port")
+				}
+				if len(newCfg.Target) == 0 {
+					newCfg.Target = viper.GetStringSlice("target")
+				}
+				if newCfg.Server.LogLevel == "" {
+					newCfg.Server.LogLevel = viper.GetString("log_level")
+				}
+				if newCfg.ConsulAddr == "" {
+					newCfg.ConsulAddr = viper.GetString("consul_addr")
+				}
+				if newCfg.ConsulToken == "" {
+					newCfg.ConsulToken = viper.GetString("consul_token")
+				}
+				if newCfg.ConsulDC == "" {
+					newCfg.ConsulDC = viper.GetString("consul_dc")
+				}
+				newCfg.Server.MetricsNamespace = "atc"
+
+				t.ReloadConfig(newCfg)
+			})
+			viper.WatchConfig()
 		}
 
 		return t.Run()

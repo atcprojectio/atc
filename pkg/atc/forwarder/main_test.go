@@ -60,9 +60,9 @@ func TestForwarderReconcile(t *testing.T) {
 			// List API
 			entries := []api.ConfigEntry{
 				&api.ServiceResolverConfigEntry{
-					Kind: "service-resolver",
-					Name: "service-a",
-					Meta: map[string]string{"created-by": "atc"},
+					Kind:           "service-resolver",
+					Name:           "service-a",
+					Meta:           map[string]string{"created-by": "atc"},
 					ConnectTimeout: 15 * time.Second,
 					Failover: map[string]api.ServiceResolverFailover{
 						"*": {
@@ -118,7 +118,7 @@ func TestForwarderReconcile(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	f, err := New(logger, server.Listener.Addr().String(), "", "", nil)
+	f, err := New(logger, server.Listener.Addr().String(), "", "", nil, "", "")
 	if err != nil {
 		t.Fatalf("Failed to create forwarder: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestForwarderReconcile_WithStrategy(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	f, err := New(logger, server.Listener.Addr().String(), "", "", strategies)
+	f, err := New(logger, server.Listener.Addr().String(), "", "", strategies, "", "")
 	if err != nil {
 		t.Fatalf("Failed to create forwarder: %v", err)
 	}
@@ -292,3 +292,51 @@ func TestForwarderReconcile_WithStrategy(t *testing.T) {
 	}
 }
 
+func TestForwarderUpdateConfigRace(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	f, err := New(logger, "", "", "", nil, "5s", "0s")
+	if err != nil {
+		t.Fatalf("Failed to create forwarder: %v", err)
+	}
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					f.mu.Lock()
+					_ = f.failoverStrategies
+					_ = f.dampeningPeriod
+					_ = f.minDampeningPeriod
+					f.mu.Unlock()
+				}
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			f.UpdateConfig(
+				map[string]FailoverStrategy{
+					"test": {ConnectTimeout: "10s"},
+				},
+				"10s",
+				"1s",
+			)
+			time.Sleep(1 * time.Microsecond)
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(done)
+	wg.Wait()
+}

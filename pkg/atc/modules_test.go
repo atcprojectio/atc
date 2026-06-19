@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/consul/api"
@@ -288,3 +289,191 @@ func TestApiServicesHandler(t *testing.T) {
 	}
 }
 
+func TestGetFederationStatusMock(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/v1/agent/members" && r.URL.Query().Get("wan") == "1" {
+			members := []map[string]interface{}{
+				{
+					"Name":   "consul-dc1",
+					"Status": 1,
+					"Tags":   map[string]string{"dc": "dc1"},
+				},
+				{
+					"Name":   "consul-dc2",
+					"Status": 4,
+					"Tags":   map[string]string{"dc": "dc2"},
+				},
+				{
+					"Name":   "consul-dc3",
+					"Status": 1,
+					"Tags":   map[string]string{"dc": "dc3"},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(members)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	atcInstance := &Atc{
+		Cfg: Config{
+			ConsulAddr: server.Listener.Addr().String(),
+		},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	statusMap, err := atcInstance.GetFederationStatus(context.Background())
+	if err != nil {
+		t.Fatalf("GetFederationStatus failed: %v", err)
+	}
+
+	if statusMap["dc1"] != "alive" {
+		t.Errorf("expected dc1 to be alive, got %q", statusMap["dc1"])
+	}
+	if statusMap["dc2"] != "failed" {
+		t.Errorf("expected dc2 to be failed, got %q", statusMap["dc2"])
+	}
+	if statusMap["dc3"] != "alive" {
+		t.Errorf("expected dc3 to be alive, got %q", statusMap["dc3"])
+	}
+}
+
+func TestApplyFailoverOverride(t *testing.T) {
+	var writtenEntry *api.ServiceResolverConfigEntry
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PUT" && r.URL.Path == "/v1/config" {
+			var entry api.ServiceResolverConfigEntry
+			if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writtenEntry = &entry
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	atc := &Atc{
+		Cfg: Config{
+			ConsulAddr: server.Listener.Addr().String(),
+		},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		coreLogger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	err := atc.ApplyFailoverOverride(context.Background(), "payment-service", "dc2")
+	if err != nil {
+		t.Fatalf("ApplyFailoverOverride failed: %v", err)
+	}
+
+	if writtenEntry == nil {
+		t.Fatalf("expected entry to be written")
+	}
+	if writtenEntry.Name != "payment-service" {
+		t.Errorf("expected service name 'payment-service', got %q", writtenEntry.Name)
+	}
+	if writtenEntry.Meta["created-by"] != "atc-override" {
+		t.Errorf("expected created-by to be 'atc-override', got %q", writtenEntry.Meta["created-by"])
+	}
+	if writtenEntry.Failover == nil {
+		t.Fatalf("expected Failover configuration")
+	}
+	fo, ok := writtenEntry.Failover["*"]
+	if !ok || len(fo.Targets) != 1 || fo.Targets[0].Datacenter != "dc2" {
+		t.Errorf("expected target datacenter to be 'dc2'")
+	}
+}
+
+func TestTriggerManualRedirect(t *testing.T) {
+	var writtenEntry *api.ServiceResolverConfigEntry
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PUT" && r.URL.Path == "/v1/config" {
+			var entry api.ServiceResolverConfigEntry
+			if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writtenEntry = &entry
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	atc := &Atc{
+		Cfg: Config{
+			ConsulAddr: server.Listener.Addr().String(),
+		},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		coreLogger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	err := atc.TriggerManualRedirect(context.Background(), "payment-service", "dc2")
+	if err != nil {
+		t.Fatalf("TriggerManualRedirect failed: %v", err)
+	}
+
+	if writtenEntry == nil {
+		t.Fatalf("expected entry to be written")
+	}
+	if writtenEntry.Name != "payment-service" {
+		t.Errorf("expected service name 'payment-service', got %q", writtenEntry.Name)
+	}
+	if writtenEntry.Meta["created-by"] != "atc-override" {
+		t.Errorf("expected created-by to be 'atc-override', got %q", writtenEntry.Meta["created-by"])
+	}
+	if writtenEntry.Redirect == nil || writtenEntry.Redirect.Datacenter != "dc2" {
+		t.Errorf("expected redirect datacenter to be 'dc2'")
+	}
+}
+
+func TestApiOverridesHandler(t *testing.T) {
+	var method string
+	var path string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		path = r.URL.Path
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	atc := &Atc{
+		Cfg: Config{
+			ConsulAddr: server.Listener.Addr().String(),
+		},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		coreLogger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// 1. Failover Override Request
+	payload := `{"service":"payment-service","type":"failover","target_dc":"dc2"}`
+	req := httptest.NewRequest("POST", "/api/overrides", strings.NewReader(payload))
+	rr := httptest.NewRecorder()
+	atc.apiOverridesHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected code 200, got %d", rr.Code)
+	}
+	if method != "PUT" || path != "/v1/config" {
+		t.Errorf("expected PUT /v1/config request to Consul, got %s %s", method, path)
+	}
+
+	// 2. Redirect Override Request
+	payload2 := `{"service":"payment-service","type":"redirect","target_dc":"dc3"}`
+	req2 := httptest.NewRequest("POST", "/api/overrides", strings.NewReader(payload2))
+	rr2 := httptest.NewRecorder()
+	atc.apiOverridesHandler(rr2, req2)
+
+	if rr2.Code != http.StatusOK {
+		t.Errorf("expected code 200, got %d", rr2.Code)
+	}
+	if method != "PUT" || path != "/v1/config" {
+		t.Errorf("expected PUT /v1/config request to Consul, got %s %s", method, path)
+	}
+}

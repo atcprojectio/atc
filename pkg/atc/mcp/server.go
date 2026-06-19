@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -14,6 +15,10 @@ type Service interface {
 	GetEnabledModulesTable() string
 	GetAtcEnabledServices(ctx context.Context) ([]string, error)
 	PurgeServiceResolver(ctx context.Context, name string) error
+	IsLeader() bool
+	GetFederationStatus(ctx context.Context) (map[string]string, error)
+	ApplyFailoverOverride(ctx context.Context, service string, targetDc string) error
+	TriggerManualRedirect(ctx context.Context, service string, redirectDc string) error
 }
 
 func NewHandler(svc Service) http.Handler {
@@ -36,6 +41,26 @@ func NewHandler(svc Service) http.Handler {
 		}, nil, nil
 	})
 
+	// Tool mapping for /api/leader API endpoint
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "check_leadership",
+		Description: "Checks if this ATC instance is the active leader coordinating Consul reconciliation (corresponds to /api/leader endpoint)",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		leader := svc.IsLeader()
+		var output string
+		if leader {
+			output = "This instance is the ACTIVE LEADER."
+		} else {
+			output = "This instance is in STANDBY mode."
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: output,
+				},
+			},
+		}, nil, nil
+	})
 
 	// Tool mapping for /api/services API endpoint
 	mcp.AddTool(server, &mcp.Tool{
@@ -64,6 +89,33 @@ func NewHandler(svc Service) http.Handler {
 		}, nil, nil
 	})
 
+	// Tool mapping for /api/federation API endpoint
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_wan_federation_status",
+		Description: "Lists all WAN-federated datacenters and their connection status (corresponds to /api/federation endpoint)",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		dcMap, err := svc.GetFederationStatus(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		var output string
+		if len(dcMap) == 0 {
+			output = "No WAN-federated datacenters detected."
+		} else {
+			output = "WAN Federation Status:\n"
+			for dc, status := range dcMap {
+				output += fmt.Sprintf("- %s: %s\n", dc, strings.ToUpper(status))
+			}
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: output,
+				},
+			},
+		}, nil, nil
+	})
+
 	// Tool mapping to purge a service resolver config entry
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "purge_redirect_config",
@@ -79,6 +131,48 @@ func NewHandler(svc Service) http.Handler {
 			Content: []mcp.Content{
 				&mcp.TextContent{
 					Text: fmt.Sprintf("Successfully purged service-resolver config entry for %s", input.Name),
+				},
+			},
+		}, nil, nil
+	})
+
+	// Tool mapping for applying manual failover override
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "apply_failover_override",
+		Description: "Applies a manual traffic failover override for a service to a target datacenter, bypassing automated reconciliation",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct {
+		Service  string `json:"service"`
+		TargetDc string `json:"target_dc"`
+	}) (*mcp.CallToolResult, any, error) {
+		err := svc.ApplyFailoverOverride(ctx, input.Service, input.TargetDc)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: fmt.Sprintf("Successfully applied failover override for service %s to datacenter %s", input.Service, input.TargetDc),
+				},
+			},
+		}, nil, nil
+	})
+
+	// Tool mapping for triggering manual redirect override
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "trigger_manual_redirect",
+		Description: "Triggers a manual traffic redirect override for a service to a redirect datacenter, bypassing automated reconciliation",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct {
+		Service    string `json:"service"`
+		RedirectDc string `json:"redirect_dc"`
+	}) (*mcp.CallToolResult, any, error) {
+		err := svc.TriggerManualRedirect(ctx, input.Service, input.RedirectDc)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: fmt.Sprintf("Successfully triggered manual redirect for service %s to datacenter %s", input.Service, input.RedirectDc),
 				},
 			},
 		}, nil, nil

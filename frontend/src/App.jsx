@@ -9,10 +9,40 @@ function App() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [countdown, setCountdown] = useState(10);
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [isLeader, setIsLeader] = useState(true);
+  const [federation, setFederation] = useState({});
 
-  const fetchServices = async () => {
+  const fetchServices = async (showLoading = true) => {
     try {
-      setLoading(true);
+      if (showLoading) {
+        setLoading(true);
+      }
+      
+      try {
+        const leaderRes = await fetch('/api/leader');
+        if (leaderRes.ok) {
+          const leaderData = await leaderRes.json();
+          setIsLeader(leaderData.leader);
+        }
+      } catch (err) {
+        console.error("Failed to fetch leader status:", err);
+      }
+
+      // Fetch federation status
+      try {
+        const fedRes = await fetch('/api/federation');
+        if (fedRes.ok) {
+          const fedData = await fedRes.json();
+          const fedMap = {};
+          fedData.forEach(item => {
+            fedMap[item.datacenter] = item.status;
+          });
+          setFederation(fedMap);
+        }
+      } catch (err) {
+        console.error("Failed to fetch federation status:", err);
+      }
+
       const res = await fetch('/api/services');
       if (!res.ok) {
         throw new Error(`Failed to fetch services: ${res.statusText}`);
@@ -29,12 +59,16 @@ function App() {
   };
 
   useEffect(() => {
-    fetchServices();
+    Promise.resolve().then(() => {
+      fetchServices(false);
+    });
   }, []);
 
   useEffect(() => {
     if (!autoRefresh) return;
-    setCountdown(10);
+    Promise.resolve().then(() => {
+      setCountdown(10);
+    });
 
     const timer = setInterval(() => {
       setCountdown((prev) => {
@@ -74,6 +108,29 @@ function App() {
     }
   };
 
+  const renderDatacenterNode = (service, dc, isRedirect = false) => {
+    const status = federation[dc];
+    let badgeClass = 'fed-unknown';
+    let statusText = 'Unfederated';
+    let indicatorText = '⚠️';
+
+    if (status === 'alive') {
+      badgeClass = 'fed-alive';
+      statusText = 'WAN Federated';
+      indicatorText = '●';
+    } else if (status === 'failed') {
+      badgeClass = 'fed-failed';
+      statusText = 'WAN Failed';
+      indicatorText = '▲';
+    }
+
+    return (
+      <div className={`failover-node target ${isRedirect ? 'redirect-node' : ''} ${badgeClass}`} title={`${dc}: ${statusText}`}>
+        <span className="fed-indicator">{indicatorText}</span> {service} ({dc})
+      </div>
+    );
+  };
+
   const filteredServices = services.filter((svc) =>
     svc.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     svc.tags.some((tag) => tag.toLowerCase().includes(searchTerm.toLowerCase()))
@@ -89,6 +146,9 @@ function App() {
         <div className="logo-container">
           <div className="logo-pulse"></div>
           <h1 className="logo-title">ATC</h1>
+          <span className={`leader-badge ${isLeader ? 'active' : 'standby'}`}>
+            {isLeader ? '● ACTIVE LEADER' : '○ STANDBY'}
+          </span>
         </div>
       </header>
 
@@ -240,9 +300,11 @@ function App() {
                         <>
                           <div className="failover-node current">Local</div>
                           <div className="failover-arrow">➔</div>
-                          <div className="failover-node target redirect-node">
-                            {svc.redirect_target ? `${svc.redirect_target.service} (${svc.redirect_target.datacenter})` : 'Remote DC'}
-                          </div>
+                          {svc.redirect_target ? (
+                            renderDatacenterNode(svc.redirect_target.service, svc.redirect_target.datacenter, true)
+                          ) : (
+                            <div className="failover-node target redirect-node">Remote DC</div>
+                          )}
                         </>
                       ) : svc.resolver_type === 'failover' ? (
                         <>
@@ -251,9 +313,7 @@ function App() {
                             svc.failover_targets.map((target, idx) => (
                               <React.Fragment key={idx}>
                                 <div className="failover-arrow">➔</div>
-                                <div className="failover-node target">
-                                  {target.service} ({target.datacenter})
-                                </div>
+                                {renderDatacenterNode(target.service, target.datacenter)}
                               </React.Fragment>
                             ))
                           ) : (
