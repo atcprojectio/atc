@@ -300,8 +300,8 @@ brew install atc</code></pre>
         <pre><code class="language-bash"># Navigate to the demo directory
 cd atc-demo
 
-# Build the custom ATC image (including React compiler)
-make build
+# Pull the ATC and Consul Docker images
+make pull
 
 # Start the Consul 2.0.1 cluster and Mock backends
 make up
