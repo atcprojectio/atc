@@ -25,7 +25,7 @@ jobs:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ secrets.ORGANIZATION_BREW_APP_ID }}
+          client-id: ${{ secrets.ORGANIZATION_BREW_CLIENT_ID }}
           private-key: ${{ secrets.ORGANIZATION_BREW_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: "homebrew-tap"
