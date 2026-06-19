@@ -4,23 +4,25 @@ before:
     - go mod download
 archives:
   - id: darwin
-    builds:
-    - darwin
-    format: zip
+    ids:
+      - darwin
+    formats:
+      - zip
   - id: linux
-    builds:
-    - linux
-    format: zip
+    ids:
+      - linux
+    formats:
+      - zip
   - id: windows
-    builds:
+    ids:
       - windows
-    format: zip
-brews:
+    formats:
+      - zip
+homebrew_casks:
   - ids:
       - darwin
-    directory: Formula
-    install: |
-      bin.install "{{.ProjectName}}"
+    binaries:
+      - "{{.ProjectName}}"
     repository:
       owner: atcprojectio
       name: homebrew-tap
@@ -109,7 +111,7 @@ nfpms:
   - id: linux
     maintainer: 'bram vogelaar <bram@attachmentgenie.com>'
     package_name: "{{.ProjectName}}"
-    builds:
+    ids:
       - linux
     formats:
       - deb
