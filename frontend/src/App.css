@@ -506,12 +506,13 @@ body {
 .failover-visualization {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  flex-wrap: wrap;
+  justify-content: flex-start;
   background: rgba(15, 23, 42, 0.3);
   border: 1px solid rgba(255, 255, 255, 0.03);
   border-radius: 10px;
   padding: 12px;
-  gap: 5px;
+  gap: 8px 6px;
 }
 
 .failover-node {
@@ -520,7 +521,7 @@ body {
   padding: 6px 8px;
   border-radius: 6px;
   text-align: center;
-  flex: 1;
+  flex: 0 1 auto;
   white-space: nowrap;
 }
 
