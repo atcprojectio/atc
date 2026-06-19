@@ -16,3 +16,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  - package-ecosystem: "helm"
+    directory: "/deploy/helm/atc"
+    schedule:
+      interval: "weekly"

@@ -49,6 +49,30 @@ cd atc
 make build
 ```
 
+### Deployment
+
+Production-grade deployment configurations for Nomad and Kubernetes are available in the [deploy](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/deploy) directory.
+
+#### Kubernetes (Helm)
+
+A Helm chart is located under [deploy/helm/atc](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/deploy/helm/atc). You can install it with:
+
+```bash
+helm install atc ./deploy/helm/atc --values ./deploy/helm/atc/values.yaml
+```
+
+To configure strategy rules, edit the `config.strategiesYaml` block in `values.yaml`.
+
+#### Nomad (HCL)
+
+A Nomad job definition is available at [deploy/nomad/atc.nomad.hcl](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/deploy/nomad/atc.nomad.hcl). It runs two instances in Active-Passive HA mode using Consul session locks.
+
+Submit the job using:
+
+```bash
+nomad job run ./deploy/nomad/atc.nomad.hcl
+```
+
 ---
 
 ## Usage

@@ -266,6 +266,15 @@ brew install atc</code></pre>
             </tr>
           </tbody>
         </table>
+
+        <h2>4. Deploying to Kubernetes (Helm)</h2>
+        <p>A Helm chart is provided under <code>deploy/helm/atc</code>. You can install it on your Kubernetes cluster using the following command:</p>
+        <pre><code class="language-bash">helm install atc ./deploy/helm/atc --values ./deploy/helm/atc/values.yaml</code></pre>
+        <p>Configuration settings like Consul addresses, predefined strategies, and resources are configurable in the <code>values.yaml</code> file.</p>
+
+        <h2>5. Deploying to Nomad</h2>
+        <p>A Nomad job definition is available at <code>deploy/nomad/atc.nomad.hcl</code>. To run ATC in an active-passive HA mode with two instances, run:</p>
+        <pre><code class="language-bash">nomad job run ./deploy/nomad/atc.nomad.hcl</code></pre>
       </section>
 
       <!-- Demo Project Section -->

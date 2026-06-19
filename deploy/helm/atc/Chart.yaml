@@ -1,0 +1,6 @@
+apiVersion: v2
+name: atc
+description: Active Traffic Control (ATC) automatic Consul traffic control and failover agent.
+type: application
+version: 0.1.0
+appVersion: "0.0.4"

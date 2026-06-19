@@ -26,6 +26,8 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
+      - name: Lint Helm Chart
+        run: helm lint deploy/helm/atc
   test:
     runs-on: ubuntu-latest
     steps:

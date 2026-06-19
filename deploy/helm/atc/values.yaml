@@ -1,0 +1,80 @@
+replicaCount: 2
+
+image:
+  repository: atcprojectio/atc
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 8088
+
+metricsService:
+  type: ClusterIP
+  port: 8089
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+config:
+  logLevel: info
+  consulAddr: "http://127.0.0.1:8500"
+  consulDC: "dc1"
+  # Predefined strategies and HA configuration for ATC config file
+  strategiesYaml: |
+    service: "atc-service"
+    ha:
+      enabled: true
+      lock_key: "atc/leader/lock"
+      session_ttl: "15s"
+    dampening_period: "5s"
+    min_dampening_period: "1s"
+    strategies:
+      failover:
+        standard-failover:
+          connect_timeout: "15s"
+          targets:
+            - service: "payment-service"
+              datacenter: "dc2"
+      redirect:
+        standard-redirect:
+          service: "payment-service"
+          datacenter: "dc2"

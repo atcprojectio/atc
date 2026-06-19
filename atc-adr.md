@@ -311,3 +311,30 @@ Operators and AI agents need the ability to manually override traffic routing in
   - Full parity between standard REST endpoints and MCP agent tools.
 - **Consequences**:
   - Restoring automated mode requires explicitly purging the override entry.
+
+---
+
+# ADR 0011: Helm Chart and Nomad Job Deployment Targets
+
+## Status
+Accepted
+
+## Date
+2026-06-19
+
+## Context
+Deploying ATC to production environments requires supporting both Kubernetes (the dominant container orchestration platform) and HashiCorp Nomad (which is frequently used in environments that heavily leverage HashiCorp Consul). The deployment configurations must support active-passive high availability (HA) session locks, log level configuration, metrics endpoints exposing, and mounting predefined strategy configuration files.
+
+## Decisions
+- **Kubernetes (Helm)**: Package ATC as a standard Helm v3 chart located under `deploy/helm/atc`. It manages replicas, configuration maps containing strategies, ClusterIP services for application and metrics endpoints, and standard RBAC components.
+- **Nomad Job Specification**: Provide an HCL2 job file under `deploy/nomad/atc.nomad.hcl` configuring a Docker task with two task replicas, exposing http/metrics ports, and mounting configurations via Nomad templates.
+- **Continuous Integration Linting**: Add a Helm lint step (`helm lint`) to the Pull Request workflow to ensure syntax correctness of all templates.
+- **Automated Dependency Auditing**: Add a `helm` ecosystem tracking block to `.github/dependabot.yml` to automatically verify chart dependency updates.
+
+## Consequences
+- **Benefits**:
+  - Out-of-the-box support for deploying ATC to both major orchestrators (Nomad and Kubernetes).
+  - Standardized configuration parameters (Consul API URLs, tokens, metrics scraping) exposed as variables.
+  - Automated CI validation of Helm charts.
+- **Consequences**:
+  - Standard variables must align with environment variables mapped to Viper settings in ATC.

@@ -32,6 +32,11 @@ ATC server hosts a Model Context Protocol (MCP) server over Streamable HTTP tran
 for seamless integration with AI models and agents. Exposed tools include check_readiness, check_leadership,
 list_atc_enabled_services, list_wan_federation_status, purge_redirect_config, apply_failover_override, and trigger_manual_redirect.
 
+Deployment:
+
+ATC can be deployed using the production-ready Helm chart located under deploy/helm/atc,
+or the Nomad job specification located under deploy/nomad/atc.nomad.hcl.
+
 Predefined Strategies:
 
 ATC supports predefined failover and redirect strategies defined by admins in a YAML config file.
