@@ -3,7 +3,7 @@ APP-BIN := dist/$(shell basename $(shell pwd))
 .PHONY: build build-frontend consul-up consul-down consul-register-test consul-deregister-test darwin fresh lint linux qa release run snapshot tag test watch
 
 build-frontend:
-	cd frontend && npm install && npm run build
+	cd frontend && npm ci && npm run build
 
 build: build-frontend
 	goreleaser build --id $(shell go env GOOS) --single-target --snapshot --clean -o ${APP-BIN}
