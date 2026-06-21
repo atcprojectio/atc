@@ -285,7 +285,7 @@ brew install atc</code></pre>
       <section id="demo-project" class="content-section">
         <div class="badge">Demo</div>
         <h1>Consul 2.0.1 Demo Project</h1>
-        <p class="lead">ATC includes a fully automated, multi-datacenter federated Consul 2.0.1 demo environment. It showcases how ATC dynamically generates and updates <code>service-resolver</code> configuration entries during service failovers and redirects.</p>
+        <p class="lead">The ATC ecosystem includes a fully automated, multi-datacenter federated Consul 2.0.1 demo environment hosted in the <a href="https://github.com/atcprojectio/atc-demo" target="_blank">atc-demo</a> repository. It showcases how ATC dynamically generates and updates <code>service-resolver</code> configuration entries during service failovers and redirects.</p>
         
         <h2>Demo Features</h2>
         <ul>
@@ -296,8 +296,9 @@ brew install atc</code></pre>
         </ul>
 
         <h2>Running the Demo</h2>
-        <p>Ensure you have Docker and Python 3 installed, then execute the following tasks:</p>
-        <pre><code class="language-bash"># Navigate to the demo directory
+        <p>Ensure you have Docker and Python 3 installed, then clone the repository and execute the following tasks:</p>
+        <pre><code class="language-bash"># Clone the demo repository
+git clone https://github.com/atcprojectio/atc-demo.git
 cd atc-demo
 
 # Pull the ATC and Consul Docker images

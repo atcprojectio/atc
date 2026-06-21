@@ -75,6 +75,28 @@ nomad job run ./deploy/nomad/atc.nomad.hcl
 
 ---
 
+## Demo Project
+
+A complete, self-contained multi-datacenter demo environment is available in the [atc-demo](https://github.com/atcprojectio/atc-demo) repository. It automatically spins up:
+- Two WAN-federated Consul servers (`dc1` and `dc2`).
+- Two ATC service instances running in active-passive HA mode.
+- Mock target services and an automated Python traffic client to showcase live routing, failover, and redirect behavior.
+
+To run it, clone the demo repository and follow the instructions in the README:
+
+```bash
+# Clone the demo repository
+git clone https://github.com/atcprojectio/atc-demo.git
+cd atc-demo
+
+# Pull images, start the stack and run the demo walkthrough
+make pull
+make up
+make run-demo
+```
+
+---
+
 ## Usage
 
 Start the ATC background watcher process:
