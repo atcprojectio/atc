@@ -124,6 +124,16 @@ OpenTelemetry exporters can be configured using standard OpenTelemetry environme
 - `OTEL_SERVICE_NAME`: The name of the service (default: `atc`).
 - `OTEL_SDK_DISABLED`: Set to `true` to completely disable telemetry collection.
 
+### Configuration Validation & Linting
+
+ATC supports linting and validating configuration files (e.g., `strategies.yaml`) using the `validate` command:
+
+```bash
+./dist/atc validate --config strategies.yaml
+```
+
+This parses and verifies all configuration options (such as target modules, dampening durations, HA election parameters, failover targets, and connect timeouts) against schema validation rules. It exits with code `0` if the configuration is valid, and prints detailed error messages to stderr and exits with code `1` if validation fails—making it ideal for integration into GitOps CI/CD pipelines.
+
 ---
 
 ## Predefined Routing & Failover Strategies

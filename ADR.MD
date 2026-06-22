@@ -381,3 +381,77 @@ Need robust project documentation that can double as a user-facing project websi
   - Automatic deployment on push.
 - **Consequences**:
   - Content written in HTML instead of markdown, requiring structured tags.
+
+---
+
+## ADR 0017: Configuration Validation and Linting Subcommand
+
+### Status
+Accepted
+
+### Date
+2026-06-22
+
+### Context
+Before applying configuration changes (like pre-defined failover/redirect strategies, dampening periods, or HA settings) in production or hot-reloading them, platform operators need to verify that their configuration files are syntactically and semantically correct. Doing validation only at startup or during runtime triggers errors that can cause application restarts to fail or leader elections to malfunction.
+
+### Decision
+Implement a dedicated config validation capability:
+- **Core Engine**: Create a standalone `ValidateConfig` function to run semantic checks against the parsed configuration model.
+- **CLI Subcommand**: Expose a subcommand (`atc validate --config strategies.yaml`) that performs the validation.
+- **Exit Behavior**: On success, exit with code `0`. On failure, write detailed error messages (including invalid duration syntax, out-of-bounds HA session TTLs, invalid target modules, or missing redirect targets) to standard error and exit with code `1`.
+- **CI/CD Integration**: Promote running the `validate` command inside pre-commit hooks and Pull Request pipelines to lint configuration files as part of GitOps.
+
+### Consequences
+- **Benefits**:
+  - Prevents bad/flapping configuration updates from being pushed to production.
+  - Catches invalid Consul session TTL constraints early before they fail at the Consul Lock level.
+  - Clear integration path for GitOps CI/CD pipelines.
+- **Consequences**:
+  - Increases the CLI surface area with a new subcommand.
+
+---
+
+## ADR 0018: Defer Request Proxying to Envoy (Data Plane)
+
+### Status
+Accepted
+
+### Date
+2026-06-22
+
+### Context
+ATC handles service-resolver configuration, but platform teams want to clarify if ATC should ever handle direct data plane load balancing or proxying of request bytes.
+
+### Decision
+ATC will strictly remain a control-plane orchestrator. All request proxying and data-plane load-balancing logic is deferred to Consul Connect and Envoy proxies. ATC will not implement proxying logic, keeping the binary lightweight and keeping it out of the critical network path.
+
+### Consequences
+- **Benefits**:
+  - Keep ATC simple and stateless.
+  - Zero performance impact on active network traffic.
+- **Consequences**:
+  - Operators must configure Envoy sidecars for data plane traffic routing.
+
+---
+
+## ADR 0019: Defer Vault Secret Injection to Orchestrator or Agent wrappers
+
+### Status
+Accepted
+
+### Date
+2026-06-22
+
+### Context
+ATC requires a Consul ACL token. Platform teams requested a native Vault client integration to fetch this token directly from Vault.
+
+### Decision
+Instead of embedding a native Vault API client and handling multiple authentication patterns inside ATC, secret retrieval is deferred to orchestrator-native injection (such as Kubernetes Vault Sidecar, Nomad vault block, or External Secrets Operator) or VM-level runners (like Vault Agent or `envconsul` wrapper).
+
+### Consequences
+- **Benefits**:
+  - Avoids embedding heavy Vault SDK dependencies.
+  - No new authentication options or configuration parameters need to be supported inside ATC.
+- **Consequences**:
+  - Operators must use wrapper scripts or orchestrator integrations to inject secrets.

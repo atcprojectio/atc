@@ -37,10 +37,6 @@ When operators or AI agents apply manual overrides (e.g. `POST /api/overrides`),
   - Store the expiration timestamp in the config entry metadata (`atc-override-expires-at`).
   - Implement a background TTL sweeper in ATC that automatically purges expired overrides, restoring the service to automated watchers.
 
-### 4. GitOps Config Validation / Linting
-Before hot-reloading configuration updates, platform teams need to verify configuration syntax correctness to avoid runtime crashes.
-- **Solution**: Expose a config validation subcommand or CLI flag (e.g. `atc validate --config strategies.yaml`) that checks config files against schema rules, allowing CI/CD validation before deployment.
-
 ---
 
 ## Could Have

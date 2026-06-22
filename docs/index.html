@@ -385,6 +385,34 @@ make run-demo</code></pre>
           <li><code>service</code>: The target service to redirect traffic to. Defaults to the offline service's name.</li>
           <li><code>datacenter</code>: The target datacenter for redirection.</li>
         </ul>
+
+        <h2>Configuration Validation & Linting (GitOps)</h2>
+        <p>ATC provides a configuration validation tool to verify strategy configuration syntax and semantic rules before deploying changes to production. This is highly recommended for GitOps workflows to prevent loading invalid configurations at runtime.</p>
+        <p>To validate a configuration file, run the <code>validate</code> subcommand:</p>
+        <pre><code class="language-bash">./dist/atc validate --config deploy/observability/strategies.yaml</code></pre>
+        <p>If the configuration is valid, it prints a success message and exits with status <code>0</code>. If any validation rules fail, it prints detailed error messages to standard error and exits with status <code>1</code>.</p>
+        
+        <h3>Validation Rules</h3>
+        <ul>
+          <li><strong>Dampening Periods:</strong> <code>dampening_period</code> and <code>min_dampening_period</code> must be valid Go duration strings (e.g. <code>5s</code>, <code>1m</code>). Dampening period cannot be less than the min dampening period.</li>
+          <li><strong>HA Leader Election:</strong> If HA is enabled, <code>session_ttl</code> must be a valid Go duration string between <code>10s</code> and <code>24h</code> (which corresponds to Consul's session limits).</li>
+          <li><strong>Failover Strategies:</strong> Each strategy's <code>connect_timeout</code> (if specified) must be a valid Go duration string.</li>
+          <li><strong>Redirect Strategies:</strong> Each strategy must define at least one target selector field (such as <code>service</code>, <code>datacenter</code>, <code>namespace</code>, or <code>service_subset</code>).</li>
+        </ul>
+        
+        <h3>CI/CD Integration Example</h3>
+        <p>Add a validation check to your GitHub Actions pre-commit or deployment workflow to lint strategies configuration files:</p>
+        <pre><code class="language-yaml">name: Lint ATC Config
+on: [pull_request]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate ATC Configuration
+        run: |
+          go run main.go validate --config deploy/observability/strategies.yaml</code></pre>
       </section>
 
       <!-- Consul Integration Section -->
