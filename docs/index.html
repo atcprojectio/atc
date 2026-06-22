@@ -268,6 +268,12 @@ brew install atc</code></pre>
               <td>"all"</td>
               <td>Comma-separated list of components to run (<code>forwarder</code>, <code>redirector</code>, <code>server</code>).</td>
             </tr>
+            <tr>
+              <td><code>--ui-enabled</code></td>
+              <td>-</td>
+              <td>true</td>
+              <td>Enable serving the embedded React Web UI dashboard. If disabled, static endpoints return 404, while API & MCP routes remain active.</td>
+            </tr>
           </tbody>
         </table>
 
@@ -375,9 +381,13 @@ make run-demo</code></pre>
         <h2>Opt-in Tags</h2>
         <ul>
           <li><code>atc.enabled=true</code>: Enrolls the service in ATC reconciliation. Without this tag, ATC will not touch the service.</li>
-          <li><code>atc.failover=&lt;strategy-name&gt;</code>: Binds the service to a predefined failover strategy defined in the config.</li>
-          <li><code>atc.redirect=&lt;strategy-name&gt;</code>: Binds the service to a predefined redirect strategy defined in the config.</li>
+          <li><code>atc.failover=&lt;strategy-name&gt;</code>: Binds the service to a predefined failover strategy defined in the config. If omitted, and a strategy named <code>default</code> is defined under <code>strategies.failover</code>, ATC automatically falls back to that default strategy.</li>
+          <li><code>atc.redirect=&lt;strategy-name&gt;</code>: Binds the service to a predefined redirect strategy defined in the config. If omitted, and a strategy named <code>default</code> is defined under <code>strategies.redirect</code>, ATC automatically falls back to that default strategy.</li>
         </ul>
+
+        <div class="glass-panel" style="padding: 1.2rem; margin: 1.5rem 0; border-left: 4px solid var(--accent-indigo);">
+          <strong>Default Strategies Fallback:</strong> If a strategy named <code>default</code> is configured in the ATC configuration file (e.g., under <code>strategies.failover.default</code> or <code>strategies.redirect.default</code>), service teams can register their services in Consul using only the <code>atc.enabled=true</code> tag. ATC will automatically resolve and apply the default strategy for failover or redirect if the respective specific tag is not provided.
+        </div>
 
         <h2>YAML Registration Example</h2>
         <pre><code class="language-yaml">service:
@@ -549,6 +559,10 @@ make obs-up</code></pre>
         <div class="badge">UI</div>
         <h1>Live Dashboard UI</h1>
         <p>The ATC Web Dashboard is a premium glassmorphic React interface embedded directly inside the Go binary. It provides ATC administrators and platform teams with a real-time visualization of service mesh routing paths.</p>
+
+        <div class="glass-panel" style="padding: 1.2rem; margin: 1.5rem 0; border-left: 4px solid var(--accent-blue);">
+          <strong>Optional Web UI:</strong> The Web UI dashboard is enabled by default. In environments where you want to disable UI serving (e.g., for security constraints or minimal resource footprint), you can set <code>server.ui_enabled: false</code> in your configuration file, or pass the <code>--ui-enabled=false</code> command-line flag. When disabled, requests to UI static routes will return a <code>404 Not Found</code> response with "Web UI is disabled", but REST API endpoints (e.g. <code>/api/services</code>) and MCP tools remain fully functional.
+        </div>
 
         <div class="dashboard-preview glass-panel">
           <div class="preview-header">

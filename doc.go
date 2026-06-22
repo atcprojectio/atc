@@ -22,8 +22,11 @@ Targets:
 HTTP Endpoints:
 
 ATC server hosts two separate HTTP port listeners:
-  - Main Port (default :8088): Serves the React frontend dashboard at `/`, exposes /ready,
+  - Main Port (default :8088): Serves the React frontend dashboard at `/` (which can be disabled
+    via `server.ui_enabled` in the config file or `--ui-enabled` command-line flag), exposes /ready,
     /services, JSON API service list (/api/services), manual overrides (/api/overrides), leader status (/api/leader), WAN federation status (/api/federation), and the MCP server interface.
+    When the Web UI is disabled, requests to static routes `/` return a 404 Not Found error with a
+    "Web UI is disabled" message, while other REST APIs, `/ready`, `/health`, and `/mcp` endpoints remain active.
   - Metrics Port (default :8089): Exposes OpenTelemetry metrics in Prometheus format at `/metrics`.
 
 API & MCP Integration:
@@ -43,6 +46,10 @@ ATC supports predefined failover and redirect strategies defined by admins in a 
 Teams can assign these strategies to their Consul services using tags (e.g., `atc.failover=strategy-name`
 and `atc.redirect=strategy-name`). ATC's forwarder and redirector apply these strategies dynamically and persist
 them in the service-resolver configuration entry metadata.
+
+If a strategy named "default" is configured (e.g. `strategies.failover.default` or `strategies.redirect.default`),
+teams can register their services using only the `atc.enabled=true` tag. ATC will automatically fall back to the
+"default" strategy configuration if the specific `atc.failover` or `atc.redirect` tag is omitted.
 
 Oscillation Dampening (Hysteresis):
 

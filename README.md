@@ -115,6 +115,7 @@ Start the ATC background watcher process:
 - `--consul_token` (string): Consul ACL token.
 - `--consul_dc` (string): Consul target datacenter.
 - `--config` (string): Path to ATC configuration file.
+- `--ui-enabled` (bool): Enable serving the embedded React Web UI dashboard (default: `true`).
 
 ### Environment Variables
 
@@ -128,6 +129,8 @@ OpenTelemetry exporters can be configured using standard OpenTelemetry environme
 ## Predefined Routing & Failover Strategies
 
 ATC supports predefined routing strategies that admins can configure in a YAML file loaded via the `--config` flag. Predefined strategies are defined under `strategies.failover` and `strategies.redirect`.
+
+If a strategy named `default` is configured (e.g. `strategies.failover.default` or `strategies.redirect.default`), teams can register their services using only the `atc.enabled=true` tag. ATC will automatically fall back to the `default` strategy if the specific `atc.failover` or `atc.redirect` tag is omitted.
 
 ### Configuration Example (`strategies.yaml`)
 
