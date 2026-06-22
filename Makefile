@@ -1,6 +1,6 @@
 APP-BIN := dist/$(shell basename $(shell pwd))
 
-.PHONY: build build-frontend consul-up consul-down consul-register-test consul-deregister-test darwin fresh lint linux qa release run snapshot tag test watch
+.PHONY: build build-frontend consul-up consul-down consul-register-test consul-deregister-test darwin fresh lint linux qa release run snapshot tag test watch test-frontend
 
 build-frontend:
 	cd frontend && npm ci && npm run build
@@ -25,7 +25,9 @@ lint:
 	pre-commit run --files $(shell git ls-files -m)
 test:
 	gotestsum --format testname
-qa: lint test
+test-frontend:
+	cd frontend && npm run test
+qa: lint test test-frontend
 run: ## Run binary.
 	OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./${APP-BIN} server --config deploy/observability/strategies.yaml
 fresh: build run

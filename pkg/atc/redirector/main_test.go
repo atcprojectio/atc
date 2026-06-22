@@ -489,3 +489,157 @@ func TestRedirectorUpdateConfigRace(t *testing.T) {
 	close(done)
 	wg.Wait()
 }
+
+func TestRedirectorReconcile_BypassOverrides(t *testing.T) {
+	var mu sync.Mutex
+	createdOrUpdated := false
+	deleted := false
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == "GET" && r.URL.Path == "/v1/agent/self" {
+			info := map[string]interface{}{
+				"Config": map[string]interface{}{
+					"Datacenter": "dc1",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(info)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/datacenters" {
+			dcs := []string{"dc1", "dc2"}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(dcs)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/services" {
+			services := map[string][]string{
+				"consul": {},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(services)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/config/service-resolver" {
+			entries := []api.ConfigEntry{
+				&api.ServiceResolverConfigEntry{
+					Kind: "service-resolver",
+					Name: "service-a",
+					Meta: map[string]string{"created-by": "atc-override"},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(entries)
+			return
+		}
+
+		if r.Method == "PUT" && r.URL.Path == "/v1/config" {
+			createdOrUpdated = true
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/v1/config/service-resolver/") {
+			deleted = true
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.Listener.Addr().String()})
+	if err != nil {
+		t.Fatalf("Failed to create consul client: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	r, err := New(logger, server.Listener.Addr().String(), "", "", false, nil, "", "", false)
+	if err != nil {
+		t.Fatalf("Failed to create redirector: %v", err)
+	}
+
+	err = r.reconcile(context.Background(), client)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if createdOrUpdated {
+		t.Error("Expected active override config entry to be bypassed (not created or updated)")
+	}
+	if deleted {
+		t.Error("Expected active override config entry to be bypassed (not deleted)")
+	}
+}
+
+func TestRedirector_GetDampeningDuration(t *testing.T) {
+	tests := []struct {
+		name          string
+		tags          []string
+		globalDefault string
+		minLimit      string
+		expected      time.Duration
+	}{
+		{
+			name:          "Use Global Default when no tag",
+			tags:          []string{"atc.enabled=true"},
+			globalDefault: "5s",
+			minLimit:      "1s",
+			expected:      5 * time.Second,
+		},
+		{
+			name:          "Use Tag override when present",
+			tags:          []string{"atc.enabled=true", "atc.dampening=10s"},
+			globalDefault: "5s",
+			minLimit:      "1s",
+			expected:      10 * time.Second,
+		},
+		{
+			name:          "Clamp tag override to minimum limit",
+			tags:          []string{"atc.enabled=true", "atc.dampening=500ms"},
+			globalDefault: "5s",
+			minLimit:      "1s",
+			expected:      1 * time.Second,
+		},
+		{
+			name:          "Zero duration dampening tag allowed when min limit is 0s",
+			tags:          []string{"atc.enabled=true", "atc.dampening=0s"},
+			globalDefault: "5s",
+			minLimit:      "0s",
+			expected:      0 * time.Second,
+		},
+		{
+			name:          "Zero duration dampening tag clamped to min limit of 1s",
+			tags:          []string{"atc.enabled=true", "atc.dampening=0s"},
+			globalDefault: "5s",
+			minLimit:      "1s",
+			expected:      1 * time.Second,
+		},
+		{
+			name:          "Fallback to global default on malformed tag",
+			tags:          []string{"atc.enabled=true", "atc.dampening=invalid"},
+			globalDefault: "5s",
+			minLimit:      "1s",
+			expected:      5 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := getDampeningDuration(tt.tags, tt.globalDefault, tt.minLimit)
+			if res != tt.expected {
+				t.Errorf("expected %v, got %v", tt.expected, res)
+			}
+		})
+	}
+}

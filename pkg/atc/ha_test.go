@@ -258,3 +258,135 @@ func TestTargetScopedLeaderElectionMock(t *testing.T) {
 		t.Errorf("Expected atcInstance.IsLeader() to be true")
 	}
 }
+
+func TestLeaderElection_TeardownOnLockLoss(t *testing.T) {
+	var mu sync.Mutex
+	sessionCreated := false
+	lockAcquired := false
+	lockSession := ""
+	triggerLockLoss := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == "PUT" && r.URL.Path == "/v1/session/create" {
+			sessionCreated = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ID":"mock-session-id"}`))
+			return
+		}
+
+		if r.Method == "PUT" && r.URL.Path == "/v1/kv/atc/leader/lock" {
+			if r.URL.Query().Get("acquire") == "mock-session-id" {
+				lockAcquired = true
+				lockSession = "mock-session-id"
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = w.Write([]byte("true"))
+				return
+			}
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/kv/atc/leader/lock" {
+			indexStr := r.URL.Query().Get("index")
+			if indexStr != "" && indexStr != "0" {
+				mu.Unlock()
+				select {
+				case <-triggerLockLoss:
+					mu.Lock()
+					lockSession = ""
+				case <-time.After(1 * time.Second):
+					mu.Lock()
+				}
+			}
+
+			if lockSession == "" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Consul-Index", "101")
+			_, _ = w.Write([]byte(`[
+				{
+					"Key": "atc/leader/lock",
+					"Value": "dGVzdC1ub2Rl",
+					"Session": "mock-session-id",
+					"CreateIndex": 100,
+					"ModifyIndex": 101
+				}
+			]`))
+			return
+		}
+
+		if r.Method == "PUT" && r.URL.Path == "/v1/session/renew/mock-session-id" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ID":"mock-session-id","TTL":"15s"}`))
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Name:       "test-node",
+		ConsulAddr: server.Listener.Addr().String(),
+		HA: HaConfig{
+			Enabled:    true,
+			LockKey:    "atc/leader/lock",
+			SessionTTL: "15s",
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	atcInstance := &Atc{
+		Cfg:        cfg,
+		logger:     logger,
+		coreLogger: logger,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	electionErrChan := make(chan error, 1)
+	go func() {
+		electionErrChan <- atcInstance.runLeaderElection(ctx)
+	}()
+
+	start := time.Now()
+	for time.Since(start) < 2*time.Second {
+		if atcInstance.IsLeader() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	mu.Lock()
+	sc := sessionCreated
+	la := lockAcquired
+	mu.Unlock()
+
+	if !sc || !la || !atcInstance.IsLeader() {
+		t.Fatalf("Failed to acquire initial leadership")
+	}
+
+	// Trigger lock loss
+	close(triggerLockLoss)
+
+	start = time.Now()
+	for time.Since(start) < 2*time.Second {
+		if !atcInstance.IsLeader() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if atcInstance.IsLeader() {
+		t.Errorf("Expected leader state to terminate after lock loss")
+	}
+
+	cancel()
+	<-electionErrChan
+}
+

@@ -44,6 +44,8 @@ jobs:
         with:
           gotestsum_version: v1.13.0
       - run: make test
+      - name: Test Frontend
+        run: make test-frontend
   build:
     runs-on: ubuntu-latest
     env:

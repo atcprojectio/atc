@@ -7,5 +7,10 @@ export default defineConfig({
   build: {
     outDir: '../pkg/atc/server/dist',
     emptyOutDir: true,
+  },
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: './src/setupTests.js',
   }
 })
