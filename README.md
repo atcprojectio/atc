@@ -253,3 +253,11 @@ To enable the ATC Model Context Protocol (MCP) server in **Claude Desktop**, you
    - `purge_redirect_config`
    - `check_leadership`
    - `list_wan_federation_status`
+
+---
+
+## Documentation & Project Resources
+
+- **Project Documentation & Website**: Located in the [docs/](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/docs) directory and automatically published to GitHub Pages. Contains detailed setup, architecture, and module configurations.
+- **Architecture Decision Records (ADRs)**: Detailed records of all design and architecture decisions are stored in [ADR.MD](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/ADR.MD).
+- **Project Roadmap & TODO List**: The MoSCoW analysis and active TODO lists are located in [TODO.md](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/TODO.md).

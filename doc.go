@@ -67,6 +67,12 @@ allows partitioned instances running subsets of modules to failover and run work
 Standby instances keep their HTTP/metrics servers active but suspend reconciler watches. Failover is
 automatic when the active session lock expires.
 
+Documentation & Project Resources:
+
+  - docs/: Project documentation website directory, automatically published to GitHub Pages.
+  - ADR.MD: Architecture Decision Records (ADRs) detailing core design and operational decisions.
+  - TODO.md: Active roadmap and MoSCoW priorities list.
+
 Architectural Design Rule:
 - NOTE: For every HTTP API endpoint exposed by the ATC server, a corresponding MCP tool MUST be registered.
 
