@@ -9,6 +9,7 @@ import (
 
 	prom "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	versioncol "github.com/prometheus/client_golang/prometheus/collectors/version"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
@@ -77,6 +78,7 @@ func Init(ctx context.Context, serviceName string) (func(context.Context) error,
 	periodicReader := sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(15*time.Second))
 
 	registry := prom.NewRegistry()
+	registry.MustRegister(versioncol.NewCollector("atc"))
 	promExporter, err := prometheus.New(
 		prometheus.WithRegisterer(registry),
 	)

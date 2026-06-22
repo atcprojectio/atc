@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/prometheus/common/version"
 )
 
 // NOTE: For every HTTP API endpoint exposed by the ATC server, a corresponding MCP tool MUST be registered here.
@@ -24,7 +25,7 @@ type Service interface {
 func NewHandler(svc Service) http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "atc",
-		Version: "v0.0.4",
+		Version: version.Version,
 	}, nil)
 
 	// Tool mapping for /ready API endpoint
