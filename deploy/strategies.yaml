@@ -1,0 +1,51 @@
+# Active Traffic Control (ATC) Configuration
+
+# Name of the ATC service instance
+service: "atc-service"
+
+# Consul connection settings
+consul_addr: "http://consul-dc1:8500"
+consul_dc: "dc1"
+consul_token: ""
+
+# Watcher reconciliation dampening/hysteresis periods
+dampening_period: "5s"
+min_dampening_period: "0s"
+
+# List of components/modules to enable. Options: all, forwarder, redirector, server
+target:
+  - all
+
+# High Availability (HA) Active-Passive leader election configuration
+ha:
+  enabled: true
+  lock_key: "atc/leader/lock"
+  session_ttl: "15s"
+
+# Web server and metrics configuration
+server:
+  http_listen_port: 8088
+  metrics_listen_port: 8089
+  log_format: "text"
+  log_level: "debug"
+  ui_enabled: true
+
+# Predefined failover and redirect strategy mappings
+strategies:
+  failover:
+    standard-failover:
+      connect_timeout: "5s"
+      targets:
+        - datacenter: "dc2"
+    multi-region-failover:
+      connect_timeout: "10s"
+      targets:
+        - datacenter: "dc2"
+        - datacenter: "dc3"
+          service: "fallback-service"
+  redirect:
+    standard-redirect:
+      datacenter: "dc2"
+    geo-redirect:
+      datacenter: "dc3"
+      service: "geo-fallback"

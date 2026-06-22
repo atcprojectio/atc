@@ -29,7 +29,7 @@ test-frontend:
 	cd frontend && npm run test
 qa: lint test test-frontend
 run: ## Run binary.
-	OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./${APP-BIN} server --config deploy/observability/strategies.yaml
+	OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./${APP-BIN} server --config deploy/strategies.yaml
 fresh: build run
 consul-up:
 	docker compose up -d consul

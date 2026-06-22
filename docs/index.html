@@ -228,7 +228,7 @@ brew install atc</code></pre>
 
         <h2>3. Running the Daemon</h2>
         <p>Launch the server command by passing the path to the predefined strategies configuration file:</p>
-        <pre><code class="language-bash">./dist/atc server --config deploy/observability/strategies.yaml</code></pre>
+        <pre><code class="language-bash">./dist/atc server --config deploy/strategies.yaml</code></pre>
         
         <h2>Available CLI Flags</h2>
         <table class="docs-table">
@@ -389,7 +389,7 @@ make run-demo</code></pre>
         <h2>Configuration Validation & Linting (GitOps)</h2>
         <p>ATC provides a configuration validation tool to verify strategy configuration syntax and semantic rules before deploying changes to production. This is highly recommended for GitOps workflows to prevent loading invalid configurations at runtime.</p>
         <p>To validate a configuration file, run the <code>validate</code> subcommand:</p>
-        <pre><code class="language-bash">./dist/atc validate --config deploy/observability/strategies.yaml</code></pre>
+        <pre><code class="language-bash">./dist/atc validate --config deploy/strategies.yaml</code></pre>
         <p>If the configuration is valid, it prints a success message and exits with status <code>0</code>. If any validation rules fail, it prints detailed error messages to standard error and exits with status <code>1</code>.</p>
         
         <h3>Validation Rules</h3>
@@ -412,7 +412,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate ATC Configuration
         run: |
-          go run main.go validate --config deploy/observability/strategies.yaml</code></pre>
+          go run main.go validate --config deploy/strategies.yaml</code></pre>
       </section>
 
       <!-- Consul Integration Section -->
