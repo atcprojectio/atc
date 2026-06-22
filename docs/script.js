@@ -1,5 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
-  const sidebarLinks = document.querySelectorAll('.sidebar-nav a');
+  const sidebarLinks = document.querySelectorAll('.sidebar-nav a[href^="#"]');
   const sections = document.querySelectorAll('.content-section');
   const searchInput = document.getElementById('docs-search');
   const mobileMenuBtn = document.getElementById('mobile-menu-btn');
@@ -20,7 +20,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Close sidebar when clicking menu items on mobile
-  sidebarLinks.forEach(link => {
+  document.querySelectorAll('.sidebar-nav a').forEach(link => {
     link.addEventListener('click', () => {
       if (sidebar && sidebar.classList.contains('menu-open')) {
         sidebar.classList.remove('menu-open');
