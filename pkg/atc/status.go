@@ -48,7 +48,22 @@ func (t *Atc) apiLeaderHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	leader := t.IsLeader()
-	_, _ = fmt.Fprintf(w, `{"leader":%t}`, leader)
+
+	t.cfgMu.RLock()
+	haEnabled := t.Cfg.HA.Enabled
+	t.cfgMu.RUnlock()
+
+	var forwarderLeader, redirectorLeader bool
+	if !haEnabled {
+		forwarderLeader = t.Forwarder != nil
+		redirectorLeader = t.Redirector != nil
+	} else {
+		forwarderLeader = t.forwarderLeader.Load()
+		redirectorLeader = t.redirectorLeader.Load()
+	}
+
+	_, _ = fmt.Fprintf(w, `{"leader":%t,"components":{"forwarder":%t,"redirector":%t}}`,
+		leader, forwarderLeader, redirectorLeader)
 }
 
 func (t *Atc) apiFederationHandler(w http.ResponseWriter, r *http.Request) {

@@ -60,9 +60,12 @@ to prevent users from bypassing stability safeguards.
 
 Active-Passive High Availability:
 
-ATC can run in active-passive HA mode coordinated via Consul KV session locks. A single active leader
-handles catalog watches and write reconciliation, while standby instances keep their HTTP/metrics servers active
-but suspend reconciler watches. Failover is automatic when the active session lock expires.
+ATC can run in active-passive HA mode coordinated via Consul KV session locks. Instead of a single
+global lock, ATC uses target-scoped leader locking for each active reconciler workload (e.g.
+`atc/leader/lock/forwarder` and `atc/leader/lock/redirector`). This prevents split-workload deadlocks and
+allows partitioned instances running subsets of modules to failover and run workloads independently.
+Standby instances keep their HTTP/metrics servers active but suspend reconciler watches. Failover is
+automatic when the active session lock expires.
 
 Architectural Design Rule:
 - NOTE: For every HTTP API endpoint exposed by the ATC server, a corresponding MCP tool MUST be registered.

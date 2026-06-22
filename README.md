@@ -13,7 +13,7 @@ Originally based on a heavy dependency kit, ATC has been modernised to run nativ
 - **Consul Automation**: Automatically watches service health checks and resolves configurations to create failover (`failover.hcl`) and redirection (`redirect.hcl`) service resolvers.
 - **Consul Catalog Failover**: Automatically monitors Consul catalog changes and registers Prepared Queries (`atc-<service-name>`) with geo-failover to the nearest 2 datacenters for tagged services.
 - **Oscillation Dampening (Hysteresis)**: Protects Consul from configuration churn by debouncing catalog flapping. Supports global defaults, custom tag overrides, and operator safety boundaries.
-- **Active-Passive High Availability**: Run multiple ATC instances in active-passive mode. Dynamic leadership is coordinated via Consul KV Session Locks, with standby nodes serving read-only dashboards and metrics.
+- **Active-Passive High Availability**: Run multiple ATC instances in active-passive mode. Dynamic leadership is coordinated via target-scoped Consul KV Session Locks (e.g. `<lock_key>/forwarder` and `<lock_key>/redirector`) to allow independent component failover without split-workload deadlocks, with standby nodes serving read-only dashboards and metrics.
 - **Embedded React Dashboard**: Stunning glassmorphic web dashboard served at `/` that displays tracked services, their prepared queries, active tags, failover status, and active leader designation.
 - **Native Concurrency**: Powered by Go standard library `context`, `sync`, and `golang.org/x/sync/errgroup` for safe, coordinated background execution.
 - **OpenTelemetry Integration**: Full support for OpenTelemetry Traces, Metrics, and Logs. Traces and logs are automatically correlated and exported via OTLP, and metrics are exposed via OTLP and a Prometheus bridge.
@@ -182,7 +182,7 @@ When a service is active, the strategy and dampening tag values are persisted in
 - `/ready` (GET): Simple readiness check (`200 OK`).
 - `/services` (GET): Prints a formatted ASCII table showing the status of all active components.
 - `/api/services` (GET): JSON list of active Consul services tagged with `atc.enabled=true`.
-- `/api/leader` (GET): JSON representing leadership status (`{"leader":true/false}`).
+- `/api/leader` (GET): JSON representing leadership status and component details (e.g., `{"leader":true,"components":{"forwarder":true,"redirector":true}}`).
 - `/api/federation` (GET): JSON list of WAN-federated datacenters and connection statuses.
 - `/api/overrides` (POST): Manually override automatic failover/redirect routes in Consul.
   - JSON payload:

@@ -60,7 +60,9 @@ type Atc struct {
 	Forwarder  *forwarder.Forwarder
 	Redirector *redirector.Redirector
 
-	isLeader atomic.Bool
+	isLeader         atomic.Bool
+	forwarderLeader  atomic.Bool
+	redirectorLeader atomic.Bool
 }
 
 func New(cfg Config) (*Atc, error) {
@@ -181,10 +183,43 @@ func (t *Atc) IsLeader() bool {
 	if !haEnabled {
 		return true
 	}
-	return t.isLeader.Load()
+	if t.Forwarder == nil && t.Redirector == nil {
+		return t.isLeader.Load()
+	}
+
+	return (t.Forwarder == nil || t.forwarderLeader.Load()) &&
+		(t.Redirector == nil || t.redirectorLeader.Load())
 }
 
 func (t *Atc) runLeaderElection(ctx context.Context) error {
+	t.cfgMu.RLock()
+	haEnabled := t.Cfg.HA.Enabled
+	t.cfgMu.RUnlock()
+	if !haEnabled {
+		return nil
+	}
+
+	if t.Forwarder == nil && t.Redirector == nil {
+		return t.runModuleLeaderElection(ctx, "", nil, &t.isLeader)
+	}
+
+	g, ctx := errgroup.WithContext(ctx)
+
+	if t.Forwarder != nil {
+		g.Go(func() error {
+			return t.runModuleLeaderElection(ctx, "forwarder", t.Forwarder.Run, &t.forwarderLeader)
+		})
+	}
+	if t.Redirector != nil {
+		g.Go(func() error {
+			return t.runModuleLeaderElection(ctx, "redirector", t.Redirector.Run, &t.redirectorLeader)
+		})
+	}
+
+	return g.Wait()
+}
+
+func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, runFunc func(context.Context) error, leaderFlag *atomic.Bool) error {
 	client, err := t.getConsulClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create consul client for lock: %w", err)
@@ -198,6 +233,9 @@ func (t *Atc) runLeaderElection(ctx context.Context) error {
 
 	if lockKey == "" {
 		lockKey = "atc/leader/lock"
+	}
+	if moduleName != "" {
+		lockKey = lockKey + "/" + moduleName
 	}
 	if sessionTTL == "" {
 		sessionTTL = "15s"
@@ -222,7 +260,7 @@ func (t *Atc) runLeaderElection(ctx context.Context) error {
 		return fmt.Errorf("failed to configure consul lock: %w", err)
 	}
 
-	t.coreLogger.InfoContext(ctx, "HA mode enabled. Starting leader election loop", slog.String("lock_key", lockKey))
+	t.coreLogger.InfoContext(ctx, "Starting leader election loop", slog.String("lock_key", lockKey), slog.String("module", moduleName))
 
 	for {
 		select {
@@ -231,10 +269,10 @@ func (t *Atc) runLeaderElection(ctx context.Context) error {
 		default:
 		}
 
-		t.coreLogger.InfoContext(ctx, "Attempting to acquire leadership lock...")
+		t.coreLogger.InfoContext(ctx, "Attempting to acquire leadership lock...", slog.String("lock_key", lockKey))
 		lostCh, err := lock.Lock(ctx.Done())
 		if err != nil {
-			t.coreLogger.ErrorContext(ctx, "Error acquiring leadership lock, retrying in 5s", slog.Any("error", err))
+			t.coreLogger.ErrorContext(ctx, "Error acquiring leadership lock, retrying in 5s", slog.Any("error", err), slog.String("lock_key", lockKey))
 			select {
 			case <-ctx.Done():
 				return nil
@@ -247,35 +285,44 @@ func (t *Atc) runLeaderElection(ctx context.Context) error {
 			continue
 		}
 
-		t.isLeader.Store(true)
-		t.coreLogger.InfoContext(ctx, "Leadership acquired. Starting reconcilers...")
+		leaderFlag.Store(true)
+		t.coreLogger.InfoContext(ctx, "Leadership acquired. Starting workload...", slog.String("lock_key", lockKey))
 
-		leaderCtx, cancelLeader := context.WithCancel(ctx)
+		if runFunc != nil {
+			leaderCtx, cancelLeader := context.WithCancel(ctx)
 
-		var reconcilerWg errgroup.Group
-		if t.Forwarder != nil {
-			reconcilerWg.Go(func() error {
-				return t.Forwarder.Run(leaderCtx)
-			})
-		}
-		if t.Redirector != nil {
-			reconcilerWg.Go(func() error {
-				return t.Redirector.Run(leaderCtx)
-			})
-		}
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := runFunc(leaderCtx); err != nil {
+					t.coreLogger.ErrorContext(leaderCtx, "workload run failed", slog.Any("error", err), slog.String("lock_key", lockKey))
+				}
+			}()
 
-		select {
-		case <-ctx.Done():
-			cancelLeader()
-			_ = lock.Unlock()
-			t.isLeader.Store(false)
-			_ = reconcilerWg.Wait()
-			return nil
-		case <-lostCh:
-			t.coreLogger.WarnContext(ctx, "Leadership lock lost. Stopping reconcilers and reverting to standby...")
-			cancelLeader()
-			t.isLeader.Store(false)
-			_ = reconcilerWg.Wait()
+			select {
+			case <-ctx.Done():
+				cancelLeader()
+				_ = lock.Unlock()
+				leaderFlag.Store(false)
+				wg.Wait()
+				return nil
+			case <-lostCh:
+				t.coreLogger.WarnContext(ctx, "Leadership lock lost. Stopping workload and reverting to standby...", slog.String("lock_key", lockKey))
+				cancelLeader()
+				leaderFlag.Store(false)
+				wg.Wait()
+			}
+		} else {
+			select {
+			case <-ctx.Done():
+				_ = lock.Unlock()
+				leaderFlag.Store(false)
+				return nil
+			case <-lostCh:
+				t.coreLogger.WarnContext(ctx, "Leadership lock lost. Reverting to standby...", slog.String("lock_key", lockKey))
+				leaderFlag.Store(false)
+			}
 		}
 	}
 }

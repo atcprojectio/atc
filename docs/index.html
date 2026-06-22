@@ -432,9 +432,10 @@ make run-demo</code></pre>
 
         <h2>HA Architecture</h2>
         <ul>
-          <li><strong>Single Active Leader:</strong> Only the active leader instance registers Consul watches, tracks catalog changes, and performs configuration writes to Consul.</li>
-          <li><strong>Standby Nodes:</strong> Passive standby instances keep their HTTP/metrics servers running to serve read-only APIs and dashboards, but suspend all catalog watch reconciliations.</li>
-          <li><strong>Failover:</strong> If the active leader fails or experiences network partitions, the Consul session lock expires (governed by the session TTL). A standby instance instantly acquires leadership and resumes reconciliation with zero data loss.</li>
+          <li><strong>Target-Scoped Locks:</strong> Leadership is scope-isolated per reconciler component (e.g., <code>atc/leader/lock/forwarder</code> and <code>atc/leader/lock/redirector</code>). Node instances running a single component compete only for that component's lock. Node instances running multiple components compete for and acquire locks for each workload independently, preventing split-workload deadlocks and workload starvation.</li>
+          <li><strong>Active Workload:</strong> Reconcilers for a component run only when the local node acquires the leadership lock for that component.</li>
+          <li><strong>Standby Nodes:</strong> Passive standby instances keep their HTTP/metrics servers active to serve read-only APIs and dashboards, but suspend reconciler watches for any modules where they do not hold the lock.</li>
+          <li><strong>Failover:</strong> If the active instance for a workload fails or experiences network partitions, the Consul session lock expires (governed by the session TTL). A standby instance instantly acquires leadership for that component and resumes reconciliation with zero data loss.</li>
         </ul>
 
         <h2>HA Configuration</h2>
