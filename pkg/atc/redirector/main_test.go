@@ -125,7 +125,7 @@ func TestRedirectorReconcile(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, server.Listener.Addr().String(), "", "", false, nil, "", "")
+	r, err := New(logger, server.Listener.Addr().String(), "", "", false, nil, "", "", false)
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestRedirectorReconcile_ForwarderEnabled(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, server.Listener.Addr().String(), "", "", true, nil, "", "") // forwarderEnabled = true
+	r, err := New(logger, server.Listener.Addr().String(), "", "", true, nil, "", "", false) // forwarderEnabled = true
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestRedirectorReconcile_WithStrategy(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, server.Listener.Addr().String(), "", "", false, strategies, "", "")
+	r, err := New(logger, server.Listener.Addr().String(), "", "", false, strategies, "", "", false)
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestRedirectorReconcile_WithStrategy(t *testing.T) {
 
 func TestRedirectorUpdateConfigRace(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, "", "", "", false, nil, "5s", "0s")
+	r, err := New(logger, "", "", "", false, nil, "5s", "0s", false)
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}

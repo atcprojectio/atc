@@ -49,6 +49,9 @@ var serverCmd = &cobra.Command{
 		if cfg.ConsulDC == "" {
 			cfg.ConsulDC = viper.GetString("consul_dc")
 		}
+		if !viper.IsSet("server.ui_enabled") {
+			cfg.Server.UiEnabled = viper.GetBool("ui_enabled")
+		}
 		cfg.Server.MetricsNamespace = "atc"
 
 		t, err := atc.New(cfg)
@@ -82,6 +85,9 @@ var serverCmd = &cobra.Command{
 				}
 				if newCfg.ConsulDC == "" {
 					newCfg.ConsulDC = viper.GetString("consul_dc")
+				}
+				if !viper.IsSet("server.ui_enabled") {
+					newCfg.Server.UiEnabled = viper.GetBool("ui_enabled")
 				}
 				newCfg.Server.MetricsNamespace = "atc"
 
@@ -120,4 +126,7 @@ func init() {
 
 	serverCmd.PersistentFlags().String("config", "", "Path to ATC configuration file.")
 	_ = viper.BindPFlag("config", serverCmd.PersistentFlags().Lookup("config"))
+
+	serverCmd.PersistentFlags().Bool("ui-enabled", true, "Enable serving the embedded web UI dashboard.")
+	_ = viper.BindPFlag("ui_enabled", serverCmd.PersistentFlags().Lookup("ui-enabled"))
 }

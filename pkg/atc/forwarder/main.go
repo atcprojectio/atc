@@ -201,8 +201,14 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 	f.mu.Lock()
 	for svcName, tags := range services {
 		if slices.Contains(tags, "atc.enabled=true") {
+			foStrat := getStrategyFromTags(tags, "atc.failover=")
+			if foStrat == "" {
+				if _, ok := f.failoverStrategies["default"]; ok {
+					foStrat = "default"
+				}
+			}
 			f.strategiesCache[svcName] = cachedStrategies{
-				failover: getStrategyFromTags(tags, "atc.failover="),
+				failover: foStrat,
 				redirect: getStrategyFromTags(tags, "atc.redirect="),
 			}
 		}
@@ -229,6 +235,11 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 
 			// Determine failover strategy name
 			failoverStrategyName := getStrategyFromTags(tags, "atc.failover=")
+			if failoverStrategyName == "" {
+				if _, ok := failoverStrategies["default"]; ok {
+					failoverStrategyName = "default"
+				}
+			}
 
 			var targets []api.ServiceResolverFailoverTarget
 			connectTimeout := 15 * time.Second

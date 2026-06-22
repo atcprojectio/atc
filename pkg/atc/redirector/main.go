@@ -58,6 +58,7 @@ type Redirector struct {
 	redirectStrategies map[string]RedirectStrategy
 	dampeningPeriod    string
 	minDampeningPeriod string
+	hasDefaultFailover bool
 
 	mu              sync.RWMutex
 	strategiesCache map[string]cachedStrategies
@@ -69,7 +70,7 @@ type Redirector struct {
 	forwarder     writeCanceler
 }
 
-func New(logger *slog.Logger, consulAddr, consulToken, consulDC string, forwarderEnabled bool, redirectStrategies map[string]RedirectStrategy, dampeningPeriod, minDampeningPeriod string) (*Redirector, error) {
+func New(logger *slog.Logger, consulAddr, consulToken, consulDC string, forwarderEnabled bool, redirectStrategies map[string]RedirectStrategy, dampeningPeriod, minDampeningPeriod string, hasDefaultFailover bool) (*Redirector, error) {
 	return &Redirector{
 		logger:             logger,
 		consulAddr:         consulAddr,
@@ -80,6 +81,7 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC string, forwarde
 		redirectStrategies: redirectStrategies,
 		dampeningPeriod:    dampeningPeriod,
 		minDampeningPeriod: minDampeningPeriod,
+		hasDefaultFailover: hasDefaultFailover,
 		strategiesCache:    make(map[string]cachedStrategies),
 		pendingWrites:      make(map[string]*api.ServiceResolverConfigEntry),
 		writeTimers:        make(map[string]*time.Timer),
@@ -195,13 +197,22 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 		}
 	}
 
-	// Update cache and get config snapshot
 	r.mu.Lock()
 	for svcName, tags := range services {
 		if slices.Contains(tags, "atc.enabled=true") {
+			foStrat := getStrategyFromTags(tags, "atc.failover=")
+			if foStrat == "" && r.hasDefaultFailover {
+				foStrat = "default"
+			}
+			rdStrat := getStrategyFromTags(tags, "atc.redirect=")
+			if rdStrat == "" {
+				if _, ok := r.redirectStrategies["default"]; ok {
+					rdStrat = "default"
+				}
+			}
 			r.strategiesCache[svcName] = cachedStrategies{
-				failover:  getStrategyFromTags(tags, "atc.failover="),
-				redirect:  getStrategyFromTags(tags, "atc.redirect="),
+				failover:  foStrat,
+				redirect:  rdStrat,
 				dampening: getStrategyFromTags(tags, "atc.dampening="),
 			}
 		}
@@ -228,6 +239,9 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 
 			// Determine failover strategy name
 			failoverStrategyName := getStrategyFromTags(tags, "atc.failover=")
+			if failoverStrategyName == "" && r.hasDefaultFailover {
+				failoverStrategyName = "default"
+			}
 
 			existing, exists := existingResolverEntries[svcName]
 			var needsSet bool

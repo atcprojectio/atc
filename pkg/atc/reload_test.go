@@ -30,7 +30,7 @@ func TestAtcConfigReloadingRace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create forwarder: %v", err)
 	}
-	redir, err := redirector.New(logger, "", "", "", false, nil, "5s", "0s")
+	redir, err := redirector.New(logger, "", "", "", false, nil, "5s", "0s", false)
 	if err != nil {
 		t.Fatalf("failed to create redirector: %v", err)
 	}

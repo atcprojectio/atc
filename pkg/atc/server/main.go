@@ -23,6 +23,7 @@ type Config struct {
 	MetricsNamespace  string `yaml:"metrics_namespace" mapstructure:"metrics_namespace"`
 	LogFormat         string `yaml:"log_format" mapstructure:"log_format"`
 	LogLevel          string `yaml:"log_level" mapstructure:"log_level"`
+	UiEnabled         bool   `yaml:"ui_enabled" mapstructure:"ui_enabled"`
 }
 
 type Server struct {
@@ -36,25 +37,31 @@ func New(cfg Config, logger *slog.Logger) (*Server, error) {
 	mux := http.NewServeMux()
 	metricsMux := http.NewServeMux()
 
-	sub, err := fs.Sub(frontendFS, "dist")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create frontend sub FS: %w", err)
-	}
-
-	fileServer := http.FileServer(http.FS(sub))
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		if path != "/" {
-			f, err := sub.Open(strings.TrimPrefix(path, "/"))
-			if err != nil {
-				r.URL.Path = "/"
-			} else {
-				_ = f.Close()
-			}
+	if cfg.UiEnabled {
+		sub, err := fs.Sub(frontendFS, "dist")
+		if err != nil {
+			return nil, fmt.Errorf("failed to create frontend sub FS: %w", err)
 		}
-		fileServer.ServeHTTP(w, r)
-	})
+
+		fileServer := http.FileServer(http.FS(sub))
+
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			path := r.URL.Path
+			if path != "/" {
+				f, err := sub.Open(strings.TrimPrefix(path, "/"))
+				if err != nil {
+					r.URL.Path = "/"
+				} else {
+					_ = f.Close()
+				}
+			}
+			fileServer.ServeHTTP(w, r)
+		})
+	} else {
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "Web UI is disabled", http.StatusNotFound)
+		})
+	}
 
 	return &Server{
 		cfg:        cfg,

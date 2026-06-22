@@ -67,6 +67,7 @@ func (t *Atc) initForwarder() error {
 
 func (t *Atc) initRedirector() error {
 	forwarderEnabled := t.enabledModules[Forwarder]
+	_, hasDefaultFailover := t.Cfg.Strategies.Failover["default"]
 	redirect, err := redirector.New(
 		t.logger.With(slog.String("module", "redirector")),
 		t.Cfg.ConsulAddr,
@@ -76,6 +77,7 @@ func (t *Atc) initRedirector() error {
 		t.Cfg.Strategies.Redirect,
 		t.Cfg.DampeningPeriod,
 		t.Cfg.MinDampeningPeriod,
+		hasDefaultFailover,
 	)
 	if err != nil {
 		return err
