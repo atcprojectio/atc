@@ -36,14 +36,27 @@ consul-up:
 
 obs-up:
 	docker compose up -d
+	@echo "Waiting for services to start..."
+	@sleep 3
+	@make join-wan
+
+join-wan:
+	docker exec consul-dc2 consul join -wan consul-dc1 || true
 
 consul-register-test:
-	curl --request PUT \
-		--data '{"ID": "test-service", "Name": "test-service", "Tags": ["atc.enabled=true", "primary", "atc.failover=multi-region-failover", "atc.redirect=geo-redirect"], "Address": "127.0.0.1", "Port": 8080}' \
+	curl -s --request PUT \
+		--data '{"ID": "payment-service-dc1-1", "Name": "payment-service", "Tags": ["atc.enabled=true", "atc.failover=standard-failover", "atc.redirect=standard-redirect"], "Address": "payment-service-dc1", "Port": 8080}' \
 		http://localhost:8500/v1/agent/service/register
+	@echo "\nRegistered payment-service-dc1-1 in dc1 (pointing to port 8080 mock)"
 consul-deregister-test:
-	curl --request PUT \
-		http://localhost:8500/v1/agent/service/deregister/test-service
+	curl -s --request PUT \
+		http://localhost:8500/v1/agent/service/deregister/payment-service-dc1-1
+	@echo "\nDeregistered payment-service-dc1-1 from dc1"
+consul-register-test-dc2:
+	curl -s --request PUT \
+		--data '{"ID": "payment-service-dc2-1", "Name": "payment-service", "Address": "payment-service-dc2", "Port": 8082}' \
+		http://localhost:8501/v1/agent/service/register
+	@echo "\nRegistered payment-service-dc2-1 in dc2 (pointing to port 8082 mock)"
 
 consul-down:
 	docker compose stop consul || true
