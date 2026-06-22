@@ -1,0 +1,41 @@
+services:
+  consul-dc1:
+    image: hashicorp/consul:2.0.1
+    container_name: consul-dc1
+    command: agent -dev -datacenter=dc1 -node=consul-dc1 -client=0.0.0.0 -bind=0.0.0.0
+    ports:
+      - "8500:8500"
+      - "8600:8600/udp"
+    networks:
+      - demo-net
+
+  consul-dc2:
+    image: hashicorp/consul:2.0.1
+    container_name: consul-dc2
+    command: agent -dev -datacenter=dc2 -node=consul-dc2 -client=0.0.0.0 -bind=0.0.0.0
+    ports:
+      - "8501:8500"
+    networks:
+      - demo-net
+
+  payment-service-dc1:
+    image: hashicorp/http-echo:latest
+    container_name: payment-service-dc1
+    command: -text="[DC1 Instance] Payment processed successfully!" -listen=:8080
+    ports:
+      - "8080:8080"
+    networks:
+      - demo-net
+
+  payment-service-dc2:
+    image: hashicorp/http-echo:latest
+    container_name: payment-service-dc2
+    command: -text="[DC2 Instance] Payment processed successfully!" -listen=:8082
+    ports:
+      - "8082:8082"
+    networks:
+      - demo-net
+
+networks:
+  demo-net:
+    driver: bridge
