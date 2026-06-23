@@ -34,7 +34,8 @@ function App() {
   const [showToken, setShowToken] = useState(false);
   const [activeTab, setActiveTab] = useState('services');
   const [strategies, setStrategies] = useState({ failover: {}, redirect: {} });
-  const [reloading, setReloading] = useState(false);
+  const [modules, setModules] = useState([]);
+  const [authEnabled, setAuthEnabled] = useState(!!getLocalStorageItem('atc-api-token'));
   const [activeOverrideForm, setActiveOverrideForm] = useState(null);
   const [overrideTargetDc, setOverrideTargetDc] = useState('');
   const [overrideNamespace, setOverrideNamespace] = useState('');
@@ -70,10 +71,11 @@ function App() {
       }
       
       const headers = getHeaders(currentToken);
-
+ 
       try {
         const leaderRes = await fetch('/api/leader', { headers });
         if (leaderRes.status === 401 || leaderRes.status === 403) {
+          setAuthEnabled(true);
           setError('Authentication failed. Please check your API token.');
           setAutoRefresh(false);
           setLoading(false);
@@ -82,15 +84,17 @@ function App() {
         if (leaderRes.ok) {
           const leaderData = await leaderRes.json();
           setIsLeader(leaderData.leader);
+          setAuthEnabled(!!leaderData.auth_enabled);
         }
       } catch (err) {
         console.error("Failed to fetch leader status:", err);
       }
-
+ 
       // Fetch federation status
       try {
         const fedRes = await fetch('/api/federation', { headers });
         if (fedRes.status === 401 || fedRes.status === 403) {
+          setAuthEnabled(true);
           setError('Authentication failed. Please check your API token.');
           setAutoRefresh(false);
           setLoading(false);
@@ -107,11 +111,12 @@ function App() {
       } catch (err) {
         console.error("Failed to fetch federation status:", err);
       }
-
+ 
       // Fetch predefined strategies
       try {
         const stratRes = await fetch('/api/strategies', { headers });
         if (stratRes.status === 401 || stratRes.status === 403) {
+          setAuthEnabled(true);
           setError('Authentication failed. Please check your API token.');
           setAutoRefresh(false);
           setLoading(false);
@@ -124,9 +129,28 @@ function App() {
       } catch (err) {
         console.error("Failed to fetch predefined strategies:", err);
       }
-
+ 
+      // Fetch enabled modules
+      try {
+        const modulesRes = await fetch('/api/modules', { headers });
+        if (modulesRes.status === 401 || modulesRes.status === 403) {
+          setAuthEnabled(true);
+          setError('Authentication failed. Please check your API token.');
+          setAutoRefresh(false);
+          setLoading(false);
+          return;
+        }
+        if (modulesRes.ok) {
+          const modulesData = await modulesRes.json();
+          setModules(modulesData || []);
+        }
+      } catch (err) {
+        console.error("Failed to fetch active modules:", err);
+      }
+ 
       const res = await fetch('/api/services', { headers });
       if (res.status === 401 || res.status === 403) {
+        setAuthEnabled(true);
         setError('Authentication failed. Please check your API token.');
         setAutoRefresh(false);
         setLoading(false);
@@ -189,31 +213,6 @@ function App() {
     return `Expires in ${diffDays}d`;
   };
 
-  const handleReloadConfig = async () => {
-    if (!window.confirm('Are you sure you want to force a configuration file reload?')) {
-      return;
-    }
-    try {
-      setReloading(true);
-      const res = await fetch('/api/reload', {
-        method: 'POST',
-        headers: getHeaders(token),
-      });
-      if (res.status === 401 || res.status === 403) {
-        throw new Error('Authentication failed. Check your API token.');
-      }
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `Failed to reload configuration: ${res.statusText}`);
-      }
-      alert('Configuration reloaded successfully.');
-      fetchServices();
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setReloading(false);
-    }
-  };
 
   const handleApplyOverride = async (serviceName) => {
     if (!overrideTargetDc) {
@@ -325,42 +324,43 @@ function App() {
           <span className={`leader-badge ${isLeader ? 'active' : 'standby'}`}>
             {isLeader ? '● ACTIVE LEADER' : '○ STANDBY'}
           </span>
-        </div>
-
-        <div className="header-actions">
-          <button
-            onClick={handleReloadConfig}
-            className={`btn btn-reload-config ${reloading ? 'loading' : ''}`}
-            disabled={reloading}
-            title="Force reload configuration file"
-          >
-            ⚙️ Reload Config
-          </button>
-        </div>
-
-        <div className="auth-box glass-panel">
-          <span className="auth-icon">🔑</span>
-          <input
-            type={showToken ? "text" : "password"}
-            placeholder="Enter API Token..."
-            value={token}
-            onChange={(e) => handleTokenChange(e.target.value)}
-            className="auth-input"
-          />
-          <button 
-            type="button" 
-            onClick={() => setShowToken(!showToken)} 
-            className="btn-show-token"
-            title={showToken ? "Hide token" : "Show token"}
-          >
-            {showToken ? '👁️' : '🔒'}
-          </button>
-          {token && (
-            <button onClick={handleClearToken} className="btn-clear-token" title="Clear token">
-              ✕
-            </button>
+          {modules.length > 0 && (
+            <div className="modules-badges-list">
+              {modules.map(mod => (
+                <span key={mod} className="module-badge" title={`Module ${mod} is active`}>
+                  📦 {mod}
+                </span>
+              ))}
+            </div>
           )}
         </div>
+
+
+        {authEnabled && (
+          <div className="auth-box glass-panel">
+            <span className="auth-icon">🔑</span>
+            <input
+              type={showToken ? "text" : "password"}
+              placeholder="Enter API Token..."
+              value={token}
+              onChange={(e) => handleTokenChange(e.target.value)}
+              className="auth-input"
+            />
+            <button 
+              type="button" 
+              onClick={() => setShowToken(!showToken)} 
+              className="btn-show-token"
+              title={showToken ? "Hide token" : "Show token"}
+            >
+              {showToken ? '👁️' : '🔒'}
+            </button>
+            {token && (
+              <button onClick={handleClearToken} className="btn-clear-token" title="Clear token">
+                ✕
+              </button>
+            )}
+          </div>
+        )}
       </header>
 
       <main className="main-content">

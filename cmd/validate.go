@@ -49,7 +49,5 @@ var validateCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(validateCmd)
 
-	validateCmd.Flags().String("config", "", "Path to ATC configuration file to validate.")
-	_ = viper.BindPFlag("config", validateCmd.Flags().Lookup("config"))
-	_ = validateCmd.MarkFlagRequired("config")
+	_ = validateCmd.MarkPersistentFlagRequired("config")
 }

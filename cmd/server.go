@@ -138,8 +138,6 @@ func init() {
 	serverCmd.PersistentFlags().String("consul_dc", "", "Consul datacenter.")
 	_ = viper.BindPFlag("consul_dc", serverCmd.PersistentFlags().Lookup("consul_dc"))
 
-	serverCmd.PersistentFlags().String("config", "", "Path to ATC configuration file.")
-	_ = viper.BindPFlag("config", serverCmd.PersistentFlags().Lookup("config"))
 
 	serverCmd.PersistentFlags().Bool("ui-enabled", true, "Enable serving the embedded web UI dashboard.")
 	_ = viper.BindPFlag("ui_enabled", serverCmd.PersistentFlags().Lookup("ui-enabled"))

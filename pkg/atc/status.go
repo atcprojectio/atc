@@ -51,6 +51,7 @@ func (t *Atc) apiLeaderHandler(w http.ResponseWriter, r *http.Request) {
 
 	t.cfgMu.RLock()
 	haEnabled := t.Cfg.HA.Enabled
+	authEnabled := t.Cfg.Auth.Enabled
 	t.cfgMu.RUnlock()
 
 	var forwarderLeader, redirectorLeader bool
@@ -62,8 +63,8 @@ func (t *Atc) apiLeaderHandler(w http.ResponseWriter, r *http.Request) {
 		redirectorLeader = t.redirectorLeader.Load()
 	}
 
-	_, _ = fmt.Fprintf(w, `{"leader":%t,"components":{"forwarder":%t,"redirector":%t}}`,
-		leader, forwarderLeader, redirectorLeader)
+	_, _ = fmt.Fprintf(w, `{"leader":%t,"auth_enabled":%t,"components":{"forwarder":%t,"redirector":%t}}`,
+		leader, authEnabled, forwarderLeader, redirectorLeader)
 }
 
 func (t *Atc) apiFederationHandler(w http.ResponseWriter, r *http.Request) {
@@ -156,19 +157,23 @@ func (t *Atc) apiStrategiesHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(strategies)
 }
 
-func (t *Atc) apiReloadHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (t *Atc) apiModulesHandler(w http.ResponseWriter, r *http.Request) {
+	t.cfgMu.RLock()
+	defer t.cfgMu.RUnlock()
 
-	err := t.TriggerConfigReload()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to reload configuration: %v", err), http.StatusInternalServerError)
-		return
+	var active []string
+	for _, name := range UserVisibleModules {
+		if name == Consul || name == All {
+			continue
+		}
+		if t.enabledModules[name] {
+			active = append(active, name)
+		}
 	}
+	slices.Sort(active)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprint(w, `{"status":"reloaded"}`)
+	_ = json.NewEncoder(w).Encode(active)
 }
+

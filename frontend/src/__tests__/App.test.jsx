@@ -50,6 +50,24 @@ describe('ATC Dashboard App', () => {
           json: () => Promise.resolve(mockServices)
         });
       }
+      if (url.includes('/api/modules')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(['forwarder', 'redirector'])
+        });
+      }
+      if (url.includes('/api/strategies')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ failover: {}, redirect: {} })
+        });
+      }
+      if (url.includes('/api/leader')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ leader: true, auth_enabled: false })
+        });
+      }
       return Promise.resolve({ ok: false });
     });
   });

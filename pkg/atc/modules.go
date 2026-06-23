@@ -44,7 +44,7 @@ func (t *Atc) initServer() error {
 	serv.Mux.Handle("GET /api/federation", t.authMiddleware(http.HandlerFunc(t.apiFederationHandler)))
 	serv.Mux.Handle("POST /api/overrides", t.authMiddleware(http.HandlerFunc(t.apiOverridesHandler)))
 	serv.Mux.Handle("GET /api/strategies", t.authMiddleware(http.HandlerFunc(t.apiStrategiesHandler)))
-	serv.Mux.Handle("POST /api/reload", t.authMiddleware(http.HandlerFunc(t.apiReloadHandler)))
+	serv.Mux.Handle("GET /api/modules", t.authMiddleware(http.HandlerFunc(t.apiModulesHandler)))
 	serv.Mux.Handle("/mcp", t.authMiddleware(mcp_server.NewHandler(t)))
 
 	t.Server = serv

@@ -949,33 +949,6 @@ body {
   margin-right: 15px;
 }
 
-.btn-reload-config {
-  background: rgba(139, 92, 246, 0.15);
-  border: 1px solid rgba(139, 92, 246, 0.3);
-  color: var(--color-primary);
-  padding: 8px 16px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-family: var(--font-family);
-  font-weight: 600;
-  transition: all 0.3s ease;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.btn-reload-config:hover {
-  background: rgba(139, 92, 246, 0.3);
-  border-color: var(--color-primary);
-  box-shadow: 0 0 15px rgba(139, 92, 246, 0.25);
-  transform: translateY(-1px);
-}
-
-.btn-reload-config.loading {
-  opacity: 0.7;
-  cursor: not-allowed;
-}
-
 /* Manual Override Expiration Badge */
 .override-badge {
   background: rgba(234, 179, 8, 0.15);
@@ -1134,4 +1107,152 @@ body {
 .override-form .btn-cancel-override:hover {
   background: rgba(255, 255, 255, 0.1);
   color: var(--text-main);
+}
+
+/* =============================================
+   Predefined Strategies Tab
+   ============================================= */
+
+.strategies-section {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.strategies-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 20px;
+}
+
+/* Strategy card title row: badge + name inline */
+.strategy-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.strategy-title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-main);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Key/value info rows inside a strategy card */
+.strategy-info-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-glass);
+  font-size: 0.875rem;
+}
+
+.strategy-info-item:last-child {
+  border-bottom: none;
+}
+
+.strategy-info-label {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.strategy-info-value {
+  color: var(--text-main);
+  font-weight: 600;
+  font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', monospace;
+  font-size: 0.82rem;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 2px 8px;
+  border-radius: 5px;
+}
+
+/* Failover target list */
+.strategy-target-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.strategy-target-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-glass);
+  border-radius: 10px;
+  padding: 10px 14px;
+  transition: background 0.2s ease;
+}
+
+.strategy-target-card:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.strategy-target-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-main);
+  gap: 8px;
+}
+
+.strategy-target-header span:last-child {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--color-secondary);
+  background: rgba(6, 182, 212, 0.1);
+  padding: 2px 8px;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+
+.strategy-target-details {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.strategy-target-details span {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+/* =============================================
+   Header Active Modules List
+   ============================================= */
+
+.modules-badges-list {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-left: 16px;
+  flex-wrap: wrap;
+}
+
+.module-badge {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }

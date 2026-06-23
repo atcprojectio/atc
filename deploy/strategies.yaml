@@ -4,7 +4,7 @@
 service: "atc-service"
 
 # Consul connection settings
-consul_addr: "http://consul-dc1:8500"
+consul_addr: "http://localhost:8500"
 consul_dc: "dc1"
 consul_token: ""
 consul_namespace: ""
@@ -34,7 +34,7 @@ auth:
   enabled: false
   static_keys:
     - "atc-super-secret-token"
-  consul_token_delegation: true
+  consul_token_delegation: false
 
 # Web server and metrics configuration
 server:
@@ -51,7 +51,6 @@ strategies:
       connect_timeout: "5s"
       targets:
         - datacenter: "dc2"
-          namespace: "finance" # Optional target namespace scope
     multi-region-failover:
       connect_timeout: "10s"
       targets:
@@ -61,7 +60,6 @@ strategies:
   redirect:
     standard-redirect:
       datacenter: "dc2"
-      namespace: "marketing" # Optional target namespace redirect
     geo-redirect:
       datacenter: "dc3"
       service: "geo-fallback"

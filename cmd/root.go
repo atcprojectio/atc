@@ -26,4 +26,7 @@ func init() {
 	viper.AutomaticEnv()
 
 	viper.SetDefault("log_level", "info")
+
+	rootCmd.PersistentFlags().String("config", "", "Path to ATC configuration file.")
+	_ = viper.BindPFlag("config", rootCmd.PersistentFlags().Lookup("config"))
 }
