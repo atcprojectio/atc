@@ -191,6 +191,17 @@ func TestRedirectorReconcile(t *testing.T) {
 	}
 }
 
+type mockWriteCanceler struct {
+	mu        sync.Mutex
+	cancelled []string
+}
+
+func (m *mockWriteCanceler) CancelPendingWrite(svcName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cancelled = append(m.cancelled, svcName)
+}
+
 func TestRedirectorReconcile_ForwarderEnabled(t *testing.T) {
 	var mu sync.Mutex
 	createdOrUpdated := make([]*api.ServiceResolverConfigEntry, 0)
@@ -294,6 +305,9 @@ func TestRedirectorReconcile_ForwarderEnabled(t *testing.T) {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
 
+	mockF := &mockWriteCanceler{}
+	r.SetForwarder(mockF)
+
 	err = r.reconcile(context.Background(), client)
 	if err != nil {
 		t.Fatalf("reconcile failed: %v", err)
@@ -316,6 +330,22 @@ func TestRedirectorReconcile_ForwarderEnabled(t *testing.T) {
 		t.Errorf("Expected 1 config entry to be deleted, got %d", len(deleted))
 	} else if deleted[0] != "service-d" {
 		t.Errorf("Expected deleted entry to be 'service-d', got '%s'", deleted[0])
+	}
+
+	mockF.mu.Lock()
+	cancelledServices := mockF.cancelled
+	mockF.mu.Unlock()
+
+	// Verify that active services were NOT cancelled
+	for _, svc := range []string{"service-a", "service-b", "service-c"} {
+		if slices.Contains(cancelledServices, svc) {
+			t.Errorf("Expected forwarder write NOT to be cancelled for active service %s, but it was", svc)
+		}
+	}
+
+	// Verify that the deleted service WAS cancelled
+	if !slices.Contains(cancelledServices, "service-e") {
+		t.Errorf("Expected forwarder write to be cancelled for deleted service service-e, but it was not")
 	}
 }
 
@@ -644,5 +674,217 @@ func TestRedirector_GetDampeningDuration(t *testing.T) {
 				t.Errorf("expected %v, got %v", tt.expected, res)
 			}
 		})
+	}
+}
+
+func TestRedirectorReconcile_DryRun(t *testing.T) {
+	var mu sync.Mutex
+	var writeAttempted bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == "GET" && r.URL.Path == "/v1/agent/self" {
+			info := map[string]interface{}{
+				"Config": map[string]interface{}{
+					"Datacenter": "dc1",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(info)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/datacenters" {
+			dcs := []string{"dc1", "dc2"}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(dcs)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/services" {
+			services := map[string][]string{
+				"consul": {},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(services)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/config/service-resolver" {
+			entries := []api.ConfigEntry{
+				&api.ServiceResolverConfigEntry{
+					Kind: "service-resolver",
+					Name: "deleted-service",
+					Meta: map[string]string{"created-by": "atc"},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(entries)
+			return
+		}
+
+		if r.Method == "PUT" || r.Method == "DELETE" {
+			writeAttempted = true
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.Listener.Addr().String()})
+	if err != nil {
+		t.Fatalf("Failed to create consul client: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	r, err := New(logger, server.Listener.Addr().String(), "", "", "", "", false, nil, "", "", false, true)
+	if err != nil {
+		t.Fatalf("Failed to create redirector: %v", err)
+	}
+
+	err = r.reconcile(context.Background(), client)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	mu.Lock()
+	attempted := writeAttempted
+	mu.Unlock()
+
+	if attempted {
+		t.Errorf("Expected dryRun = true to bypass all writes/deletes to Consul, but write/delete was attempted")
+	}
+}
+
+func TestRedirector_StrategiesCacheFallback(t *testing.T) {
+	var mu sync.Mutex
+	var activeCatalog bool
+	var writtenEntry *api.ServiceResolverConfigEntry
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == "GET" && r.URL.Path == "/v1/agent/self" {
+			info := map[string]interface{}{
+				"Config": map[string]interface{}{
+					"Datacenter": "dc1",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(info)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/datacenters" {
+			dcs := []string{"dc1", "dc2"}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(dcs)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/services" {
+			var services map[string][]string
+			if activeCatalog {
+				services = map[string][]string{
+					"consul":    {},
+					"service-a": {"atc.enabled=true", "atc.redirect=custom-redir"},
+				}
+			} else {
+				services = map[string][]string{
+					"consul": {},
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(services)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/config/service-resolver" {
+			var entries []api.ConfigEntry
+			if !activeCatalog {
+				entries = []api.ConfigEntry{
+					&api.ServiceResolverConfigEntry{
+						Kind: "service-resolver",
+						Name: "service-a",
+						Meta: map[string]string{"created-by": "atc"},
+					},
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(entries)
+			return
+		}
+
+		if r.Method == "PUT" && r.URL.Path == "/v1/config" {
+			var entry api.ServiceResolverConfigEntry
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &entry)
+			writtenEntry = &entry
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.Listener.Addr().String()})
+	if err != nil {
+		t.Fatalf("Failed to create consul client: %v", err)
+	}
+
+	strategies := map[string]RedirectStrategy{
+		"custom-redir": {
+			Service:    "service-a",
+			Datacenter: "dc2",
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	r, err := New(logger, server.Listener.Addr().String(), "", "", "", "", false, strategies, "", "", false, false)
+	if err != nil {
+		t.Fatalf("Failed to create redirector: %v", err)
+	}
+
+	mu.Lock()
+	activeCatalog = true
+	mu.Unlock()
+
+	err = r.reconcile(context.Background(), client)
+	if err != nil {
+		t.Fatalf("reconcile 1 failed: %v", err)
+	}
+
+	r.mu.RLock()
+	cached, ok := r.strategiesCache["service-a"]
+	r.mu.RUnlock()
+	if !ok || cached.redirect != "custom-redir" {
+		t.Errorf("Expected strategiesCache to have 'service-a' with redirect 'custom-redir', got %v (ok: %t)", cached, ok)
+	}
+
+	mu.Lock()
+	activeCatalog = false
+	mu.Unlock()
+
+	err = r.reconcile(context.Background(), client)
+	if err != nil {
+		t.Fatalf("reconcile 2 failed: %v", err)
+	}
+
+	mu.Lock()
+	entry := writtenEntry
+	mu.Unlock()
+
+	if entry == nil {
+		t.Fatalf("Expected config entry to be written during fallback")
+	}
+
+	if entry.Redirect == nil || entry.Redirect.Datacenter != "dc2" {
+		t.Errorf("Expected config entry redirect to point to 'dc2' using custom-redir strategy, got %v", entry.Redirect)
 	}
 }

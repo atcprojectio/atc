@@ -280,7 +280,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 			}
 
 			// Cancel any pending writes in forwarder
-			if r.forwarder != nil {
+			if r.forwarder != nil && !r.forwarderEnabled {
 				r.forwarder.CancelPendingWrite(svcName)
 			}
 

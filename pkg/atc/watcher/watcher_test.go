@@ -110,3 +110,97 @@ func TestConsulWatcher(t *testing.T) {
 		t.Error("watcher did not shutdown cleanly after context cancellation")
 	}
 }
+
+func TestConsulWatcher_WithNamespace(t *testing.T) {
+	var servicesNamespace string
+	var checksNamespace string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		ns := r.URL.Query().Get("ns")
+		if ns == "" {
+			ns = r.Header.Get("X-Consul-Namespace")
+		}
+
+		if r.URL.Path == "/v1/catalog/services" {
+			servicesNamespace = ns
+			w.Header().Set("X-Consul-Index", "1")
+			services := map[string][]string{
+				"test-service": {"atc.enabled=true"},
+			}
+			_ = json.NewEncoder(w).Encode(services)
+			return
+		}
+
+		if r.URL.Path == "/v1/health/state/any" {
+			checksNamespace = ns
+			w.Header().Set("X-Consul-Index", "1")
+			checks := []map[string]any{
+				{
+					"Node":        "node1",
+					"CheckID":     "service:test-service",
+					"Name":        "Service 'test-service' check",
+					"Status":      "passing",
+					"ServiceID":   "test-service",
+					"ServiceName": "test-service",
+				},
+			}
+			_ = json.NewEncoder(w).Encode(checks)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	w := New(logger, server.Listener.Addr().String(), "", "", "custom-ns")
+
+	ch := w.Events.Subscribe()
+	defer w.Events.Unsubscribe(ch)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- w.Run(ctx)
+	}()
+
+	// Wait for events to be broadcasted
+	servicesUpdated := false
+	checksUpdated := false
+
+	timeout := time.After(2 * time.Second)
+	for !servicesUpdated || !checksUpdated {
+		select {
+		case msg := <-ch:
+			if msg == "services_update" {
+				servicesUpdated = true
+			}
+			if msg == "checks_update" {
+				checksUpdated = true
+			}
+		case err := <-errChan:
+			if err != nil {
+				t.Fatalf("Watcher Run failed: %v", err)
+			}
+		case <-timeout:
+			// check if there is an error waiting in errChan
+			select {
+			case err := <-errChan:
+				t.Fatalf("timed out waiting for watcher updates, watcher error: %v", err)
+			default:
+				t.Fatal("timed out waiting for watcher updates")
+			}
+		}
+	}
+
+	if servicesNamespace != "custom-ns" {
+		t.Errorf("expected services query to use namespace 'custom-ns', got %q", servicesNamespace)
+	}
+	if checksNamespace != "custom-ns" {
+		t.Errorf("expected checks query to use namespace 'custom-ns', got %q", checksNamespace)
+	}
+}

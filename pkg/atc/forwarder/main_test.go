@@ -788,3 +788,79 @@ func TestForwarderDebouncerCoalesce(t *testing.T) {
 	}
 }
 
+func TestForwarderReconcile_DryRun(t *testing.T) {
+	var mu sync.Mutex
+	var writeAttempted bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if r.Method == "GET" && r.URL.Path == "/v1/agent/self" {
+			info := map[string]interface{}{
+				"Config": map[string]interface{}{
+					"Datacenter": "dc1",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(info)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/datacenters" {
+			dcs := []string{"dc1", "dc2"}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(dcs)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/services" {
+			services := map[string][]string{
+				"service-a": {"atc.enabled=true"},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(services)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/config/service-resolver" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]api.ConfigEntry{})
+			return
+		}
+
+		if r.Method == "PUT" || r.Method == "DELETE" {
+			writeAttempted = true
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(&api.Config{Address: server.Listener.Addr().String()})
+	if err != nil {
+		t.Fatalf("Failed to create consul client: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	f, err := New(logger, server.Listener.Addr().String(), "", "", "", "", nil, "", "", true)
+	if err != nil {
+		t.Fatalf("Failed to create forwarder: %v", err)
+	}
+
+	err = f.reconcile(context.Background(), client)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	mu.Lock()
+	attempted := writeAttempted
+	mu.Unlock()
+
+	if attempted {
+		t.Errorf("Expected dryRun = true to bypass all writes to Consul, but write/delete was attempted")
+	}
+}
+

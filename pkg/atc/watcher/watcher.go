@@ -36,9 +36,6 @@ func (w *ConsulWatcher) Run(ctx context.Context) error {
 	}
 
 	servicesParams := map[string]any{"type": "services"}
-	if w.consulNamespace != "" {
-		servicesParams["namespace"] = w.consulNamespace
-	}
 	servicesWatcher, err := watch.Parse(servicesParams)
 	if err != nil {
 		return fmt.Errorf("failed to create services watcher plan: %w", err)
@@ -48,9 +45,6 @@ func (w *ConsulWatcher) Run(ctx context.Context) error {
 	}
 
 	checksParams := map[string]any{"type": "checks"}
-	if w.consulNamespace != "" {
-		checksParams["namespace"] = w.consulNamespace
-	}
 	checksWatcher, err := watch.Parse(checksParams)
 	if err != nil {
 		return fmt.Errorf("failed to create checks watcher plan: %w", err)
