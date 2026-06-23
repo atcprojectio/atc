@@ -415,7 +415,7 @@ Implement a dedicated config validation capability:
 ## ADR 0018: Defer Request Proxying to Envoy (Data Plane)
 
 ### Status
-Accepted
+Rejected
 
 ### Date
 2026-06-22
@@ -438,7 +438,7 @@ ATC will strictly remain a control-plane orchestrator. All request proxying and 
 ## ADR 0019: Defer Vault Secret Injection to Orchestrator or Agent wrappers
 
 ### Status
-Accepted
+Rejected
 
 ### Date
 2026-06-22
@@ -568,7 +568,7 @@ When running Consul in Enterprise environments, catalog services, health checks,
 ## ADR 0024: Defer Strategy Editing to Declarative Config Files and GitOps
 
 ### Status
-Accepted
+Rejected
 
 ### Date
 2026-06-23
@@ -592,7 +592,7 @@ Reject building an interactive visual strategy editor inside the Web UI dashboar
 ## ADR 0025: Defer Webhook Notification Dispatch to External Observability Stack
 
 ### Status
-Accepted
+Rejected
 
 ### Date
 2026-06-23
