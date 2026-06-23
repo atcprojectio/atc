@@ -18,8 +18,11 @@ type Service interface {
 	PurgeServiceResolver(ctx context.Context, name string) error
 	IsLeader() bool
 	GetFederationStatus(ctx context.Context) (map[string]string, error)
-	ApplyFailoverOverride(ctx context.Context, service string, targetDc string) error
-	TriggerManualRedirect(ctx context.Context, service string, redirectDc string) error
+	ApplyFailoverOverride(ctx context.Context, service string, targetDc string, targetNs string, duration string) error
+	TriggerManualRedirect(ctx context.Context, service string, redirectDc string, redirectNs string, duration string) error
+	GetPredefinedStrategies(ctx context.Context) (string, error)
+	ListActiveOverrides(ctx context.Context) ([]map[string]any, error)
+	TriggerConfigReload() error
 }
 
 func NewHandler(svc Service) http.Handler {
@@ -117,6 +120,24 @@ func NewHandler(svc Service) http.Handler {
 		}, nil, nil
 	})
 
+	// Tool mapping for /api/strategies API endpoint
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_strategies",
+		Description: "Lists all predefined failover and redirect strategy templates configured in ATC (corresponds to /api/strategies endpoint)",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		output, err := svc.GetPredefinedStrategies(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: output,
+				},
+			},
+		}, nil, nil
+	})
+
 	// Tool mapping to purge a service resolver config entry
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "purge_redirect_config",
@@ -142,10 +163,12 @@ func NewHandler(svc Service) http.Handler {
 		Name:        "apply_failover_override",
 		Description: "Applies a manual traffic failover override for a service to a target datacenter, bypassing automated reconciliation",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct {
-		Service  string `json:"service"`
-		TargetDc string `json:"target_dc"`
+		Service   string `json:"service"`
+		TargetDc  string `json:"target_dc"`
+		Namespace string `json:"namespace,omitempty"`
+		Duration  string `json:"duration,omitempty"`
 	}) (*mcp.CallToolResult, any, error) {
-		err := svc.ApplyFailoverOverride(ctx, input.Service, input.TargetDc)
+		err := svc.ApplyFailoverOverride(ctx, input.Service, input.TargetDc, input.Namespace, input.Duration)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -165,8 +188,10 @@ func NewHandler(svc Service) http.Handler {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct {
 		Service    string `json:"service"`
 		RedirectDc string `json:"redirect_dc"`
+		Namespace  string `json:"namespace,omitempty"`
+		Duration   string `json:"duration,omitempty"`
 	}) (*mcp.CallToolResult, any, error) {
-		err := svc.TriggerManualRedirect(ctx, input.Service, input.RedirectDc)
+		err := svc.TriggerManualRedirect(ctx, input.Service, input.RedirectDc, input.Namespace, input.Duration)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -174,6 +199,51 @@ func NewHandler(svc Service) http.Handler {
 			Content: []mcp.Content{
 				&mcp.TextContent{
 					Text: fmt.Sprintf("Successfully triggered manual redirect for service %s to datacenter %s", input.Service, input.RedirectDc),
+				},
+			},
+		}, nil, nil
+	})
+
+	// Tool mapping for listing active overrides
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_active_overrides",
+		Description: "Lists all currently active manual service redirects and failover overrides, including their duration and expiration metadata.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		res, err := svc.ListActiveOverrides(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		var output string
+		if len(res) == 0 {
+			output = "No active manual overrides."
+		} else {
+			output = "Active Manual Overrides:\n"
+			for _, o := range res {
+				output += fmt.Sprintf("- %s: Type=%s, Target=%s, Expires=%s\n", o["service"], o["type"], o["target_dc"], o["expires_at"])
+			}
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: output,
+				},
+			},
+		}, nil, nil
+	})
+
+	// Tool mapping for reloading configuration
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "reload_config",
+		Description: "Manually triggers a configuration file reload dynamically (corresponds to /api/reload endpoint)",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		err := svc.TriggerConfigReload()
+		if err != nil {
+			return nil, nil, err
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: "Configuration reloaded successfully.",
 				},
 			},
 		}, nil, nil

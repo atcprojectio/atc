@@ -455,3 +455,184 @@ Instead of embedding a native Vault API client and handling multiple authenticat
   - No new authentication options or configuration parameters need to be supported inside ATC.
 - **Consequences**:
   - Operators must use wrapper scripts or orchestrator integrations to inject secrets.
+
+---
+
+## ADR 0020: Publish versioned Helm charts to GitHub Container Registry (GHCR) as OCI Artifacts
+
+### Status
+Accepted
+
+### Date
+2026-06-23
+
+### Context
+ATC includes a Helm chart for deployment inside Kubernetes clusters. To make the installation standard and seamless, versioned releases of the chart should be distributed through an official repository/registry. Traditional chart registries require maintaining a separate `gh-pages` branch and index file, whereas Helm 3 natively supports storing chart packages in standard OCI registries.
+
+### Decision
+Publish official ATC Helm chart releases directly to GitHub Container Registry (GHCR) as OCI registry artifacts:
+- **Workflow**: Integrate Helm packaging and publishing directly into [.github/workflows/publish.yml](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/.github/workflows/publish.yml), running on push tag events.
+- **Dynamic Versioning**: Use the Git tag (`GITHUB_REF_NAME`) to inject semver chart versions (`--version`) and application versions (`--app-version`) dynamically at packaging time.
+- **Login & Registry**: Use `helm registry login ghcr.io` using the built-in `GITHUB_TOKEN` secrets context and push to `oci://ghcr.io/${OWNER}/charts/atc`.
+
+### Consequences
+- **Benefits**:
+- Users must use Helm OCI protocols (`oci://` URLs) to resolve and install the chart instead of traditional HTTP repositories.
+
+---
+
+## ADR 0021: Native Authentication, JSON Audit Logging, and Predefined Strategies API
+
+### Status
+Accepted
+
+### Date
+2026-06-23
+
+### Context
+To protect ATC daemon core operations in production, both REST API and MCP endpoints must be secured. Operations like manual overrides and purges require tracking through high-priority audit logs. Finally, pre-defined strategies need to be exposed via APIs so that dashboards and external tooling can inspect available routing strategies.
+
+### Decision
+- **Auth Middleware**: Implement an `authMiddleware` that intercepts requests to REST and MCP endpoints (except `/health` and `/ready`), validating tokens using static keys or delegating verification to Consul's `/v1/agent/self` API.
+- **Audit Logging**: Implement a structured `logAudit` function that logs manual overrides and purges in JSON to standard output/error, masking sensitive tokens.
+- **Predefined Strategies API**: Expose `/api/strategies` and the `list_strategies` MCP tool to return active predefined strategies.
+- **Dashboard Updates**: Update the React dashboard to support token management, localStorage persistence, header injection, and displaying predefined strategies.
+
+### Consequences
+- **Benefits**:
+  - Secure API and MCP access.
+  - Simplified RBAC through Consul token delegation.
+  - Improved compliance and troubleshooting using structured JSON audit logs.
+- **Consequences**:
+  - Slightly higher request processing overhead due to middleware checks.
+  - Operators must configure API keys or delegate access when enabling authentication.
+
+---
+
+## ADR 0022: OpenTelemetry Trace Event propagation, Dry-Run Mode, Manual Override TTL, and Config Reload
+
+### Status
+Accepted
+
+### Date
+2026-06-23
+
+### Context
+Operators need visibility into routing decisions, the ability to test modifications without writing to Consul (dry-run), dynamic configuration reloads without restarting the daemon, and automatic expiration of manual overrides to avoid stale routes.
+
+### Decision
+- **OTel Trace Propagation**: Record trace span events during service resolver writes, deletes, and configuration hot-reloads using package-level `coreTracer`.
+- **Dry-Run Mode**: Introduce a `--dry-run` CLI flag and `dry_run` configuration key to bypass Consul modifications in forwarder, redirector, and purges, logging the bypassed decisions instead.
+- **Manual Override TTL Expiration**: Support optional duration inputs in manual overrides (`ApplyFailoverOverride` / `TriggerManualRedirect`), store expiration timestamps (`atc-override-expires-at`) in config entry metadata, and run a background loop sweeper in ATC that purges expired overrides.
+- **Config Reload API**: Register `POST /api/reload` and MCP tool `reload_config` to dynamically trigger viper reload and config re-unmarshalling.
+- **Frontend Integration**: Display expiration badges on card overrides, expose control form overlays to set TTL when applying manual overrides, and add a reload configuration button in the header.
+
+### Consequences
+- **Benefits**:
+  - Risk-free testing of catalog routing changes via dry-run mode.
+  - Automatic cleanup of overrides preventing stale routing configurations.
+  - Rich OpenTelemetry observability and dynamic reload capability.
+- **Consequences**:
+  - Overhead of background sweep goroutine querying Consul for active overrides.
+  - Expired overrides require ATC leader instance to perform deletions.
+
+---
+
+## ADR 0023: Consul Enterprise Namespace Support and Failover Rate Limiting
+
+### Status
+Accepted
+
+### Date
+2026-06-23
+
+### Context
+When running Consul in Enterprise environments, catalog services, health checks, and service-resolver config entries are segmented into administrative namespaces. To support these environments, ATC must scope watcher plans and config operations to the target namespace. Additionally, during cluster flapping or deployment changes, catalog event streams can fire in rapid succession, leading to API write thrashing. Coalescing/debouncing these events avoids catalog database thrashing.
+
+### Decision
+- **Consul Namespace Scoping**: Add `consul_namespace` configuration parameter and `--consul-namespace` CLI flag. Configure the base Consul `api.Config` Namespace field so that all config-entry reads/writes/deletes are scoped. Pass `"namespace": namespace` in Consul `watch.Parse` parameters to scope catalog/health changes to the same boundary.
+- **Failover Rate Limiting (Coalescing)**: Implement a coalescing event loop in `Forwarder` and `Redirector` using a debounce timer (`time.Timer`). If watcher events arrive in rapid succession, postpone `reconcile` execution by the configured `write_rate_limit` duration (default "1s"), batching multiple catalog events into a single update.
+- **Cross-Namespace Overrides**: Accept optional target namespaces in manual overrides and strategies, writing them to target `ServiceResolverConfigEntry` destination resolvers.
+- **Frontend Badges**: Render namespace badges next to service names on service cards in the UI dashboard when they belong to non-default namespaces.
+
+### Consequences
+- **Benefits**:
+  - Full compatibility with Consul Enterprise administrative boundaries.
+  - Reduced write pressure and API write thrashing on the Consul leader agent during service flaps.
+  - Visibility into namespace ownership directly from the React dashboard.
+- **Consequences**:
+  - Catalog updates are delayed by the rate-limit window (e.g. 1 second), introducing a small reconciliation lag.
+
+---
+
+## ADR 0024: Defer Strategy Editing to Declarative Config Files and GitOps
+
+### Status
+Accepted
+
+### Date
+2026-06-23
+
+### Context
+Admins requested a visual, web-based strategy editor in the React UI dashboard to visually draft, edit, and apply failover/redirect strategies.
+
+### Decision
+Reject building an interactive visual strategy editor inside the Web UI dashboard. Instead, strategies will remain declaratively defined in the central configuration file (`strategies.yaml`) and loaded at startup/reload. Any updates to strategies will be handled by updating the file (which supports hot-reloading via `/api/reload` or SIGHUP), encouraging GitOps workflows.
+
+### Consequences
+- **Benefits**:
+  - Keeps the dashboard UI lightweight, simple, and read-only.
+  - Aligns with infrastructure-as-code and GitOps principles (all strategies are tracked in version control).
+  - Avoids state synchronization issues or write conflicts between multiple operators editing strategies concurrently.
+- **Consequences**:
+  - Operators must edit configuration files directly (via text editors or Git commits) rather than updating them via the dashboard.
+
+---
+
+## ADR 0025: Defer Webhook Notification Dispatch to External Observability Stack
+
+### Status
+Accepted
+
+### Date
+2026-06-23
+
+### Context
+Operators requested that the ATC daemon directly dispatch webhook alerts to Slack, Microsoft Teams, or PagerDuty on state transitions (e.g. during failovers or manual overrides).
+
+### Decision
+Reject embedding webhook alert dispatch logic inside the ATC daemon core. Instead, ATC will emit detailed, structured JSON logs (including audit logs) and OpenTelemetry metrics/traces, and operators should configure external observability alerting engines (such as Prometheus Alertmanager, Grafana Alerting, or log aggregation alerting rules) to handle notification routing.
+
+### Consequences
+- **Benefits**:
+  - Keeps the ATC daemon core lightweight, focusing strictly on control-plane reconciliation.
+  - Avoids introducing webhook retries, backoff loops, credential storage, or notification delivery guarantee logic inside ATC.
+  - Leverages existing, robust enterprise alerting systems that platform teams already maintain.
+- **Consequences**:
+  - Operators must configure external alerts based on ATC logs or metrics to receive notifications.
+
+---
+
+## ADR 0026: Local Developer Observability Stack
+
+### Status
+Accepted
+
+### Date
+2026-06-19
+
+### Context
+Developing and validating the OpenTelemetry instrumentation locally required a standardized, easy-to-use logging, metrics, and tracing backend. Setting up these tools individually (Prometheus, Loki, Tempo, Grafana) was tedious and prone to configuration drift between developers.
+
+### Decision
+Provide a centralized `docker-compose.yml` environment containing a local dev Consul agent and a complete LGTM (Loki, Grafana, Tempo, Mimir/Prometheus) observability stack:
+- Include an OpenTelemetry Collector acting as the central gateway for all OTel signals.
+- Auto-provision Grafana datasources to load the Loki, Prometheus, and Tempo endpoints automatically on startup.
+- Consolidate all container configuration files into a dedicated `deploy/observability/` folder.
+
+### Consequences
+- **Benefits**:
+  - Zero-configuration local verification of traces, logs, and metrics.
+  - Isolated developer environment mimicking production observability pipelines.
+- **Consequences**:
+  - Developers need Docker/Docker Compose installed locally, consuming minor system resources.

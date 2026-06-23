@@ -24,7 +24,7 @@ HTTP Endpoints:
 ATC server hosts two separate HTTP port listeners:
   - Main Port (default :8088): Serves the React frontend dashboard at `/` (which can be disabled
     via `server.ui_enabled` in the config file or `--ui-enabled` command-line flag), exposes /ready,
-    /services, JSON API service list (/api/services), manual overrides (/api/overrides), leader status (/api/leader), WAN federation status (/api/federation), and the MCP server interface.
+    /services, JSON API service list (/api/services), manual overrides (/api/overrides), leader status (/api/leader), WAN federation status (/api/federation), predefined strategies (/api/strategies), reload configuration (/api/reload), and the MCP server interface.
     When the Web UI is disabled, requests to static routes `/` return a 404 Not Found error with a
     "Web UI is disabled" message, while other REST APIs, `/ready`, `/health`, and `/mcp` endpoints remain active.
   - Metrics Port (default :8089): Exposes OpenTelemetry metrics in Prometheus format at `/metrics`.
@@ -33,12 +33,12 @@ API & MCP Integration:
 
 ATC server hosts a Model Context Protocol (MCP) server over Streamable HTTP transport at the `/mcp` route
 for seamless integration with AI models and agents. Exposed tools include check_readiness, check_leadership,
-list_atc_enabled_services, list_wan_federation_status, purge_redirect_config, apply_failover_override, and trigger_manual_redirect.
+list_atc_enabled_services, list_wan_federation_status, list_strategies, purge_redirect_config, apply_failover_override, trigger_manual_redirect, list_active_overrides, and reload_config.
 
-Deployment:
+Authentication & Security:
 
-ATC can be deployed using the production-ready Helm chart located under deploy/helm/atc,
-or the Nomad job specification located under deploy/nomad/atc.nomad.hcl.
+ATC secures REST and MCP endpoints (except `/ready` and `/health`) using static tokens or Consul token
+delegation. All state-changing overrides and purges generate structured JSON audit logs sent to stdout/stderr.
 
 Predefined Strategies:
 
@@ -57,6 +57,10 @@ ATC protects Consul from excessive write operations by debouncing rapid health c
 It supports a global default dampening period (e.g., `5s`), a tag-based override (`atc.dampening=duration`
 such as `atc.dampening=0s` for immediate mode), and an operator safety boundary (`min_dampening_period`)
 to prevent users from bypassing stability safeguards.
+
+Consul Enterprise Namespaces & Failover Rate Limiting:
+
+ATC supports Consul Enterprise namespaces, allowing watcher plans, config entries, and manual overrides to be scoped to a configured namespace (via --consul-namespace or consul_namespace config). Additionally, ATC includes a coalescing rate limiter (via --write-rate-limit or write_rate_limit config) that debounces rapid catalog update events within a duration window (default 1s) to avoid write thrashing on Consul.
 
 Active-Passive High Availability:
 

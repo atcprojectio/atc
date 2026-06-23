@@ -2,6 +2,7 @@ package atc
 
 import (
 	"log/slog"
+	"net/http"
 	"slices"
 
 	"github.com/atcprojectio/atc/pkg/atc/forwarder"
@@ -37,12 +38,14 @@ func (t *Atc) initServer() error {
 	}
 
 	serv.Mux.HandleFunc("/ready", OkHandler())
-	serv.Mux.HandleFunc("GET /api/services", t.apiServicesHandler)
-	serv.Mux.HandleFunc("DELETE /api/services", t.apiServicesDeleteHandler)
-	serv.Mux.HandleFunc("GET /api/leader", t.apiLeaderHandler)
-	serv.Mux.HandleFunc("GET /api/federation", t.apiFederationHandler)
-	serv.Mux.HandleFunc("POST /api/overrides", t.apiOverridesHandler)
-	serv.Mux.Handle("/mcp", mcp_server.NewHandler(t))
+	serv.Mux.Handle("GET /api/services", t.authMiddleware(http.HandlerFunc(t.apiServicesHandler)))
+	serv.Mux.Handle("DELETE /api/services", t.authMiddleware(http.HandlerFunc(t.apiServicesDeleteHandler)))
+	serv.Mux.Handle("GET /api/leader", t.authMiddleware(http.HandlerFunc(t.apiLeaderHandler)))
+	serv.Mux.Handle("GET /api/federation", t.authMiddleware(http.HandlerFunc(t.apiFederationHandler)))
+	serv.Mux.Handle("POST /api/overrides", t.authMiddleware(http.HandlerFunc(t.apiOverridesHandler)))
+	serv.Mux.Handle("GET /api/strategies", t.authMiddleware(http.HandlerFunc(t.apiStrategiesHandler)))
+	serv.Mux.Handle("POST /api/reload", t.authMiddleware(http.HandlerFunc(t.apiReloadHandler)))
+	serv.Mux.Handle("/mcp", t.authMiddleware(mcp_server.NewHandler(t)))
 
 	t.Server = serv
 	return nil
@@ -54,9 +57,12 @@ func (t *Atc) initForwarder() error {
 		t.Cfg.ConsulAddr,
 		t.Cfg.ConsulToken,
 		t.Cfg.ConsulDC,
+		t.Cfg.ConsulNamespace,
+		t.Cfg.WriteRateLimit,
 		t.Cfg.Strategies.Failover,
 		t.Cfg.DampeningPeriod,
 		t.Cfg.MinDampeningPeriod,
+		t.Cfg.DryRun,
 	)
 	if err != nil {
 		return err
@@ -73,11 +79,14 @@ func (t *Atc) initRedirector() error {
 		t.Cfg.ConsulAddr,
 		t.Cfg.ConsulToken,
 		t.Cfg.ConsulDC,
+		t.Cfg.ConsulNamespace,
+		t.Cfg.WriteRateLimit,
 		forwarderEnabled,
 		t.Cfg.Strategies.Redirect,
 		t.Cfg.DampeningPeriod,
 		t.Cfg.MinDampeningPeriod,
 		hasDefaultFailover,
+		t.Cfg.DryRun,
 	)
 	if err != nil {
 		return err

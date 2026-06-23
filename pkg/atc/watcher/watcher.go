@@ -10,30 +10,36 @@ import (
 )
 
 type ConsulWatcher struct {
-	logger      *slog.Logger
-	consulAddr  string
-	consulToken string
-	consulDC    string
-	Events      *Broadcaster
+	logger          *slog.Logger
+	consulAddr      string
+	consulToken     string
+	consulDC        string
+	consulNamespace string
+	Events          *Broadcaster
 }
 
-func New(logger *slog.Logger, consulAddr, consulToken, consulDC string) *ConsulWatcher {
+func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace string) *ConsulWatcher {
 	return &ConsulWatcher{
-		logger:      logger,
-		consulAddr:  consulAddr,
-		consulToken: consulToken,
-		consulDC:    consulDC,
-		Events:      NewBroadcaster(),
+		logger:          logger,
+		consulAddr:      consulAddr,
+		consulToken:     consulToken,
+		consulDC:        consulDC,
+		consulNamespace: consulNamespace,
+		Events:          NewBroadcaster(),
 	}
 }
 
 func (w *ConsulWatcher) Run(ctx context.Context) error {
-	client, err := api.NewClient(consulCfg(w.consulAddr, w.consulToken, w.consulDC))
+	client, err := api.NewClient(consulCfg(w.consulAddr, w.consulToken, w.consulDC, w.consulNamespace))
 	if err != nil {
 		return fmt.Errorf("failed to connect to consul: %w", err)
 	}
 
-	servicesWatcher, err := watch.Parse(map[string]any{"type": "services"})
+	servicesParams := map[string]any{"type": "services"}
+	if w.consulNamespace != "" {
+		servicesParams["namespace"] = w.consulNamespace
+	}
+	servicesWatcher, err := watch.Parse(servicesParams)
 	if err != nil {
 		return fmt.Errorf("failed to create services watcher plan: %w", err)
 	}
@@ -41,7 +47,11 @@ func (w *ConsulWatcher) Run(ctx context.Context) error {
 		w.Events.Broadcast("services_update")
 	}
 
-	checksWatcher, err := watch.Parse(map[string]any{"type": "checks"})
+	checksParams := map[string]any{"type": "checks"}
+	if w.consulNamespace != "" {
+		checksParams["namespace"] = w.consulNamespace
+	}
+	checksWatcher, err := watch.Parse(checksParams)
 	if err != nil {
 		return fmt.Errorf("failed to create checks watcher plan: %w", err)
 	}
@@ -72,7 +82,7 @@ func (w *ConsulWatcher) Run(ctx context.Context) error {
 	}
 }
 
-func consulCfg(addr, token, dc string) *api.Config {
+func consulCfg(addr, token, dc, ns string) *api.Config {
 	cfg := api.DefaultConfig()
 	if addr != "" {
 		cfg.Address = addr
@@ -82,6 +92,9 @@ func consulCfg(addr, token, dc string) *api.Config {
 	}
 	if dc != "" {
 		cfg.Datacenter = dc
+	}
+	if ns != "" {
+		cfg.Namespace = ns
 	}
 	return cfg
 }

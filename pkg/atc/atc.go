@@ -22,6 +22,10 @@ import (
 	atc_server "github.com/atcprojectio/atc/pkg/atc/server"
 	"github.com/atcprojectio/atc/pkg/atc/telemetry"
 	"github.com/hashicorp/consul/api"
+	"github.com/spf13/viper"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type StrategiesConfig struct {
@@ -35,6 +39,12 @@ type HaConfig struct {
 	SessionTTL string `yaml:"session_ttl" json:"session_ttl" mapstructure:"session_ttl"`
 }
 
+type AuthConfig struct {
+	Enabled               bool     `yaml:"enabled" json:"enabled" mapstructure:"enabled"`
+	StaticKeys            []string `yaml:"static_keys" json:"static_keys" mapstructure:"static_keys"`
+	ConsulTokenDelegation bool     `yaml:"consul_token_delegation" json:"consul_token_delegation" mapstructure:"consul_token_delegation"`
+}
+
 type Config struct {
 	Name               string            `yaml:"service" mapstructure:"service"`
 	Server             atc_server.Config `yaml:"server" mapstructure:"server"`
@@ -42,11 +52,21 @@ type Config struct {
 	ConsulAddr         string            `yaml:"consul_addr" mapstructure:"consul_addr"`
 	ConsulToken        string            `yaml:"consul_token" mapstructure:"consul_token"`
 	ConsulDC           string            `yaml:"consul_dc" mapstructure:"consul_dc"`
+	ConsulNamespace    string            `yaml:"consul_namespace" mapstructure:"consul_namespace"`
+	WriteRateLimit     string            `yaml:"write_rate_limit" mapstructure:"write_rate_limit"`
 	DampeningPeriod    string            `yaml:"dampening_period" mapstructure:"dampening_period"`
 	MinDampeningPeriod string            `yaml:"min_dampening_period" mapstructure:"min_dampening_period"`
 	Strategies         StrategiesConfig  `yaml:"strategies" json:"strategies" mapstructure:"strategies"`
 	HA                 HaConfig          `yaml:"ha" json:"ha" mapstructure:"ha"`
+	Auth               AuthConfig        `yaml:"auth" json:"auth" mapstructure:"auth"`
+	DryRun             bool              `yaml:"dry_run" json:"dry_run" mapstructure:"dry_run"`
 }
+
+type contextKey string
+
+const tokenContextKey contextKey = "atc-token"
+
+var coreTracer = otel.Tracer("atc/core")
 
 type Atc struct {
 	Cfg            Config
@@ -133,7 +153,7 @@ func (t *Atc) Run() error {
 
 	if t.Server != nil {
 		t.Server.Mux.HandleFunc("/health", t.healthHandler(&shutdownRequested))
-		t.Server.Mux.HandleFunc("GET /services", t.servicesHandler)
+		t.Server.Mux.Handle("GET /services", t.authMiddleware(http.HandlerFunc(t.servicesHandler)))
 	}
 
 	if t.Server != nil {
@@ -160,6 +180,11 @@ func (t *Atc) Run() error {
 	}
 
 	t.coreLogger.InfoContext(ctx, "Application started")
+
+	g.Go(func() error {
+		t.sweepExpiredOverrides(ctx)
+		return nil
+	})
 
 	go func() {
 		<-ctx.Done()
@@ -396,14 +421,16 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type ServiceItem struct {
-		Name             string       `json:"name"`
-		Tags             []string     `json:"tags"`
-		ResolverType     string       `json:"resolver_type"`
-		Status           string       `json:"status"` // "active" or "deleted"
-		FailoverStrategy string       `json:"failover_strategy"`
-		RedirectStrategy string       `json:"redirect_strategy"`
-		FailoverTargets  []TargetItem `json:"failover_targets,omitempty"`
-		RedirectTarget   *TargetItem  `json:"redirect_target,omitempty"`
+		Name             string            `json:"name"`
+		Namespace        string            `json:"namespace,omitempty"`
+		Tags             []string          `json:"tags"`
+		ResolverType     string            `json:"resolver_type"`
+		Status           string            `json:"status"` // "active" or "deleted"
+		FailoverStrategy string            `json:"failover_strategy"`
+		RedirectStrategy string            `json:"redirect_strategy"`
+		FailoverTargets  []TargetItem      `json:"failover_targets,omitempty"`
+		RedirectTarget   *TargetItem       `json:"redirect_target,omitempty"`
+		Meta             map[string]string `json:"meta,omitempty"`
 	}
 
 	resultMap := make(map[string]ServiceItem)
@@ -417,7 +444,9 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 			var failoverTargets []TargetItem
 			var redirectTarget *TargetItem
 
+			var entryMeta map[string]string
 			if existing, exists := existingResolverEntries[svcName]; exists {
+				entryMeta = existing.Meta
 				if len(existing.Failover) > 0 {
 					resType = "failover"
 				} else if existing.Redirect != nil && existing.Redirect.Service != "" {
@@ -458,6 +487,7 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 
 			resultMap[svcName] = ServiceItem{
 				Name:             svcName,
+				Namespace:        t.Cfg.ConsulNamespace,
 				Tags:             tags,
 				ResolverType:     resType,
 				Status:           "active",
@@ -465,6 +495,7 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 				RedirectStrategy: redirectStrategy,
 				FailoverTargets:  failoverTargets,
 				RedirectTarget:   redirectTarget,
+				Meta:             entryMeta,
 			}
 		}
 	}
@@ -472,7 +503,7 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 	// 2. Process config entries to find deleted services that are being redirected
 	for _, entry := range entries {
 		if res, ok := entry.(*api.ServiceResolverConfigEntry); ok {
-			if res.Meta != nil && res.Meta["created-by"] == "atc" {
+			if res.Meta != nil && (res.Meta["created-by"] == "atc" || res.Meta["created-by"] == "atc-override") {
 				if _, active := resultMap[res.Name]; !active {
 					// Check if completely absent from catalog
 					if _, exists := services[res.Name]; !exists {
@@ -518,8 +549,14 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 
+						ns := res.Namespace
+						if ns == "" {
+							ns = t.Cfg.ConsulNamespace
+						}
+
 						resultMap[res.Name] = ServiceItem{
 							Name:             res.Name,
+							Namespace:        ns,
 							Tags:             []string{"atc.enabled=true", "status:deleted"},
 							ResolverType:     resType,
 							Status:           "deleted",
@@ -527,6 +564,7 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 							RedirectStrategy: redirectStrategy,
 							FailoverTargets:  failoverTargets,
 							RedirectTarget:   redirectTarget,
+							Meta:             res.Meta,
 						}
 					}
 				}
@@ -549,86 +587,150 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (t *Atc) PurgeServiceResolver(ctx context.Context, name string) error {
+	ctx, span := coreTracer.Start(ctx, "PurgeServiceResolver", trace.WithAttributes(attribute.String("service", name)))
+	defer span.End()
+
 	client, err := t.getConsulClient(ctx)
 	if err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("failed to connect to consul: %w", err)
 	}
 
 	entry, _, err := client.ConfigEntries().Get("service-resolver", name, nil)
 	if err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("failed to fetch config entry: %w", err)
 	}
 
 	resolver, ok := entry.(*api.ServiceResolverConfigEntry)
 	if !ok || resolver.Meta == nil || (resolver.Meta["created-by"] != "atc" && resolver.Meta["created-by"] != "atc-override") {
-		return fmt.Errorf("entry was not created by ATC")
+		err = fmt.Errorf("entry was not created by ATC")
+		span.RecordError(err)
+		return err
 	}
 
-	_, err = client.ConfigEntries().Delete("service-resolver", name, (&api.WriteOptions{}).WithContext(ctx))
-	if err != nil {
-		return fmt.Errorf("failed to delete config entry: %w", err)
+	t.cfgMu.RLock()
+	dryRun := t.Cfg.DryRun
+	t.cfgMu.RUnlock()
+
+	if dryRun {
+		span.AddEvent("dry_run_purge_service_resolver", trace.WithAttributes(attribute.String("service", name)))
+		t.coreLogger.InfoContext(ctx, "[DRY RUN] Would delete service-resolver config entry", slog.String("service", name))
+	} else {
+		span.AddEvent("purge_service_resolver", trace.WithAttributes(attribute.String("service", name)))
+		_, err = client.ConfigEntries().Delete("service-resolver", name, (&api.WriteOptions{}).WithContext(ctx))
+		if err != nil {
+			span.RecordError(err)
+			return fmt.Errorf("failed to delete config entry: %w", err)
+		}
 	}
 
 	return nil
 }
 
-func (t *Atc) ApplyFailoverOverride(ctx context.Context, service string, targetDc string) error {
+func (t *Atc) ApplyFailoverOverride(ctx context.Context, service string, targetDc string, targetNs string, duration string) error {
 	client, err := t.getConsulClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to connect to consul: %w", err)
 	}
 
+	meta := map[string]string{
+		"created-by": "atc-override",
+	}
+	if duration != "" {
+		d, err := time.ParseDuration(duration)
+		if err != nil {
+			return fmt.Errorf("invalid duration format %q: %w", duration, err)
+		}
+		meta["atc-override-expires-at"] = time.Now().Add(d).Format(time.RFC3339)
+	}
+
 	entry := &api.ServiceResolverConfigEntry{
 		Kind: "service-resolver",
 		Name: service,
-		Meta: map[string]string{
-			"created-by": "atc-override",
-		},
+		Meta: meta,
 		Failover: map[string]api.ServiceResolverFailover{
 			"*": {
 				Targets: []api.ServiceResolverFailoverTarget{
 					{
 						Service:    service,
 						Datacenter: targetDc,
+						Namespace:  targetNs,
 					},
 				},
 			},
 		},
 	}
 
-	_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
-	if err != nil {
-		return fmt.Errorf("failed to set failover override: %w", err)
+	ctx, span := coreTracer.Start(ctx, "ApplyFailoverOverride")
+	defer span.End()
+
+	t.cfgMu.RLock()
+	dryRun := t.Cfg.DryRun
+	t.cfgMu.RUnlock()
+
+	if dryRun {
+		span.AddEvent("dry_run_apply_failover_override", trace.WithAttributes(attribute.String("service", service), attribute.String("target_dc", targetDc), attribute.String("target_ns", targetNs)))
+		t.coreLogger.InfoContext(ctx, "[DRY RUN] Would apply manual failover override", slog.String("service", service), slog.String("target_dc", targetDc), slog.String("target_ns", targetNs), slog.String("duration", duration))
+	} else {
+		span.AddEvent("apply_failover_override", trace.WithAttributes(attribute.String("service", service), attribute.String("target_dc", targetDc), attribute.String("target_ns", targetNs)))
+		_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+		if err != nil {
+			return fmt.Errorf("failed to set failover override: %w", err)
+		}
+		t.coreLogger.InfoContext(ctx, "Applied manual failover override", slog.String("service", service), slog.String("target_dc", targetDc), slog.String("target_ns", targetNs))
 	}
 
-	t.coreLogger.InfoContext(ctx, "Applied manual failover override", slog.String("service", service), slog.String("target_dc", targetDc))
 	return nil
 }
 
-func (t *Atc) TriggerManualRedirect(ctx context.Context, service string, redirectDc string) error {
+func (t *Atc) TriggerManualRedirect(ctx context.Context, service string, redirectDc string, redirectNs string, duration string) error {
 	client, err := t.getConsulClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to connect to consul: %w", err)
 	}
 
+	meta := map[string]string{
+		"created-by": "atc-override",
+	}
+	if duration != "" {
+		d, err := time.ParseDuration(duration)
+		if err != nil {
+			return fmt.Errorf("invalid duration format %q: %w", duration, err)
+		}
+		meta["atc-override-expires-at"] = time.Now().Add(d).Format(time.RFC3339)
+	}
+
 	entry := &api.ServiceResolverConfigEntry{
 		Kind: "service-resolver",
 		Name: service,
-		Meta: map[string]string{
-			"created-by": "atc-override",
-		},
+		Meta: meta,
 		Redirect: &api.ServiceResolverRedirect{
 			Service:    service,
 			Datacenter: redirectDc,
+			Namespace:  redirectNs,
 		},
 	}
 
-	_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
-	if err != nil {
-		return fmt.Errorf("failed to set redirect override: %w", err)
+	ctx, span := coreTracer.Start(ctx, "TriggerManualRedirect")
+	defer span.End()
+
+	t.cfgMu.RLock()
+	dryRun := t.Cfg.DryRun
+	t.cfgMu.RUnlock()
+
+	if dryRun {
+		span.AddEvent("dry_run_trigger_manual_redirect", trace.WithAttributes(attribute.String("service", service), attribute.String("redirect_dc", redirectDc), attribute.String("redirect_ns", redirectNs)))
+		t.coreLogger.InfoContext(ctx, "[DRY RUN] Would apply manual redirect override", slog.String("service", service), slog.String("redirect_dc", redirectDc), slog.String("redirect_ns", redirectNs), slog.String("duration", duration))
+	} else {
+		span.AddEvent("trigger_manual_redirect", trace.WithAttributes(attribute.String("service", service), attribute.String("redirect_dc", redirectDc), attribute.String("redirect_ns", redirectNs)))
+		_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+		if err != nil {
+			return fmt.Errorf("failed to set redirect override: %w", err)
+		}
+		t.coreLogger.InfoContext(ctx, "Applied manual redirect override", slog.String("service", service), slog.String("redirect_dc", redirectDc), slog.String("redirect_ns", redirectNs))
 	}
 
-	t.coreLogger.InfoContext(ctx, "Applied manual redirect override", slog.String("service", service), slog.String("redirect_dc", redirectDc))
 	return nil
 }
 
@@ -658,10 +760,11 @@ func (t *Atc) apiServicesDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	t.logAudit(r.Context(), r, "purge_resolver", svcName, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func consulCfg(addr, token, dc string) *api.Config {
+func consulCfg(addr, token, dc, ns string) *api.Config {
 	cfg := api.DefaultConfig()
 	if addr != "" {
 		cfg.Address = addr
@@ -671,6 +774,9 @@ func consulCfg(addr, token, dc string) *api.Config {
 	}
 	if dc != "" {
 		cfg.Datacenter = dc
+	}
+	if ns != "" {
+		cfg.Namespace = ns
 	}
 	return cfg
 }
@@ -692,8 +798,54 @@ func (t *Atc) getConsulClient(ctx context.Context) (*api.Client, error) {
 	addr := t.Cfg.ConsulAddr
 	token := t.Cfg.ConsulToken
 	dc := t.Cfg.ConsulDC
+	ns := t.Cfg.ConsulNamespace
 	t.cfgMu.RUnlock()
-	return api.NewClient(consulCfg(addr, token, dc))
+
+	if ctxToken, ok := ctx.Value(tokenContextKey).(string); ok && ctxToken != "" {
+		isStaticKey := false
+		t.cfgMu.RLock()
+		for _, sk := range t.Cfg.Auth.StaticKeys {
+			if sk == ctxToken {
+				isStaticKey = true
+				break
+			}
+		}
+		t.cfgMu.RUnlock()
+		if !isStaticKey {
+			token = ctxToken
+		}
+	}
+
+	return api.NewClient(consulCfg(addr, token, dc, ns))
+}
+
+func (t *Atc) GetPredefinedStrategies(ctx context.Context) (string, error) {
+	t.cfgMu.RLock()
+	s := t.Cfg.Strategies
+	t.cfgMu.RUnlock()
+
+	var sb strings.Builder
+	if len(s.Failover) == 0 && len(s.Redirect) == 0 {
+		return "No predefined strategies configured.", nil
+	}
+
+	sb.WriteString("Predefined Strategies:\n")
+	if len(s.Failover) > 0 {
+		sb.WriteString("\nFailover Strategies:\n")
+		for name, val := range s.Failover {
+			fmt.Fprintf(&sb, "- %s: timeout=%s, targets:\n", name, val.ConnectTimeout)
+			for _, target := range val.Targets {
+				fmt.Fprintf(&sb, "  - Service: %s, Datacenter: %s\n", target.Service, target.Datacenter)
+			}
+		}
+	}
+	if len(s.Redirect) > 0 {
+		sb.WriteString("\nRedirect Strategies:\n")
+		for name, val := range s.Redirect {
+			fmt.Fprintf(&sb, "- %s: Target Service: %s, Target Datacenter: %s\n", name, val.Service, val.Datacenter)
+		}
+	}
+	return sb.String(), nil
 }
 
 func (t *Atc) GetFederationStatus(ctx context.Context) (map[string]string, error) {
@@ -734,13 +886,20 @@ func (t *Atc) ReloadConfig(cfg Config) {
 	t.Cfg = cfg
 	t.cfgMu.Unlock()
 
-	t.coreLogger.Info("Configuration reloaded dynamically from file watcher")
+	ctx, span := coreTracer.Start(context.Background(), "ReloadConfig")
+	defer span.End()
+	span.AddEvent("config_reloaded", trace.WithAttributes(attribute.Bool("dry_run", cfg.DryRun)))
+
+	t.coreLogger.InfoContext(ctx, "Configuration reloaded dynamically from file watcher", slog.Bool("dry_run", cfg.DryRun))
 
 	if t.Forwarder != nil {
 		t.Forwarder.UpdateConfig(
 			cfg.Strategies.Failover,
 			cfg.DampeningPeriod,
 			cfg.MinDampeningPeriod,
+			cfg.ConsulNamespace,
+			cfg.WriteRateLimit,
+			cfg.DryRun,
 		)
 	}
 	if t.Redirector != nil {
@@ -748,6 +907,166 @@ func (t *Atc) ReloadConfig(cfg Config) {
 			cfg.Strategies.Redirect,
 			cfg.DampeningPeriod,
 			cfg.MinDampeningPeriod,
+			cfg.ConsulNamespace,
+			cfg.WriteRateLimit,
+			cfg.DryRun,
 		)
+	}
+}
+
+func (t *Atc) TriggerConfigReload() error {
+	t.coreLogger.Info("Triggering manual configuration reload")
+	if configFile := viper.GetString("config"); configFile != "" {
+		if err := viper.ReadInConfig(); err != nil {
+			return fmt.Errorf("failed to read config file %s: %w", configFile, err)
+		}
+	}
+
+	var newCfg Config
+	if err := viper.Unmarshal(&newCfg); err != nil {
+		return fmt.Errorf("failed to unmarshal configuration: %w", err)
+	}
+
+	if newCfg.Server.HTTPListenPort == 0 {
+		newCfg.Server.HTTPListenPort = viper.GetInt("port")
+	}
+	if newCfg.Server.MetricsListenPort == 0 {
+		newCfg.Server.MetricsListenPort = viper.GetInt("metrics_port")
+	}
+	if len(newCfg.Target) == 0 {
+		newCfg.Target = viper.GetStringSlice("target")
+	}
+	if newCfg.Server.LogLevel == "" {
+		newCfg.Server.LogLevel = viper.GetString("log_level")
+	}
+	if newCfg.ConsulAddr == "" {
+		newCfg.ConsulAddr = viper.GetString("consul_addr")
+	}
+	if newCfg.ConsulToken == "" {
+		newCfg.ConsulToken = viper.GetString("consul_token")
+	}
+	if newCfg.ConsulDC == "" {
+		newCfg.ConsulDC = viper.GetString("consul_dc")
+	}
+	if newCfg.ConsulNamespace == "" {
+		newCfg.ConsulNamespace = viper.GetString("consul_namespace")
+	}
+	if newCfg.WriteRateLimit == "" {
+		newCfg.WriteRateLimit = viper.GetString("write_rate_limit")
+	}
+	if !viper.IsSet("server.ui_enabled") {
+		newCfg.Server.UiEnabled = viper.GetBool("ui_enabled")
+	}
+	newCfg.Server.MetricsNamespace = "atc"
+
+	t.ReloadConfig(newCfg)
+	return nil
+}
+
+func (t *Atc) ListActiveOverrides(ctx context.Context) ([]map[string]any, error) {
+	client, err := t.getConsulClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to consul: %w", err)
+	}
+
+	entries, _, err := client.ConfigEntries().List("service-resolver", (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list config entries: %w", err)
+	}
+
+	var overrides []map[string]any
+	for _, entry := range entries {
+		res, ok := entry.(*api.ServiceResolverConfigEntry)
+		if !ok || res.Meta == nil || res.Meta["created-by"] != "atc-override" {
+			continue
+		}
+
+		typ := "none"
+		targetDc := ""
+		if len(res.Failover) > 0 {
+			typ = "failover"
+			if fo, ok := res.Failover["*"]; ok && len(fo.Targets) > 0 {
+				targetDc = fo.Targets[0].Datacenter
+			}
+		} else if res.Redirect != nil && res.Redirect.Service != "" {
+			typ = "redirect"
+			targetDc = res.Redirect.Datacenter
+		}
+
+		expiresAt := res.Meta["atc-override-expires-at"]
+		if expiresAt == "" {
+			expiresAt = "never"
+		}
+
+		overrides = append(overrides, map[string]any{
+			"service":    res.Name,
+			"type":       typ,
+			"target_dc":  targetDc,
+			"expires_at": expiresAt,
+		})
+	}
+	return overrides, nil
+}
+
+func (t *Atc) sweepExpiredOverrides(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	t.coreLogger.InfoContext(ctx, "Starting override expiration sweep loop")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !t.IsLeader() {
+				continue
+			}
+			overrides, err := t.ListActiveOverrides(ctx)
+			if err != nil {
+				t.coreLogger.ErrorContext(ctx, "Failed to list active overrides during sweep", slog.Any("error", err))
+				continue
+			}
+
+			now := time.Now()
+			for _, o := range overrides {
+				svcName, _ := o["service"].(string)
+				expiresAtStr, _ := o["expires_at"].(string)
+				if expiresAtStr == "" || expiresAtStr == "never" {
+					continue
+				}
+
+				exp, err := time.Parse(time.RFC3339, expiresAtStr)
+				if err != nil {
+					t.coreLogger.ErrorContext(ctx, "Failed to parse override expiration time", slog.String("service", svcName), slog.String("expires_at", expiresAtStr), slog.Any("error", err))
+					continue
+				}
+
+				if now.After(exp) {
+					t.coreLogger.InfoContext(ctx, "Override expired, purging", slog.String("service", svcName), slog.Time("expires_at", exp))
+
+					purgeCtx, span := coreTracer.Start(ctx, "PurgeExpiredOverride", trace.WithAttributes(attribute.String("service", svcName)))
+
+					t.cfgMu.RLock()
+					dryRun := t.Cfg.DryRun
+					t.cfgMu.RUnlock()
+
+					if dryRun {
+						span.AddEvent("dry_run_purge_expired_override", trace.WithAttributes(attribute.String("service", svcName)))
+						t.coreLogger.InfoContext(purgeCtx, "[DRY RUN] Would purge expired service-resolver override", slog.String("service", svcName))
+					} else {
+						span.AddEvent("purge_expired_override", trace.WithAttributes(attribute.String("service", svcName)))
+						err = t.PurgeServiceResolver(purgeCtx, svcName)
+						if err != nil {
+							t.coreLogger.ErrorContext(purgeCtx, "Failed to purge expired override", slog.String("service", svcName), slog.Any("error", err))
+							span.RecordError(err)
+						} else {
+							t.coreLogger.InfoContext(purgeCtx, "Purged expired service-resolver override", slog.String("service", svcName))
+						}
+					}
+					span.End()
+				}
+			}
+		}
 	}
 }

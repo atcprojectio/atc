@@ -365,7 +365,7 @@ func TestApplyFailoverOverride(t *testing.T) {
 		coreLogger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	err := atc.ApplyFailoverOverride(context.Background(), "payment-service", "dc2")
+	err := atc.ApplyFailoverOverride(context.Background(), "payment-service", "dc2", "", "")
 	if err != nil {
 		t.Fatalf("ApplyFailoverOverride failed: %v", err)
 	}
@@ -413,7 +413,7 @@ func TestTriggerManualRedirect(t *testing.T) {
 		coreLogger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	err := atc.TriggerManualRedirect(context.Background(), "payment-service", "dc2")
+	err := atc.TriggerManualRedirect(context.Background(), "payment-service", "dc2", "", "")
 	if err != nil {
 		t.Fatalf("TriggerManualRedirect failed: %v", err)
 	}

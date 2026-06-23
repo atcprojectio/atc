@@ -58,6 +58,9 @@ config:
   logLevel: info
   consulAddr: "http://127.0.0.1:8500"
   consulDC: "dc1"
+  consulNamespace: ""
+  writeRateLimit: "1s"
+  dryRun: false
   # Predefined strategies and HA configuration for ATC config file
   strategiesYaml: |
     service: "atc-service"
@@ -65,8 +68,16 @@ config:
       enabled: true
       lock_key: "atc/leader/lock"
       session_ttl: "15s"
+    auth:
+      enabled: false
+      static_keys:
+        - "atc-super-secret-token"
+      consul_token_delegation: true
     dampening_period: "5s"
     min_dampening_period: "1s"
+    consul_namespace: ""
+    write_rate_limit: "1s"
+    dry_run: false
     strategies:
       failover:
         standard-failover:

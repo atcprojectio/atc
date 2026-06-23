@@ -49,10 +49,17 @@ var serverCmd = &cobra.Command{
 		if cfg.ConsulDC == "" {
 			cfg.ConsulDC = viper.GetString("consul_dc")
 		}
+		if cfg.ConsulNamespace == "" {
+			cfg.ConsulNamespace = viper.GetString("consul_namespace")
+		}
+		if cfg.WriteRateLimit == "" {
+			cfg.WriteRateLimit = viper.GetString("write_rate_limit")
+		}
 		if !viper.IsSet("server.ui_enabled") {
 			cfg.Server.UiEnabled = viper.GetBool("ui_enabled")
 		}
 		cfg.Server.MetricsNamespace = "atc"
+		cfg.DryRun = viper.GetBool("dry_run")
 
 		t, err := atc.New(cfg)
 		if err != nil {
@@ -86,10 +93,17 @@ var serverCmd = &cobra.Command{
 				if newCfg.ConsulDC == "" {
 					newCfg.ConsulDC = viper.GetString("consul_dc")
 				}
+				if newCfg.ConsulNamespace == "" {
+					newCfg.ConsulNamespace = viper.GetString("consul_namespace")
+				}
+				if newCfg.WriteRateLimit == "" {
+					newCfg.WriteRateLimit = viper.GetString("write_rate_limit")
+				}
 				if !viper.IsSet("server.ui_enabled") {
 					newCfg.Server.UiEnabled = viper.GetBool("ui_enabled")
 				}
 				newCfg.Server.MetricsNamespace = "atc"
+				newCfg.DryRun = viper.GetBool("dry_run")
 
 				t.ReloadConfig(newCfg)
 			})
@@ -129,4 +143,13 @@ func init() {
 
 	serverCmd.PersistentFlags().Bool("ui-enabled", true, "Enable serving the embedded web UI dashboard.")
 	_ = viper.BindPFlag("ui_enabled", serverCmd.PersistentFlags().Lookup("ui-enabled"))
+
+	serverCmd.PersistentFlags().Bool("dry-run", false, "Disable writing to Consul, log actions instead.")
+	_ = viper.BindPFlag("dry_run", serverCmd.PersistentFlags().Lookup("dry-run"))
+
+	serverCmd.PersistentFlags().String("consul-namespace", "", "Consul Enterprise Namespace.")
+	_ = viper.BindPFlag("consul_namespace", serverCmd.PersistentFlags().Lookup("consul-namespace"))
+
+	serverCmd.PersistentFlags().String("write-rate-limit", "1s", "Coalesce write events within this duration window (e.g. 1s, 500ms).")
+	_ = viper.BindPFlag("write_rate_limit", serverCmd.PersistentFlags().Lookup("write-rate-limit"))
 }

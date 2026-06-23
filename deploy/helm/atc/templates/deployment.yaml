@@ -63,6 +63,10 @@ spec:
               value: {{ .Values.config.consulAddr | quote }}
             - name: ATC_CONSUL_DC
               value: {{ .Values.config.consulDC | quote }}
+            - name: ATC_CONSUL_NAMESPACE
+              value: {{ .Values.config.consulNamespace | quote }}
+            - name: ATC_WRITE_RATE_LIMIT
+              value: {{ .Values.config.writeRateLimit | quote }}
             - name: ATC_LOG_LEVEL
               value: {{ .Values.config.logLevel | quote }}
           volumeMounts:

@@ -144,4 +144,63 @@ describe('ATC Dashboard App', () => {
       );
     });
   });
+
+  it('renders active manual overrides with expiration info', async () => {
+    const mockServicesWithOverride = [
+      ...mockServices,
+      {
+        name: 'override-service',
+        tags: ['atc.enabled=true'],
+        resolver_type: 'failover',
+        status: 'active',
+        meta: {
+          'created-by': 'atc-override',
+          'atc-override-expires-at': new Date(Date.now() + 15 * 60 * 1000).toISOString()
+        }
+      }
+    ];
+
+    global.fetch = vi.fn().mockImplementation((url) => {
+      if (url.includes('/api/services')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(mockServicesWithOverride)
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText('override-service')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText(/Bypassed \(Expires in 15m\)/)).toBeInTheDocument();
+  });
+
+  it('submits manual override with TTL duration', async () => {
+    const { container } = render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText('payment-service')).toBeInTheDocument();
+    });
+
+    const overrideButton = screen.getAllByRole('button', { name: /Apply Manual Override/i })[0];
+    fireEvent.click(overrideButton);
+
+    expect(screen.getByText('Manual Override Controls')).toBeInTheDocument();
+
+    const applyBtn = screen.getByRole('button', { name: /Apply Override/i });
+    fireEvent.click(applyBtn);
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/overrides'),
+        expect.objectContaining({
+          method: 'POST'
+        })
+      );
+    });
+  });
 });

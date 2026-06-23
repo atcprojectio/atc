@@ -96,6 +96,7 @@
           <ul>
             <li><a href="#dashboard-ui"><i class="fa-solid fa-gauge"></i> Live Dashboard</a></li>
             <li><a href="#api-reference"><i class="fa-solid fa-code"></i> API Reference</a></li>
+            <li><a href="#authentication-security"><i class="fa-solid fa-shield-halved"></i> Authentication & Security</a></li>
           </ul>
         </div>
 
@@ -293,9 +294,12 @@ brew install atc</code></pre>
         </table>
 
         <h2>4. Deploying to Kubernetes (Helm)</h2>
-        <p>A Helm chart is provided under <code>deploy/helm/atc</code>. You can install it on your Kubernetes cluster using the following command:</p>
+        <p>An official versioned Helm chart is published directly to GitHub Container Registry (GHCR) as an OCI artifact. You can install it on your Kubernetes cluster using the following command:</p>
+        <pre><code class="language-bash">helm install atc oci://ghcr.io/atcprojectio/charts/atc --version &lt;version&gt;</code></pre>
+        <p>Alternatively, you can install it using the local templates provided under <code>deploy/helm/atc</code>:</p>
         <pre><code class="language-bash">helm install atc ./deploy/helm/atc --values ./deploy/helm/atc/values.yaml</code></pre>
-        <p>Configuration settings like Consul addresses, predefined strategies, and resources are configurable in the <code>values.yaml</code> file.</p>
+        <p>Configuration settings like Consul addresses, predefined strategies, and resources are configurable in the <code>values.yaml</code> file (or using the <code>--set</code> flag with OCI installs).</p>
+
 
         <h2>5. Deploying to Nomad</h2>
         <p>A Nomad job definition is available at <code>deploy/nomad/atc.nomad.hcl</code>. To run ATC in an active-passive HA mode with two instances, run:</p>
@@ -339,7 +343,6 @@ make run-demo</code></pre>
           <li><strong>Recovery (DC1 restored):</strong> ATC restores the <code>Failover</code> rule and traffic client resumes local routing.</li>
         </ol>
       </section>
-
       <!-- Strategies Configuration Section -->
       <section id="strategies-config" class="content-section">
         <div class="badge">Policies</div>
@@ -347,13 +350,18 @@ make run-demo</code></pre>
         <p>ATC admins define predefined routing strategies in a YAML configuration file. This file separates policies into <code>failover</code> strategies (for active services) and <code>redirect</code> strategies (for deleted/offline services).</p>
 
         <h2>YAML Schema</h2>
-        <pre><code class="language-yaml">strategies:
+        <pre><code class="language-yaml"># Consul connection overrides
+consul_namespace: "finance" # Scopes all config/watcher actions to this namespace
+write_rate_limit: "1s"      # Coalesce events to prevent API write thrashing
+
+strategies:
   failover:
     # A standard failover strategy routing to another datacenter
     standard-failover:
       connect_timeout: "10s"
       targets:
         - datacenter: "dc2"
+          namespace: "finance" # Optional target namespace scope
 
     # Multi-datacenter targets with fallback services
     multi-region-failover:
@@ -367,6 +375,7 @@ make run-demo</code></pre>
     # Redirect traffic to the same service name in dc2
     standard-redirect:
       datacenter: "dc2"
+      namespace: "marketing" # Optional target namespace redirect
 
     # Redirect to a disaster recovery web service in dc3
     geo-redirect:
@@ -377,13 +386,14 @@ make run-demo</code></pre>
         <h3>Failover Strategy</h3>
         <ul>
           <li><code>connect_timeout</code>: The connect timeout duration (e.g. <code>5s</code>, <code>10s</code>) applied to the resolver.</li>
-          <li><code>targets</code>: A list of targets to failover to. If <code>service</code> is omitted, it defaults to the active service's name. If <code>datacenter</code> is omitted, it defaults to the primary fallback datacenter.</li>
+          <li><code>targets</code>: A list of targets to failover to. If <code>service</code> is omitted, it defaults to the active service's name. If <code>datacenter</code> is omitted, it defaults to the primary fallback datacenter. If <code>namespace</code> is specified, it scopes the target resolver to that namespace.</li>
         </ul>
         
         <h3>Redirect Strategy</h3>
         <ul>
           <li><code>service</code>: The target service to redirect traffic to. Defaults to the offline service's name.</li>
           <li><code>datacenter</code>: The target datacenter for redirection.</li>
+          <li><code>namespace</code>: The target namespace for redirection.</li>
         </ul>
 
         <h2>Configuration Validation & Linting (GitOps)</h2>
@@ -699,8 +709,6 @@ make obs-up</code></pre>
           <li><code>name</code> (required): The name of the service to purge.</li>
         </ul>
 
-        <h3>Response Codes</h3>
-        <ul>
           <li><code>204 No Content</code>: Purge succeeded.</li>
           <li><code>400 Bad Request</code>: Missing service name parameter.</li>
           <li><code>403 Forbidden</code>: The entry was not created by ATC (cannot purge).</li>
@@ -714,15 +722,85 @@ make obs-up</code></pre>
         <pre><code class="language-json">{
   "service": "payment-service",
   "type": "failover|redirect",
-  "target_dc": "dc2"
+  "target_dc": "dc2",
+  "duration": "1h"
 }</code></pre>
+        <p>The optional <code>duration</code> parameter specifies a Time-To-Live (TTL) for the manual override (e.g. <code>"5m"</code>, <code>"15m"</code>, <code>"1h"</code>, <code>"24h"</code>). Once expired, a background task loop automatically purges the override resolver from Consul.</p>
 
         <h3>Response Codes</h3>
         <ul>
           <li><code>200 OK</code>: Override successfully applied.</li>
-          <li><code>400 Bad Request</code>: Invalid body, missing fields, or invalid type.</li>
+          <li><code>400 Bad Request</code>: Invalid body, missing fields, or invalid type/duration format.</li>
           <li><code>500 Internal Server Error</code>: Consul write failed.</li>
         </ul>
+
+        <h2>4. POST /api/reload</h2>
+        <p>Dynamically triggers a configuration file hot-reload, re-reading the active config file from disk, unmarshalling new settings, and dynamically propagating them to all submodules (forwarder and redirector) without restarting the daemon process.</p>
+
+        <h3>Response Codes</h3>
+        <ul>
+          <li><code>200 OK</code>: Configuration successfully reloaded.</li>
+          <li><code>500 Internal Server Error</code>: Reload failed or file reading error.</li>
+        </ul>
+
+        <h2>5. GET /api/strategies</h2>
+        <p>Returns the JSON representation of all predefined failover and redirect strategy templates configured in the ATC daemon.</p>
+
+        <h3>Response Schema</h3>
+        <pre><code class="language-json">{
+  "failover": {
+    "standard-failover": {
+      "connect_timeout": "15s",
+      "targets": [
+        {
+          "service": "payment-service",
+          "datacenter": "dc2"
+        }
+      ]
+    }
+  },
+  "redirect": {
+    "standard-redirect": {
+      "service": "payment-service",
+      "datacenter": "dc2"
+    }
+  }
+}</code></pre>
+      </section>
+
+      <!-- Authentication & Security Section -->
+      <section id="authentication-security" class="content-section">
+        <div class="badge">Security</div>
+        <h1>Authentication & Security</h1>
+        <p>ATC includes built-in authentication and authorization middleware to secure all REST API and Model Context Protocol (MCP) transport endpoints in production (except the <code>/health</code> and <code>/ready</code> telemetry checks).</p>
+
+        <h2>1. Enabling Authentication</h2>
+        <p>Authentication settings are configured under the <code>auth</code> section block in the YAML config file:</p>
+        <pre><code class="language-yaml">auth:
+  enabled: true
+  static_keys:
+    - "atc-super-secret-token"
+  consul_token_delegation: true</code></pre>
+
+        <h2>2. Token Passing Methods</h2>
+        <p>Clients can authenticate by passing a token using one of the following methods:</p>
+        <ul>
+          <li><strong>Authorization Header:</strong> <code>Authorization: Bearer &lt;token&gt;</code></li>
+          <li><strong>Custom Headers:</strong> <code>X-ATC-Token: &lt;token&gt;</code> or <code>X-Consul-Token: &lt;token&gt;</code></li>
+          <li><strong>Query Parameter:</strong> <code>?token=&lt;token&gt;</code></li>
+        </ul>
+
+        <h2>3. Validation & Consul RBAC Delegation</h2>
+        <p>When a request is received, ATC validates the token:</p>
+        <ol>
+          <li>If the token matches any string in <code>static_keys</code>, authorization succeeds.</li>
+          <li>If <code>consul_token_delegation</code> is enabled, ATC forwards the token to the local Consul agent via the <code>/v1/agent/self</code> API. If Consul accepts the token as valid, authorization succeeds. Furthermore, for Consul read/write queries, ATC dynamically propagates this delegated token in the Consul context, enforcing user-level Consul ACLs natively.</li>
+        </ol>
+
+        <h2>4. High-Priority JSON Audit Logging</h2>
+        <p>All state-changing actions (manual overrides and purges) write structured JSON logs directly to the process's standard output or error stream:</p>
+        <pre><code class="language-json">{"time":"2026-06-23T15:02:53+02:00","level":"INFO","msg":"audit event","module":"audit","audit":true,"client_ip":"127.0.0.1","actor":"atc-super...","action":"create_override","target_service":"payment-service","params":{"target_dc":"dc2","type":"failover"}}</code></pre>
+        <p>Sensitive tokens are automatically masked in the <code>actor</code> attribute to prevent secret exposure in logs.</p>
       </section>
     </main>
 

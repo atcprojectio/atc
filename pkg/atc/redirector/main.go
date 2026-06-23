@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -53,12 +54,15 @@ type Redirector struct {
 	consulAddr         string
 	consulToken        string
 	consulDC           string
+	consulNamespace    string
+	writeRateLimit     string
 	watcher            *watcher.ConsulWatcher
 	forwarderEnabled   bool
 	redirectStrategies map[string]RedirectStrategy
 	dampeningPeriod    string
 	minDampeningPeriod string
 	hasDefaultFailover bool
+	dryRun             bool
 
 	mu              sync.RWMutex
 	strategiesCache map[string]cachedStrategies
@@ -70,18 +74,21 @@ type Redirector struct {
 	forwarder     writeCanceler
 }
 
-func New(logger *slog.Logger, consulAddr, consulToken, consulDC string, forwarderEnabled bool, redirectStrategies map[string]RedirectStrategy, dampeningPeriod, minDampeningPeriod string, hasDefaultFailover bool) (*Redirector, error) {
+func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace, writeRateLimit string, forwarderEnabled bool, redirectStrategies map[string]RedirectStrategy, dampeningPeriod, minDampeningPeriod string, hasDefaultFailover bool, dryRun bool) (*Redirector, error) {
 	return &Redirector{
 		logger:             logger,
 		consulAddr:         consulAddr,
 		consulToken:        consulToken,
 		consulDC:           consulDC,
-		watcher:            watcher.New(logger, consulAddr, consulToken, consulDC),
+		consulNamespace:    consulNamespace,
+		writeRateLimit:     writeRateLimit,
+		watcher:            watcher.New(logger, consulAddr, consulToken, consulDC, consulNamespace),
 		forwarderEnabled:   forwarderEnabled,
 		redirectStrategies: redirectStrategies,
 		dampeningPeriod:    dampeningPeriod,
 		minDampeningPeriod: minDampeningPeriod,
 		hasDefaultFailover: hasDefaultFailover,
+		dryRun:             dryRun,
 		strategiesCache:    make(map[string]cachedStrategies),
 		pendingWrites:      make(map[string]*api.ServiceResolverConfigEntry),
 		writeTimers:        make(map[string]*time.Timer),
@@ -114,7 +121,7 @@ func (r *Redirector) GetCachedStrategies(svcName string) (string, string) {
 }
 
 func (r *Redirector) Run(ctx context.Context) error {
-	client, err := api.NewClient(consulCfg(r.consulAddr, r.consulToken, r.consulDC))
+	client, err := api.NewClient(consulCfg(r.consulAddr, r.consulToken, r.consulDC, r.consulNamespace))
 	if err != nil {
 		return fmt.Errorf("failed to create consul client: %w", err)
 	}
@@ -134,6 +141,17 @@ func (r *Redirector) Run(ctx context.Context) error {
 			r.logger.ErrorContext(ctx, "Initial reconciliation failed", slog.Any("error", err))
 		}
 
+		var (
+			debounceTimer *time.Timer
+			timerChan     <-chan time.Time
+		)
+
+		defer func() {
+			if debounceTimer != nil {
+				debounceTimer.Stop()
+			}
+		}()
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -142,7 +160,36 @@ func (r *Redirector) Run(ctx context.Context) error {
 				if !ok {
 					return nil
 				}
-				r.logger.InfoContext(ctx, "Received watcher event, running reconciliation", slog.String("event", msg))
+				r.logger.InfoContext(ctx, "Received watcher event", slog.String("event", msg))
+
+				r.mu.RLock()
+				rateLimitStr := r.writeRateLimit
+				r.mu.RUnlock()
+
+				var rateLimit time.Duration
+				if rateLimitStr != "" {
+					if d, err := time.ParseDuration(rateLimitStr); err == nil {
+						rateLimit = d
+					}
+				}
+
+				if rateLimit <= 0 {
+					r.logger.DebugContext(ctx, "No write rate limit set, running reconciliation immediately")
+					if err := r.reconcile(ctx, client); err != nil {
+						r.logger.ErrorContext(ctx, "Reconciliation failed", slog.Any("error", err))
+					}
+				} else {
+					if debounceTimer != nil {
+						debounceTimer.Stop()
+					}
+					r.logger.InfoContext(ctx, "Coalescing/debouncing watcher events, scheduling reconciliation", slog.Duration("window", rateLimit))
+					debounceTimer = time.NewTimer(rateLimit)
+					timerChan = debounceTimer.C
+				}
+
+			case <-timerChan:
+				timerChan = nil
+				r.logger.InfoContext(ctx, "Coalescing window elapsed, running reconciliation")
 				if err := r.reconcile(ctx, client); err != nil {
 					r.logger.ErrorContext(ctx, "Reconciliation failed", slog.Any("error", err))
 				}
@@ -269,10 +316,16 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 				dampening := getDampeningDuration(tags, dampeningPeriod, minDampeningPeriod)
 				if dampening <= 0 {
 					r.CancelPendingWrite(svcName)
-					r.logger.InfoContext(ctx, "Creating/Updating base service-resolver immediately", slog.String("service", svcName))
-					_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
-					if err != nil {
-						r.logger.ErrorContext(ctx, "Failed to set base service-resolver", slog.String("service", svcName), slog.Any("error", err))
+					if r.dryRun {
+						span.AddEvent("dry_run_set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "redirect-base")))
+						r.logger.InfoContext(ctx, "[DRY RUN] Would create/update base service-resolver immediately", slog.String("service", svcName))
+					} else {
+						span.AddEvent("set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "redirect-base")))
+						r.logger.InfoContext(ctx, "Creating/Updating base service-resolver immediately", slog.String("service", svcName))
+						_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+						if err != nil {
+							r.logger.ErrorContext(ctx, "Failed to set base service-resolver", slog.String("service", svcName), slog.Any("error", err))
+						}
 					}
 				} else {
 					r.logger.InfoContext(ctx, "Scheduling base service-resolver write", slog.String("service", svcName), slog.Duration("dampening", dampening))
@@ -287,10 +340,16 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 					continue
 				}
 				if existing.Meta != nil && existing.Meta["created-by"] == "atc" {
-					r.logger.InfoContext(ctx, "Deleting service-resolver because atc.enabled tag was removed", slog.String("service", svcName))
-					_, err = client.ConfigEntries().Delete("service-resolver", svcName, (&api.WriteOptions{}).WithContext(ctx))
-					if err != nil {
-						r.logger.ErrorContext(ctx, "Failed to delete service-resolver", slog.String("service", svcName), slog.Any("error", err))
+					if r.dryRun {
+						span.AddEvent("dry_run_delete_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "redirect-base")))
+						r.logger.InfoContext(ctx, "[DRY RUN] Would delete service-resolver because atc.enabled tag was removed", slog.String("service", svcName))
+					} else {
+						span.AddEvent("delete_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "redirect-base")))
+						r.logger.InfoContext(ctx, "Deleting service-resolver because atc.enabled tag was removed", slog.String("service", svcName))
+						_, err = client.ConfigEntries().Delete("service-resolver", svcName, (&api.WriteOptions{}).WithContext(ctx))
+						if err != nil {
+							r.logger.ErrorContext(ctx, "Failed to delete service-resolver", slog.String("service", svcName), slog.Any("error", err))
+						}
 					}
 				}
 			}
@@ -374,10 +433,16 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 					dampening := getDampeningDuration([]string{"atc.dampening=" + dampeningTag}, dampeningPeriod, minDampeningPeriod)
 					if dampening <= 0 {
 						r.CancelPendingWrite(name)
-						r.logger.InfoContext(ctx, "Creating/Updating redirect service-resolver immediately", slog.String("service", name), slog.String("redirect-strategy", redirectStrategyName))
-						_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
-						if err != nil {
-							r.logger.ErrorContext(ctx, "Failed to set redirect service-resolver", slog.String("service", name), slog.Any("error", err))
+						if r.dryRun {
+							span.AddEvent("dry_run_set_config", trace.WithAttributes(attribute.String("service", name), attribute.String("type", "redirect")))
+							r.logger.InfoContext(ctx, "[DRY RUN] Would create/update redirect service-resolver immediately", slog.String("service", name), slog.String("redirect-strategy", redirectStrategyName))
+						} else {
+							span.AddEvent("set_config", trace.WithAttributes(attribute.String("service", name), attribute.String("type", "redirect")))
+							r.logger.InfoContext(ctx, "Creating/Updating redirect service-resolver immediately", slog.String("service", name), slog.String("redirect-strategy", redirectStrategyName))
+							_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+							if err != nil {
+								r.logger.ErrorContext(ctx, "Failed to set redirect service-resolver", slog.String("service", name), slog.Any("error", err))
+							}
 						}
 					} else {
 						r.logger.InfoContext(ctx, "Scheduling redirect service-resolver write", slog.String("service", name), slog.Duration("dampening", dampening))
@@ -431,7 +496,7 @@ func getStrategyFromTags(tags []string, prefix string) string {
 	return ""
 }
 
-func consulCfg(addr, token, dc string) *api.Config {
+func consulCfg(addr, token, dc, ns string) *api.Config {
 	cfg := api.DefaultConfig()
 	if addr != "" {
 		cfg.Address = addr
@@ -441,6 +506,9 @@ func consulCfg(addr, token, dc string) *api.Config {
 	}
 	if dc != "" {
 		cfg.Datacenter = dc
+	}
+	if ns != "" {
+		cfg.Namespace = ns
 	}
 	return cfg
 }
@@ -541,28 +609,45 @@ func (r *Redirector) executeScheduledWrite(svcName string) {
 		return
 	}
 
-	client, err := api.NewClient(consulCfg(r.consulAddr, r.consulToken, r.consulDC))
+	ctx, span := tracer.Start(context.Background(), "executeScheduledWrite")
+	defer span.End()
+
+	client, err := api.NewClient(consulCfg(r.consulAddr, r.consulToken, r.consulDC, r.consulNamespace))
 	if err != nil {
 		r.logger.Error("Failed to create Consul client for scheduled write", slog.String("service", svcName), slog.Any("error", err))
+		span.RecordError(err)
 		return
 	}
 
-	r.logger.Info("Executing scheduled redirect write for service-resolver", slog.String("service", svcName))
-	_, _, err = client.ConfigEntries().Set(entry, nil)
-	if err != nil {
-		r.logger.Error("Failed to write scheduled redirect service-resolver entry", slog.String("service", svcName), slog.Any("error", err))
+	if r.dryRun {
+		span.AddEvent("dry_run_scheduled_set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "redirect")))
+		r.logger.Info("[DRY RUN] Would execute scheduled redirect write for service-resolver", slog.String("service", svcName))
+	} else {
+		span.AddEvent("scheduled_set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "redirect")))
+		r.logger.Info("Executing scheduled redirect write for service-resolver", slog.String("service", svcName))
+		_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+		if err != nil {
+			r.logger.Error("Failed to write scheduled redirect service-resolver entry", slog.String("service", svcName), slog.Any("error", err))
+			span.RecordError(err)
+		}
 	}
 }
 
-func (r *Redirector) UpdateConfig(redirectStrategies map[string]RedirectStrategy, dampeningPeriod, minDampeningPeriod string) {
+func (r *Redirector) UpdateConfig(redirectStrategies map[string]RedirectStrategy, dampeningPeriod, minDampeningPeriod, consulNamespace, writeRateLimit string, dryRun bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.redirectStrategies = redirectStrategies
 	r.dampeningPeriod = dampeningPeriod
 	r.minDampeningPeriod = minDampeningPeriod
+	r.consulNamespace = consulNamespace
+	r.writeRateLimit = writeRateLimit
+	r.dryRun = dryRun
 	r.logger.Info("Redirector configuration reloaded dynamically",
 		slog.Int("strategies_count", len(redirectStrategies)),
 		slog.String("dampening_period", dampeningPeriod),
 		slog.String("min_dampening_period", minDampeningPeriod),
+		slog.String("consul_namespace", consulNamespace),
+		slog.String("write_rate_limit", writeRateLimit),
+		slog.Bool("dry_run", dryRun),
 	)
 }

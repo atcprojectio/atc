@@ -16,10 +16,28 @@ variable "consul_dc" {
   description = "Target datacenter in Consul"
 }
 
+variable "consul_namespace" {
+  type        = string
+  default     = ""
+  description = "Target namespace in Consul Enterprise"
+}
+
+variable "write_rate_limit" {
+  type        = string
+  default     = "1s"
+  description = "Coalescing rate limit window"
+}
+
 variable "replica_count" {
   type        = number
   default     = 2
   description = "Number of replica instances to run for Active-Passive HA"
+}
+
+variable "dry_run" {
+  type        = bool
+  default     = false
+  description = "Enable dry-run mode for catalog reconciliation"
 }
 
 job "atc" {
@@ -77,11 +95,13 @@ job "atc" {
       }
 
       env {
-        ATC_PORT         = "${NOMAD_PORT_http}"
-        ATC_METRICS_PORT = "${NOMAD_PORT_metrics}"
-        ATC_CONSUL_ADDR  = "${var.consul_address}"
-        ATC_CONSUL_DC    = "${var.consul_dc}"
-        ATC_LOG_LEVEL    = "info"
+        ATC_PORT             = "${NOMAD_PORT_http}"
+        ATC_METRICS_PORT     = "${NOMAD_PORT_metrics}"
+        ATC_CONSUL_ADDR      = "${var.consul_address}"
+        ATC_CONSUL_DC        = "${var.consul_dc}"
+        ATC_CONSUL_NAMESPACE = "${var.consul_namespace}"
+        ATC_WRITE_RATE_LIMIT = "${var.write_rate_limit}"
+        ATC_LOG_LEVEL        = "info"
       }
 
       template {
@@ -93,8 +113,17 @@ ha:
   lock_key: "atc/leader/lock"
   session_ttl: "15s"
 
+auth:
+  enabled: false
+  static_keys:
+    - "atc-super-secret-token"
+  consul_token_delegation: true
+
 dampening_period: "5s"
 min_dampening_period: "1s"
+consul_namespace: "${var.consul_namespace}"
+write_rate_limit: "${var.write_rate_limit}"
+dry_run: ${var.dry_run}
 
 strategies:
   failover:

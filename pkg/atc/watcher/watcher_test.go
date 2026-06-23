@@ -68,7 +68,7 @@ func TestConsulWatcher(t *testing.T) {
 	defer server.Close()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	w := New(logger, server.Listener.Addr().String(), "", "")
+	w := New(logger, server.Listener.Addr().String(), "", "", "")
 
 	ch := w.Events.Subscribe()
 	defer w.Events.Unsubscribe(ch)

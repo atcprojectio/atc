@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -57,10 +58,13 @@ type Forwarder struct {
 	consulAddr         string
 	consulToken        string
 	consulDC           string
+	consulNamespace    string
+	writeRateLimit     string
 	watcher            *watcher.ConsulWatcher
 	failoverStrategies map[string]FailoverStrategy
 	dampeningPeriod    string
 	minDampeningPeriod string
+	dryRun             bool
 
 	mu              sync.RWMutex
 	strategiesCache map[string]cachedStrategies
@@ -72,16 +76,19 @@ type Forwarder struct {
 	redirector    writeCanceler
 }
 
-func New(logger *slog.Logger, consulAddr, consulToken, consulDC string, failoverStrategies map[string]FailoverStrategy, dampeningPeriod, minDampeningPeriod string) (*Forwarder, error) {
+func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace, writeRateLimit string, failoverStrategies map[string]FailoverStrategy, dampeningPeriod, minDampeningPeriod string, dryRun bool) (*Forwarder, error) {
 	return &Forwarder{
 		logger:             logger,
 		consulAddr:         consulAddr,
 		consulToken:        consulToken,
 		consulDC:           consulDC,
-		watcher:            watcher.New(logger, consulAddr, consulToken, consulDC),
+		consulNamespace:    consulNamespace,
+		writeRateLimit:     writeRateLimit,
+		watcher:            watcher.New(logger, consulAddr, consulToken, consulDC, consulNamespace),
 		failoverStrategies: failoverStrategies,
 		dampeningPeriod:    dampeningPeriod,
 		minDampeningPeriod: minDampeningPeriod,
+		dryRun:             dryRun,
 		strategiesCache:    make(map[string]cachedStrategies),
 		pendingWrites:      make(map[string]*api.ServiceResolverConfigEntry),
 		writeTimers:        make(map[string]*time.Timer),
@@ -114,7 +121,7 @@ func (f *Forwarder) GetCachedStrategies(svcName string) (string, string) {
 }
 
 func (f *Forwarder) Run(ctx context.Context) error {
-	client, err := api.NewClient(consulCfg(f.consulAddr, f.consulToken, f.consulDC))
+	client, err := api.NewClient(consulCfg(f.consulAddr, f.consulToken, f.consulDC, f.consulNamespace))
 	if err != nil {
 		return fmt.Errorf("failed to create consul client: %w", err)
 	}
@@ -134,6 +141,17 @@ func (f *Forwarder) Run(ctx context.Context) error {
 			f.logger.ErrorContext(ctx, "Initial reconciliation failed", slog.Any("error", err))
 		}
 
+		var (
+			debounceTimer *time.Timer
+			timerChan     <-chan time.Time
+		)
+
+		defer func() {
+			if debounceTimer != nil {
+				debounceTimer.Stop()
+			}
+		}()
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -142,7 +160,36 @@ func (f *Forwarder) Run(ctx context.Context) error {
 				if !ok {
 					return nil
 				}
-				f.logger.InfoContext(ctx, "Received watcher event, running reconciliation", slog.String("event", msg))
+				f.logger.InfoContext(ctx, "Received watcher event", slog.String("event", msg))
+
+				f.mu.RLock()
+				rateLimitStr := f.writeRateLimit
+				f.mu.RUnlock()
+
+				var rateLimit time.Duration
+				if rateLimitStr != "" {
+					if d, err := time.ParseDuration(rateLimitStr); err == nil {
+						rateLimit = d
+					}
+				}
+
+				if rateLimit <= 0 {
+					f.logger.DebugContext(ctx, "No write rate limit set, running reconciliation immediately")
+					if err := f.reconcile(ctx, client); err != nil {
+						f.logger.ErrorContext(ctx, "Reconciliation failed", slog.Any("error", err))
+					}
+				} else {
+					if debounceTimer != nil {
+						debounceTimer.Stop()
+					}
+					f.logger.InfoContext(ctx, "Coalescing/debouncing watcher events, scheduling reconciliation", slog.Duration("window", rateLimit))
+					debounceTimer = time.NewTimer(rateLimit)
+					timerChan = debounceTimer.C
+				}
+
+			case <-timerChan:
+				timerChan = nil
+				f.logger.InfoContext(ctx, "Coalescing window elapsed, running reconciliation")
 				if err := f.reconcile(ctx, client); err != nil {
 					f.logger.ErrorContext(ctx, "Reconciliation failed", slog.Any("error", err))
 				}
@@ -325,10 +372,16 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 				dampening := getDampeningDuration(tags, dampeningPeriod, minDampeningPeriod)
 				if dampening <= 0 {
 					f.CancelPendingWrite(svcName)
-					f.logger.InfoContext(ctx, "Creating/Updating failover service-resolver immediately", slog.String("service", svcName), slog.String("failover-strategy", failoverStrategyName))
-					_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
-					if err != nil {
-						f.logger.ErrorContext(ctx, "Failed to set failover service-resolver", slog.String("service", svcName), slog.Any("error", err))
+					if f.dryRun {
+						span.AddEvent("dry_run_set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
+						f.logger.InfoContext(ctx, "[DRY RUN] Would create/update failover service-resolver immediately", slog.String("service", svcName), slog.String("failover-strategy", failoverStrategyName))
+					} else {
+						span.AddEvent("set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
+						f.logger.InfoContext(ctx, "Creating/Updating failover service-resolver immediately", slog.String("service", svcName), slog.String("failover-strategy", failoverStrategyName))
+						_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+						if err != nil {
+							f.logger.ErrorContext(ctx, "Failed to set failover service-resolver", slog.String("service", svcName), slog.Any("error", err))
+						}
 					}
 				} else {
 					f.logger.InfoContext(ctx, "Scheduling failover service-resolver write", slog.String("service", svcName), slog.Duration("dampening", dampening))
@@ -343,10 +396,16 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 					continue
 				}
 				if existing.Meta != nil && existing.Meta["created-by"] == "atc" {
-					f.logger.InfoContext(ctx, "Deleting service-resolver because atc.enabled tag was removed", slog.String("service", svcName))
-					_, err = client.ConfigEntries().Delete("service-resolver", svcName, (&api.WriteOptions{}).WithContext(ctx))
-					if err != nil {
-						f.logger.ErrorContext(ctx, "Failed to delete service-resolver", slog.String("service", svcName), slog.Any("error", err))
+					if f.dryRun {
+						span.AddEvent("dry_run_delete_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
+						f.logger.InfoContext(ctx, "[DRY RUN] Would delete service-resolver because atc.enabled tag was removed", slog.String("service", svcName))
+					} else {
+						span.AddEvent("delete_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
+						f.logger.InfoContext(ctx, "Deleting service-resolver because atc.enabled tag was removed", slog.String("service", svcName))
+						_, err = client.ConfigEntries().Delete("service-resolver", svcName, (&api.WriteOptions{}).WithContext(ctx))
+						if err != nil {
+							f.logger.ErrorContext(ctx, "Failed to delete service-resolver", slog.String("service", svcName), slog.Any("error", err))
+						}
 					}
 				}
 			}
@@ -396,7 +455,7 @@ func getStrategyFromTags(tags []string, prefix string) string {
 	return ""
 }
 
-func consulCfg(addr, token, dc string) *api.Config {
+func consulCfg(addr, token, dc, ns string) *api.Config {
 	cfg := api.DefaultConfig()
 	if addr != "" {
 		cfg.Address = addr
@@ -406,6 +465,9 @@ func consulCfg(addr, token, dc string) *api.Config {
 	}
 	if dc != "" {
 		cfg.Datacenter = dc
+	}
+	if ns != "" {
+		cfg.Namespace = ns
 	}
 	return cfg
 }
@@ -463,16 +525,27 @@ func (f *Forwarder) executeScheduledWrite(svcName string) {
 		return
 	}
 
-	client, err := api.NewClient(consulCfg(f.consulAddr, f.consulToken, f.consulDC))
+	ctx, span := tracer.Start(context.Background(), "executeScheduledWrite")
+	defer span.End()
+
+	client, err := api.NewClient(consulCfg(f.consulAddr, f.consulToken, f.consulDC, f.consulNamespace))
 	if err != nil {
 		f.logger.Error("Failed to create Consul client for scheduled write", slog.String("service", svcName), slog.Any("error", err))
+		span.RecordError(err)
 		return
 	}
 
-	f.logger.Info("Executing scheduled failover write for service-resolver", slog.String("service", svcName))
-	_, _, err = client.ConfigEntries().Set(entry, nil)
-	if err != nil {
-		f.logger.Error("Failed to write scheduled failover service-resolver entry", slog.String("service", svcName), slog.Any("error", err))
+	if f.dryRun {
+		span.AddEvent("dry_run_scheduled_set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
+		f.logger.Info("[DRY RUN] Would execute scheduled failover write for service-resolver", slog.String("service", svcName))
+	} else {
+		span.AddEvent("scheduled_set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
+		f.logger.Info("Executing scheduled failover write for service-resolver", slog.String("service", svcName))
+		_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+		if err != nil {
+			f.logger.Error("Failed to write scheduled failover service-resolver entry", slog.String("service", svcName), slog.Any("error", err))
+			span.RecordError(err)
+		}
 	}
 }
 
@@ -519,15 +592,21 @@ func entriesEqual(a, b *api.ServiceResolverConfigEntry) bool {
 	return true
 }
 
-func (f *Forwarder) UpdateConfig(failoverStrategies map[string]FailoverStrategy, dampeningPeriod, minDampeningPeriod string) {
+func (f *Forwarder) UpdateConfig(failoverStrategies map[string]FailoverStrategy, dampeningPeriod, minDampeningPeriod, consulNamespace, writeRateLimit string, dryRun bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failoverStrategies = failoverStrategies
 	f.dampeningPeriod = dampeningPeriod
 	f.minDampeningPeriod = minDampeningPeriod
+	f.consulNamespace = consulNamespace
+	f.writeRateLimit = writeRateLimit
+	f.dryRun = dryRun
 	f.logger.Info("Forwarder configuration reloaded dynamically",
 		slog.Int("strategies_count", len(failoverStrategies)),
 		slog.String("dampening_period", dampeningPeriod),
 		slog.String("min_dampening_period", minDampeningPeriod),
+		slog.String("consul_namespace", consulNamespace),
+		slog.String("write_rate_limit", writeRateLimit),
+		slog.Bool("dry_run", dryRun),
 	)
 }

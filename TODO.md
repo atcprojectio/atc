@@ -6,59 +6,19 @@ This document reviews the revised product roadmap for Active Traffic Control (AT
 
 ## Must Have
 
-### 1. Native Authentication & Authorization (RBAC)
-The REST API and Web UI allow manual purges and overrides. Without authentication, anyone with network access to port 8088 can disrupt routing.
-- **Solution**: Secure endpoints using:
-  - **Consul Token Delegation**: Let users log in using their Consul ACL token. ATC passes this token to Consul to verify permissions.
-  - **Static API Key / Basic Auth**: Simple static tokens configured for small teams.
-  - **OIDC Single Sign-On**: Support OpenID Connect (OIDC) for enterprise setups.
-
-### 2. Audit Logging
-Whenever a manual override or configuration purge is executed, ATC must write a structured, high-priority audit log.
-- **Solution**:
-  - Record the operator's identity/token, client source IP, and the exact changes made to Consul configuration.
-  - Export these logs to stdout/stderr in JSON format, ensuring easy ingestion by external SIEM/logging platforms.
+All roadmap Must Have items have been successfully implemented!
 
 ---
 
 ## Should Have
 
-### 1. OpenTelemetry Trace Propagation for Routing Decisions
-While ATC exports system metrics and logs, tracing how specific health-flapping events led to routing shifts is difficult.
-- **Solution**: Emit custom OTel Span Events or Trace Contexts whenever a service-resolver is written, deleted, or hot-reloaded, allowing operators to correlate routing changes directly in Grafana/Tempo.
-
-### 2. Dry-Run / Auditing Mode
-When deploying ATC to large production clusters, platform teams need to audit what actions the daemon *would* take before giving it write access.
-- **Solution**: Add a `--dry-run` flag. When enabled, ATC logs target service changes and outputs the generated configurations without writing them to Consul.
-
-### 3. Manual Override Auto-Expiration (TTL)
-When operators or AI agents apply manual overrides (e.g. `POST /api/overrides`), there is a risk they forget to purge them. This leaves the service permanently bypassed by automated watch loops.
-- **Solution**: Support an optional Time-To-Live (TTL) or expiration field (e.g. `duration: "1h"`) for overrides:
-  - Store the expiration timestamp in the config entry metadata (`atc-override-expires-at`).
-  - Implement a background TTL sweeper in ATC that automatically purges expired overrides, restoring the service to automated watchers.
+All roadmap Should Have items have been successfully implemented!
 
 ---
 
 ## Could Have
 
-### 1. Glassmorphic Web UI Strategy Editor
-Currently, strategies are read-only from the dashboard UI.
-- **Solution**: Provide an interactive strategy editor in the React UI where administrators can visually draft and apply routing configurations.
-
-### 2. Webhook Notification System (Slack, MS Teams, PagerDuty)
-Rules and routes are subject to change, and platform operators need notifications when routing transitions occur.
-- **Solution**: Dispatch Webhook payloads to Slack, MS Teams, or PagerDuty on any automated failover/redirect or override changes.
-
-### 3. Consul Enterprise Namespace Support
-Large organizations deploy Consul with Namespaces to isolate service catalogs and network configurations. Currently, ATC lacks general namespace-awareness for its watcher and client queries (defaulting strictly to the `default` namespace).
-- **Solution**: Add command-line and configuration support for namespaces:
-  - Expose a `--consul_namespace` flag (or `consul_namespace` YAML key).
-  - Apply the namespace query parameters to all Consul API requests (e.g., `(&api.QueryOptions{Namespace: cfg.ConsulNamespace})`).
-  - Support cross-namespace failover configuration targeting.
-
-### 4. Failover Rate Limiting / Dampening
-If Consul's catalog flaps rapidly due to network instability, ATC could throttle writing config changes to prevent Consul catalog database thrashing.
-- **Solution**: Implement a rate limiter or dampening window that merges and groups multiple close-successive target events before triggering a Consul API write.
+All roadmap Could Have items have been successfully implemented!
 
 ---
 
@@ -85,3 +45,9 @@ Building native Vault API client logic directly into the ATC binary introduces u
 - **Why**: 
   - *Orchestrator Injection*: Modern platform environments already provide native facilities for this. Nomad features a first-class `vault` block that automatically retrieves and mounts secrets into templates or environment variables. Kubernetes supports the Vault Agent Sidecar Injector or External Secrets Operators to mount Vault secrets into containers.
   - *Standalone Agents*: When running ATC on standalone VMs, operators can use the **Vault Agent** or `envconsul` to inject the Consul ACL token into environment variables (`ATC_CONSUL_TOKEN`) dynamically prior to binary execution, keeping ATC simple and lightweight.
+
+### 5. Interactive Web UI Strategy Editor
+Admins originally requested an interactive web-based editor to visually draft and apply failover/redirect strategies. However, the declarative file-based YAML configurations (`strategies.yaml`) coupled with dynamic watcher hot-reloading works exceptionally well, provides GitOps friendliness, and keeps the UI client lightweight and read-only.
+
+### 6. Webhook Notification System (Slack, MS Teams, PagerDuty)
+Dispatching notifications and alerts on routing state transitions or catalog updates was considered. However, this is properly the responsibility of centralized observability and alerting tools (e.g., Prometheus Alertmanager, Grafana Alerting, Consul Event alerts) monitoring the emitted metrics and structured logs, rather than embedding notification dispatch logic directly inside the ATC daemon core.

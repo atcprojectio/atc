@@ -96,9 +96,11 @@ func (t *Atc) apiFederationHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type overrideRequest struct {
-	Service  string `json:"service"`
-	Type     string `json:"type"`
-	TargetDc string `json:"target_dc"`
+	Service   string `json:"service"`
+	Type      string `json:"type"`
+	TargetDc  string `json:"target_dc"`
+	Namespace string `json:"namespace,omitempty"`
+	Duration  string `json:"duration,omitempty"`
 }
 
 func (t *Atc) apiOverridesHandler(w http.ResponseWriter, r *http.Request) {
@@ -125,9 +127,9 @@ func (t *Atc) apiOverridesHandler(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch req.Type {
 	case "failover":
-		err = t.ApplyFailoverOverride(r.Context(), req.Service, req.TargetDc)
+		err = t.ApplyFailoverOverride(r.Context(), req.Service, req.TargetDc, req.Namespace, req.Duration)
 	case "redirect":
-		err = t.TriggerManualRedirect(r.Context(), req.Service, req.TargetDc)
+		err = t.TriggerManualRedirect(r.Context(), req.Service, req.TargetDc, req.Namespace, req.Duration)
 	default:
 		http.Error(w, fmt.Sprintf("invalid override type %q, must be 'failover' or 'redirect'", req.Type), http.StatusBadRequest)
 		return
@@ -138,7 +140,35 @@ func (t *Atc) apiOverridesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	t.logAudit(r.Context(), r, "create_override", req.Service, map[string]any{"type": req.Type, "target_dc": req.TargetDc, "namespace": req.Namespace})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = fmt.Fprint(w, `{"status":"applied"}`)
+}
+
+func (t *Atc) apiStrategiesHandler(w http.ResponseWriter, r *http.Request) {
+	t.cfgMu.RLock()
+	strategies := t.Cfg.Strategies
+	t.cfgMu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(strategies)
+}
+
+func (t *Atc) apiReloadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	err := t.TriggerConfigReload()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to reload configuration: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprint(w, `{"status":"reloaded"}`)
 }

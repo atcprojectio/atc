@@ -46,3 +46,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAP_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+      - name: Package and Push Helm Chart to GHCR (OCI)
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          helm package deploy/helm/atc --version "${GITHUB_REF_NAME#v}" --app-version "${GITHUB_REF_NAME}"
+          helm push "atc-${GITHUB_REF_NAME#v}.tgz" "oci://ghcr.io/${OWNER}/charts"
+

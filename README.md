@@ -55,13 +55,20 @@ Production-grade deployment configurations for Nomad and Kubernetes are availabl
 
 #### Kubernetes (Helm)
 
-A Helm chart is located under [deploy/helm/atc](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/deploy/helm/atc). You can install it with:
+An official versioned Helm chart is published directly to GitHub Container Registry (GHCR) as an OCI artifact. You can install it directly via:
+
+```bash
+helm install atc oci://ghcr.io/atcprojectio/charts/atc --version <version>
+```
+
+Alternatively, you can install it using the local templates under [deploy/helm/atc](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/deploy/helm/atc):
 
 ```bash
 helm install atc ./deploy/helm/atc --values ./deploy/helm/atc/values.yaml
 ```
 
 To configure strategy rules, edit the `config.strategiesYaml` block in `values.yaml`.
+
 
 #### Nomad (HCL)
 
@@ -114,8 +121,11 @@ Start the ATC background watcher process:
 - `--consul_addr` (string): Consul HTTP endpoint address.
 - `--consul_token` (string): Consul ACL token.
 - `--consul_dc` (string): Consul target datacenter.
+- `--consul-namespace` (string): Consul Enterprise Namespace (Optional).
+- `--write-rate-limit` (string): Coalesce write events within this duration window (e.g. `1s`, `500ms`) (default: `1s`).
 - `--config` (string): Path to ATC configuration file.
 - `--ui-enabled` (bool): Enable serving the embedded React Web UI dashboard (default: `true`).
+- `--dry-run` (bool): Disable writing to Consul, log routing/override decisions instead.
 
 ### Environment Variables
 
@@ -147,6 +157,9 @@ If a strategy named `default` is configured (e.g. `strategies.failover.default` 
 ```yaml
 dampening_period: "5s"
 min_dampening_period: "0s"
+consul_namespace: ""
+write_rate_limit: "1s"
+dry_run: false
 
 ha:
   enabled: true
@@ -184,12 +197,43 @@ When a service is active, the strategy and dampening tag values are persisted in
 
 ---
 
+## Native Authentication & Authorization (RBAC)
+
+When enabled, ATC secures all REST API and MCP endpoints (except `/health` and `/ready`) with static API keys and/or Consul Token Delegation.
+
+### Authorization Headers & Parameters
+
+Clients must authenticate by providing a token in one of the following ways:
+- **HTTP Header**: `Authorization: Bearer <token>`
+- **Custom Headers**: `X-ATC-Token: <token>` or `X-Consul-Token: <token>`
+- **Query Parameter**: `?token=<token>`
+
+### Static Keys Validation
+
+ATC checks the token against the list of `static_keys` in the configuration file. If matched, access is granted.
+
+### Consul Token Delegation
+
+If `consul_token_delegation` is enabled, ATC forwards the provided token to Consul's `/v1/agent/self` API. If Consul accepts the token as valid, access is granted. Furthermore, for Consul read/write queries, ATC dynamically propagates this delegated token in the Consul context, enforcing user-level Consul ACLs natively.
+
+### Structured Audit Logging
+
+When user actions alter routing state (manual overrides or resolver purges), ATC emits high-priority structured JSON audit logs to stdout/stderr:
+
+```json
+{"time":"2026-06-23T15:02:53+02:00","level":"INFO","msg":"audit event","module":"audit","audit":true,"client_ip":"127.0.0.1","actor":"atc-super...","action":"create_override","target_service":"payment-service","params":{"target_dc":"dc2","type":"failover"}}
+```
+
+Sensitive tokens in the `actor` field are automatically masked (e.g., `abc...xyz`).
+
+---
+
 ## Core HTTP Endpoints
 
 ### Application API (Port 8088)
 
 - `/` (GET): Serves the embedded React frontend dashboard.
-- `/ready` (GET): Simple readiness check (`200 OK`).
+- `/ready` (GET): Simple readiness check (`200 OK`, bypassed by authentication).
 - `/services` (GET): Prints a formatted ASCII table showing the status of all active components.
 - `/api/services` (GET): JSON list of active Consul services tagged with `atc.enabled=true`.
 - `/api/leader` (GET): JSON representing leadership status and component details (e.g., `{"leader":true,"components":{"forwarder":true,"redirector":true}}`).
@@ -200,17 +244,23 @@ When a service is active, the strategy and dampening tag values are persisted in
     {
       "service": "payment-service",
       "type": "failover|redirect",
-      "target_dc": "dc2"
+      "target_dc": "dc2",
+      "duration": "1h" // Optional TTL: e.g. "5m", "15m", "1h", "24h"
     }
     ```
+- `/api/reload` (POST): Dynamically triggers a configuration file hot-reload.
+- `/api/strategies` (GET): JSON representation of all pre-defined failover and redirect strategies templates configured.
 - `/mcp` (GET/POST): Streamable HTTP endpoint for Model Context Protocol interactions. Offers tools:
   - `check_readiness`
   - `check_leadership`
   - `list_atc_enabled_services`
   - `list_wan_federation_status`
+  - `list_strategies`
   - `purge_redirect_config`
   - `apply_failover_override`
   - `trigger_manual_redirect`
+  - `list_active_overrides`
+  - `reload_config`
 
 ### Metrics API (Port 8089)
 
@@ -260,6 +310,7 @@ To enable the ATC Model Context Protocol (MCP) server in **Claude Desktop**, you
 3. Restart Claude Desktop. The agent will now have access to the following tools:
    - `check_readiness`
    - `list_atc_enabled_services`
+   - `list_strategies`
    - `purge_redirect_config`
    - `check_leadership`
    - `list_wan_federation_status`

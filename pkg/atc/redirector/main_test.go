@@ -125,7 +125,7 @@ func TestRedirectorReconcile(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, server.Listener.Addr().String(), "", "", false, nil, "", "", false)
+	r, err := New(logger, server.Listener.Addr().String(), "", "", "", "", false, nil, "", "", false, false)
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestRedirectorReconcile_ForwarderEnabled(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, server.Listener.Addr().String(), "", "", true, nil, "", "", false) // forwarderEnabled = true
+	r, err := New(logger, server.Listener.Addr().String(), "", "", "", "", true, nil, "", "", false, false) // forwarderEnabled = true
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestRedirectorReconcile_WithStrategy(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, server.Listener.Addr().String(), "", "", false, strategies, "", "", false)
+	r, err := New(logger, server.Listener.Addr().String(), "", "", "", "", false, strategies, "", "", false, false)
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestRedirectorReconcile_WithStrategy(t *testing.T) {
 
 func TestRedirectorUpdateConfigRace(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, "", "", "", false, nil, "5s", "0s", false)
+	r, err := New(logger, "", "", "", "", "", false, nil, "5s", "0s", false, false)
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}
@@ -480,6 +480,9 @@ func TestRedirectorUpdateConfigRace(t *testing.T) {
 				},
 				"10s",
 				"1s",
+				"",
+				"",
+				false,
 			)
 			time.Sleep(1 * time.Microsecond)
 		}
@@ -561,7 +564,7 @@ func TestRedirectorReconcile_BypassOverrides(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	r, err := New(logger, server.Listener.Addr().String(), "", "", false, nil, "", "", false)
+	r, err := New(logger, server.Listener.Addr().String(), "", "", "", "", false, nil, "", "", false, false)
 	if err != nil {
 		t.Fatalf("Failed to create redirector: %v", err)
 	}

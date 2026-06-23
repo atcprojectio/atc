@@ -7,10 +7,17 @@ service: "atc-service"
 consul_addr: "http://consul-dc1:8500"
 consul_dc: "dc1"
 consul_token: ""
+consul_namespace: ""
+
+# Failover Write Rate Limiting / Coalescing period (Default is "1s")
+write_rate_limit: "1s"
 
 # Watcher reconciliation dampening/hysteresis periods
 dampening_period: "5s"
 min_dampening_period: "0s"
+
+# Dry run mode: logs reconciliation decisions without writing them to Consul
+dry_run: false
 
 # List of components/modules to enable. Options: all, forwarder, redirector, server
 target:
@@ -21,6 +28,13 @@ ha:
   enabled: true
   lock_key: "atc/leader/lock"
   session_ttl: "15s"
+
+# Native Authentication & Authorization (RBAC) settings
+auth:
+  enabled: false
+  static_keys:
+    - "atc-super-secret-token"
+  consul_token_delegation: true
 
 # Web server and metrics configuration
 server:
@@ -37,6 +51,7 @@ strategies:
       connect_timeout: "5s"
       targets:
         - datacenter: "dc2"
+          namespace: "finance" # Optional target namespace scope
     multi-region-failover:
       connect_timeout: "10s"
       targets:
@@ -46,6 +61,7 @@ strategies:
   redirect:
     standard-redirect:
       datacenter: "dc2"
+      namespace: "marketing" # Optional target namespace redirect
     geo-redirect:
       datacenter: "dc3"
       service: "geo-fallback"

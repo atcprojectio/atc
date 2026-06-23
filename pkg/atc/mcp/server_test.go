@@ -17,8 +17,11 @@ func (m *mockService) GetAtcEnabledServices(ctx context.Context) ([]string, erro
 func (m *mockService) PurgeServiceResolver(ctx context.Context, name string) error                { return nil }
 func (m *mockService) IsLeader() bool                                                              { return false }
 func (m *mockService) GetFederationStatus(ctx context.Context) (map[string]string, error)          { return nil, nil }
-func (m *mockService) ApplyFailoverOverride(ctx context.Context, service, targetDc string) error      { return nil }
-func (m *mockService) TriggerManualRedirect(ctx context.Context, service, redirectDc string) error { return nil }
+func (m *mockService) ApplyFailoverOverride(ctx context.Context, service, targetDc, targetNs, duration string) error { return nil }
+func (m *mockService) TriggerManualRedirect(ctx context.Context, service, redirectDc, redirectNs, duration string) error { return nil }
+func (m *mockService) GetPredefinedStrategies(ctx context.Context) (string, error)                 { return "", nil }
+func (m *mockService) ListActiveOverrides(ctx context.Context) ([]map[string]any, error)           { return nil, nil }
+func (m *mockService) TriggerConfigReload() error                                                  { return nil }
 
 func TestMcpServerVersion(t *testing.T) {
 	mockSvc := &mockService{}

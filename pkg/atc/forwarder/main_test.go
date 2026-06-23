@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -118,7 +120,7 @@ func TestForwarderReconcile(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	f, err := New(logger, server.Listener.Addr().String(), "", "", nil, "", "")
+	f, err := New(logger, server.Listener.Addr().String(), "", "", "", "", nil, "", "", false)
 	if err != nil {
 		t.Fatalf("Failed to create forwarder: %v", err)
 	}
@@ -244,7 +246,7 @@ func TestForwarderReconcile_WithStrategy(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	f, err := New(logger, server.Listener.Addr().String(), "", "", strategies, "", "")
+	f, err := New(logger, server.Listener.Addr().String(), "", "", "", "", strategies, "", "", false)
 	if err != nil {
 		t.Fatalf("Failed to create forwarder: %v", err)
 	}
@@ -294,7 +296,7 @@ func TestForwarderReconcile_WithStrategy(t *testing.T) {
 
 func TestForwarderUpdateConfigRace(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	f, err := New(logger, "", "", "", nil, "5s", "0s")
+	f, err := New(logger, "", "", "", "", "", nil, "5s", "0s", false)
 	if err != nil {
 		t.Fatalf("Failed to create forwarder: %v", err)
 	}
@@ -331,6 +333,9 @@ func TestForwarderUpdateConfigRace(t *testing.T) {
 				},
 				"10s",
 				"1s",
+				"",
+				"",
+				false,
 			)
 			time.Sleep(1 * time.Microsecond)
 		}
@@ -413,7 +418,7 @@ func TestForwarderReconcile_WithDefaultStrategy(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	f, err := New(logger, server.Listener.Addr().String(), "", "", strategies, "", "")
+	f, err := New(logger, server.Listener.Addr().String(), "", "", "", "", strategies, "", "", false)
 	if err != nil {
 		t.Fatalf("Failed to create forwarder: %v", err)
 	}
@@ -507,7 +512,7 @@ func TestForwarderReconcile_BypassOverrides(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	f, err := New(logger, server.Listener.Addr().String(), "", "", nil, "", "")
+	f, err := New(logger, server.Listener.Addr().String(), "", "", "", "", nil, "", "", false)
 	if err != nil {
 		t.Fatalf("Failed to create forwarder: %v", err)
 	}
@@ -636,7 +641,7 @@ func TestForwarder_UpdateConfig_Propagation(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	f, err := New(logger, server.Listener.Addr().String(), "", "", nil, "", "")
+	f, err := New(logger, server.Listener.Addr().String(), "", "", "", "", nil, "", "", false)
 	if err != nil {
 		t.Fatalf("Failed to create forwarder: %v", err)
 	}
@@ -667,6 +672,9 @@ func TestForwarder_UpdateConfig_Propagation(t *testing.T) {
 		},
 		"0s",
 		"0s",
+		"",
+		"",
+		false,
 	)
 
 	// Since f.reconcile checks if existing config matches, it will detect that the failover targets
@@ -689,6 +697,94 @@ func TestForwarder_UpdateConfig_Propagation(t *testing.T) {
 	foAfter, ok := entryAfter.Failover["*"]
 	if !ok || len(foAfter.Targets) != 1 || foAfter.Targets[0].Service != "fallback-a" || foAfter.Targets[0].Datacenter != "dc2" {
 		t.Errorf("expected failover target to be fallback-a in dc2, got: %v", foAfter)
+	}
+}
+
+func TestForwarderDebouncerCoalesce(t *testing.T) {
+	var servicesQueryCount int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/v1/agent/self" {
+			info := map[string]interface{}{
+				"Config": map[string]interface{}{
+					"Datacenter": "dc1",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(info)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/datacenters" {
+			dcs := []string{"dc1", "dc2"}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(dcs)
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/catalog/services" {
+			atomic.AddInt32(&servicesQueryCount, 1)
+			indexStr := r.URL.Query().Get("index")
+			index, _ := strconv.Atoi(indexStr)
+			w.Header().Set("X-Consul-Index", "1")
+			if index > 0 {
+				time.Sleep(200 * time.Millisecond)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string][]string{})
+			return
+		}
+
+		if r.URL.Path == "/v1/health/state/any" {
+			indexStr := r.URL.Query().Get("index")
+			index, _ := strconv.Atoi(indexStr)
+			w.Header().Set("X-Consul-Index", "1")
+			if index > 0 {
+				time.Sleep(200 * time.Millisecond)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+			return
+		}
+
+		if r.Method == "GET" && r.URL.Path == "/v1/config/service-resolver" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]api.ConfigEntry{})
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	f, err := New(logger, server.Listener.Addr().String(), "", "", "", "50ms", nil, "", "", false)
+	if err != nil {
+		t.Fatalf("Failed to create forwarder: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		_ = f.Run(ctx)
+	}()
+
+	// Wait for initial reconcile to finish (which increments count to 1)
+	time.Sleep(20 * time.Millisecond)
+
+	// Broadcast 5 events in rapid succession (every 2ms)
+	for i := 0; i < 5; i++ {
+		f.watcher.Events.Broadcast("test_update")
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// Wait for the debouncer window to elapse and run the reconcile
+	time.Sleep(120 * time.Millisecond)
+
+	count := atomic.LoadInt32(&servicesQueryCount)
+	if count > 4 {
+		t.Errorf("Expected at most 4 service catalog queries (including watcher blocking queries), got %d (debouncing failed)", count)
 	}
 }
 

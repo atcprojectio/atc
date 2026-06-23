@@ -47,11 +47,9 @@ func ValidateConfig(cfg Config) []error {
 			d, err := time.ParseDuration(cfg.HA.SessionTTL)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("invalid HA session_ttl %q: %w", cfg.HA.SessionTTL, err))
-			} else {
+			} else if d < 10*time.Second || d > 24*time.Hour {
 				// Consul session TTL must be between 10s and 24h
-				if d < 10*time.Second || d > 24*time.Hour {
-					errs = append(errs, fmt.Errorf("HA session_ttl %q must be between 10s and 24h", cfg.HA.SessionTTL))
-				}
+				errs = append(errs, fmt.Errorf("HA session_ttl %q must be between 10s and 24h", cfg.HA.SessionTTL))
 			}
 		}
 	}
