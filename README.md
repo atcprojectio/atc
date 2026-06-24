@@ -125,6 +125,7 @@ Start the ATC background watcher process:
 - `--write-rate-limit` (string): Coalesce write events within this duration window (e.g. `1s`, `500ms`) (default: `1s`).
 - `--config` (string): Path to ATC configuration file.
 - `--ui-enabled` (bool): Enable serving the embedded React Web UI dashboard (default: `true`).
+- `--mcp-enabled` (bool): Enable serving the Model Context Protocol (MCP) server (default: `true`).
 - `--dry-run` (bool): Disable writing to Consul, log routing/override decisions instead.
 
 ### Environment Variables

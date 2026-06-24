@@ -58,6 +58,9 @@ var serverCmd = &cobra.Command{
 		if !viper.IsSet("server.ui_enabled") {
 			cfg.Server.UiEnabled = viper.GetBool("ui_enabled")
 		}
+		if !viper.IsSet("server.mcp_enabled") {
+			cfg.Server.McpEnabled = viper.GetBool("mcp_enabled")
+		}
 		cfg.Server.MetricsNamespace = "atc"
 		cfg.DryRun = viper.GetBool("dry_run")
 
@@ -102,6 +105,9 @@ var serverCmd = &cobra.Command{
 				if !viper.IsSet("server.ui_enabled") {
 					newCfg.Server.UiEnabled = viper.GetBool("ui_enabled")
 				}
+				if !viper.IsSet("server.mcp_enabled") {
+					newCfg.Server.McpEnabled = viper.GetBool("mcp_enabled")
+				}
 				newCfg.Server.MetricsNamespace = "atc"
 				newCfg.DryRun = viper.GetBool("dry_run")
 
@@ -141,6 +147,9 @@ func init() {
 
 	serverCmd.PersistentFlags().Bool("ui-enabled", true, "Enable serving the embedded web UI dashboard.")
 	_ = viper.BindPFlag("ui_enabled", serverCmd.PersistentFlags().Lookup("ui-enabled"))
+
+	serverCmd.PersistentFlags().Bool("mcp-enabled", true, "Enable serving the Model Context Protocol (MCP) server.")
+	_ = viper.BindPFlag("mcp_enabled", serverCmd.PersistentFlags().Lookup("mcp-enabled"))
 
 	serverCmd.PersistentFlags().Bool("dry-run", false, "Disable writing to Consul, log actions instead.")
 	_ = viper.BindPFlag("dry_run", serverCmd.PersistentFlags().Lookup("dry-run"))

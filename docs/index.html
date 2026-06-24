@@ -293,6 +293,12 @@ brew install atc</code></pre>
               <td>Enable serving the embedded React Web UI dashboard. If disabled, static endpoints return 404, while API & MCP routes remain active.</td>
             </tr>
             <tr>
+              <td><code>--mcp-enabled</code></td>
+              <td>-</td>
+              <td>true</td>
+              <td>Enable serving the Model Context Protocol (MCP) server. If disabled, the <code>/mcp</code> endpoint returns 404.</td>
+            </tr>
+            <tr>
               <td><code>--dry-run</code></td>
               <td>-</td>
               <td>false</td>
@@ -826,6 +832,10 @@ make obs-up</code></pre>
         <div class="badge">Agent API</div>
         <h1>Model Context Protocol (MCP) Server</h1>
         <p>ATC natively exposes a Model Context Protocol (MCP) server over HTTP at <code>/mcp</code> using Server-Sent Events (SSE). This allows AI coding assistants, autonomous agents, and CLI tools to interact with ATC dynamically, inspect routing policies, and apply manual failovers.</p>
+
+        <div class="glass-panel" style="padding: 1.2rem; margin: 1.5rem 0; border-left: 4px solid var(--accent-blue);">
+          <strong>Optional MCP Server:</strong> The MCP server is enabled by default. In environments where you want to disable the MCP server (e.g., for security constraints or minimal resource footprint), you can set <code>server.mcp_enabled: false</code> in your configuration file, or pass the <code>--mcp-enabled=false</code> command-line flag. When disabled, requests to <code>/mcp</code> will return a <code>404 Not Found</code> response with "MCP server is disabled".
+        </div>
 
         <h2>SSE Connection Details</h2>
         <p>The MCP server uses SSE (Server-Sent Events) for bi-directional communication. The initial SSE channel is opened at <code>/mcp</code>, and client tool-calls are posted back to the session-specific endpoint.</p>

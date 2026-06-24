@@ -45,7 +45,13 @@ func (t *Atc) initServer() error {
 	serv.Mux.Handle("POST /api/overrides", t.authMiddleware(http.HandlerFunc(t.apiOverridesHandler)))
 	serv.Mux.Handle("GET /api/strategies", t.authMiddleware(http.HandlerFunc(t.apiStrategiesHandler)))
 	serv.Mux.Handle("GET /api/modules", t.authMiddleware(http.HandlerFunc(t.apiModulesHandler)))
-	serv.Mux.Handle("/mcp", t.authMiddleware(mcp_server.NewHandler(t)))
+	if t.Cfg.Server.McpEnabled {
+		serv.Mux.Handle("/mcp", t.authMiddleware(mcp_server.NewHandler(t)))
+	} else {
+		serv.Mux.Handle("/mcp", t.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "MCP server is disabled", http.StatusNotFound)
+		})))
+	}
 
 	t.Server = serv
 	return nil

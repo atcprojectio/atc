@@ -957,6 +957,9 @@ func (t *Atc) TriggerConfigReload() error {
 	if !viper.IsSet("server.ui_enabled") {
 		newCfg.Server.UiEnabled = viper.GetBool("ui_enabled")
 	}
+	if !viper.IsSet("server.mcp_enabled") {
+		newCfg.Server.McpEnabled = viper.GetBool("mcp_enabled")
+	}
 	newCfg.Server.MetricsNamespace = "atc"
 
 	t.ReloadConfig(newCfg)

@@ -29,6 +29,7 @@ function App() {
   const [countdown, setCountdown] = useState(10);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [isLeader, setIsLeader] = useState(true);
+  const [leaderComponents, setLeaderComponents] = useState({ forwarder: false, redirector: false });
   const [federation, setFederation] = useState({});
   const [token, setToken] = useState(getLocalStorageItem('atc-api-token'));
   const [showToken, setShowToken] = useState(false);
@@ -85,6 +86,7 @@ function App() {
           const leaderData = await leaderRes.json();
           setIsLeader(leaderData.leader);
           setAuthEnabled(!!leaderData.auth_enabled);
+          setLeaderComponents(leaderData.components || { forwarder: false, redirector: false });
         }
       } catch (err) {
         console.error("Failed to fetch leader status:", err);
@@ -321,17 +323,25 @@ function App() {
         <div className="logo-container">
           <div className="logo-pulse"></div>
           <h1 className="logo-title">ATC</h1>
-          <span className={`leader-badge ${isLeader ? 'active' : 'standby'}`}>
-            {isLeader ? '● ACTIVE LEADER' : '○ STANDBY'}
-          </span>
-          {modules.length > 0 && (
+          {modules.length > 0 ? (
             <div className="modules-badges-list">
-              {modules.map(mod => (
-                <span key={mod} className="module-badge" title={`Module ${mod} is active`}>
-                  📦 {mod}
-                </span>
-              ))}
+              {modules.map(mod => {
+                const isModLeader = !!leaderComponents[mod];
+                return (
+                  <span
+                    key={mod}
+                    className={`module-badge ${isModLeader ? 'active' : 'standby'}`}
+                    title={`Module ${mod} is ${isModLeader ? 'active leader' : 'in standby'}`}
+                  >
+                    📦 {mod.toUpperCase()}: {isModLeader ? '● LEADER' : '○ STANDBY'}
+                  </span>
+                );
+              })}
             </div>
+          ) : (
+            <span className="leader-badge standby" title="No reconciliation modules are currently running on this node">
+              ○ NO ACTIVE RECONCILIATION MODULES
+            </span>
           )}
         </div>
 
@@ -576,21 +586,7 @@ function App() {
                           )}
                         </div>
 
-                        <div className="detail-item tags-container">
-                          <span className="detail-label">Consul Tags</span>
-                          <div className="tags-list">
-                            {svc.tags.map((tag) => (
-                              <span
-                                key={tag}
-                                className={`tag-badge ${
-                                  tag === 'atc.enabled=true' ? 'atc-tag' : ''
-                                }`}
-                              >
-                                {tag}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
+
 
                         {/* Manual Override controls */}
                         <div className="override-controls-section">

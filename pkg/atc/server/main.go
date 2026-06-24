@@ -24,6 +24,7 @@ type Config struct {
 	LogFormat         string `yaml:"log_format" mapstructure:"log_format"`
 	LogLevel          string `yaml:"log_level" mapstructure:"log_level"`
 	UiEnabled         bool   `yaml:"ui_enabled" mapstructure:"ui_enabled"`
+	McpEnabled        bool   `yaml:"mcp_enabled" mapstructure:"mcp_enabled"`
 }
 
 type Server struct {

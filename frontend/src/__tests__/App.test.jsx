@@ -65,7 +65,11 @@ describe('ATC Dashboard App', () => {
       if (url.includes('/api/leader')) {
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve({ leader: true, auth_enabled: false })
+          json: () => Promise.resolve({
+            leader: true,
+            auth_enabled: false,
+            components: { forwarder: true, redirector: true }
+          })
         });
       }
       return Promise.resolve({ ok: false });

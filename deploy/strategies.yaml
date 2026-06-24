@@ -43,6 +43,7 @@ server:
   log_format: "text"
   log_level: "debug"
   ui_enabled: true
+  mcp_enabled: true
 
 # Predefined failover and redirect strategy mappings
 strategies:

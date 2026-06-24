@@ -65,3 +65,39 @@ func TestServer_UIDisabled(t *testing.T) {
 		t.Errorf("Expected body containing 'Web UI is disabled', got '%s'", string(body))
 	}
 }
+
+func TestServer_McpEnabledConfig(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := Config{
+		HTTPListenPort:    8103,
+		MetricsListenPort: 8104,
+		McpEnabled:        true,
+	}
+
+	serv, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	if serv.cfg.McpEnabled != true {
+		t.Errorf("Expected McpEnabled to be true")
+	}
+}
+
+func TestServer_McpDisabledConfig(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := Config{
+		HTTPListenPort:    8105,
+		MetricsListenPort: 8106,
+		McpEnabled:        false,
+	}
+
+	serv, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	if serv.cfg.McpEnabled != false {
+		t.Errorf("Expected McpEnabled to be false")
+	}
+}

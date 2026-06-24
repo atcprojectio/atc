@@ -24,9 +24,9 @@ HTTP Endpoints:
 ATC server hosts two separate HTTP port listeners:
   - Main Port (default :8088): Serves the React frontend dashboard at `/` (which can be disabled
     via `server.ui_enabled` in the config file or `--ui-enabled` command-line flag), exposes /ready,
-    /services, JSON API service list (/api/services), manual overrides (/api/overrides), leader status (/api/leader), WAN federation status (/api/federation), predefined strategies (/api/strategies), reload configuration (/api/reload), and the MCP server interface.
+    /services, JSON API service list (/api/services), manual overrides (/api/overrides), leader status (/api/leader), WAN federation status (/api/federation), predefined strategies (/api/strategies), reload configuration (/api/reload), and the MCP server interface (which can be disabled via `server.mcp_enabled` in the config file or `--mcp-enabled` command-line flag).
     When the Web UI is disabled, requests to static routes `/` return a 404 Not Found error with a
-    "Web UI is disabled" message, while other REST APIs, `/ready`, `/health`, and `/mcp` endpoints remain active.
+    "Web UI is disabled" message, while other REST APIs, `/ready`, `/health`, and `/mcp` endpoints (when enabled) remain active. When the MCP server is disabled, requests to `/mcp` return a 404 Not Found error with a "MCP server is disabled" message.
   - Metrics Port (default :8089): Exposes OpenTelemetry metrics in Prometheus format at `/metrics`.
 
 API & MCP Integration:
