@@ -1,6 +1,6 @@
 services:
   consul-dc1:
-    image: hashicorp/consul:2.0.1
+    image: hashicorp/consul:latest
     container_name: consul-dc1
     command: agent -dev -datacenter=dc1 -node=consul-dc1 -client=0.0.0.0 -bind=0.0.0.0
     ports:
@@ -10,7 +10,7 @@ services:
       - demo-net
 
   consul-dc2:
-    image: hashicorp/consul:2.0.1
+    image: hashicorp/consul:latest
     container_name: consul-dc2
     command: agent -dev -datacenter=dc2 -node=consul-dc2 -client=0.0.0.0 -bind=0.0.0.0
     ports:

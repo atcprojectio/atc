@@ -11,6 +11,8 @@ services:
     depends_on:
       - loki
       - tempo
+    networks:
+      - demo-net
 
   prometheus:
     image: prom/prometheus:latest
@@ -24,15 +26,19 @@ services:
       - "9090:9090"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - demo-net
 
   loki:
-    image: grafana/loki:3.0.0
+    image: grafana/loki:latest
     container_name: loki
     command: -config.file=/etc/loki/local-config.yaml
     volumes:
       - ./loki-config.yaml:/etc/loki/local-config.yaml
     ports:
       - "3100:3100"
+    networks:
+      - demo-net
 
   tempo:
     image: grafana/tempo:latest
@@ -42,6 +48,8 @@ services:
       - ./tempo.yaml:/etc/tempo/tempo.yaml
     ports:
       - "3200:3200" # tempo web / query frontend
+    networks:
+      - demo-net
 
   grafana:
     image: grafana/grafana:latest
@@ -57,3 +65,10 @@ services:
       - prometheus
       - loki
       - tempo
+    networks:
+      - demo-net
+
+networks:
+  demo-net:
+    name: atc-demo_demo-net
+    external: true

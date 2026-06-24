@@ -636,3 +636,59 @@ Provide a centralized `docker-compose.yml` environment containing a local dev Co
   - Isolated developer environment mimicking production observability pipelines.
 - **Consequences**:
   - Developers need Docker/Docker Compose installed locally, consuming minor system resources.
+
+---
+
+## ADR 0027: Go-Native E2E Integration and Acceptance Testing
+
+### Status
+Accepted
+
+### Date
+2026-06-24
+
+### Context
+ATC requires automated acceptance testing to validate multi-datacenter watcher, failover, redirect, HA, and MCP workflows. Testing these flows involves multi-step processes, event-driven state transitions, and time-dependent waits (e.g. for HA session lock TTLs and Hysteresis cooldowns). We need to choose between standard procedural testing in Go (using tags and testcontainers-go) vs layering or replacing it with a BDD framework (e.g. Ginkgo/Gomega or Godog/Cucumber).
+
+### Decision
+Adopt a pure Go-native testing approach:
+- Use `//go:build integration` tags to isolate E2E tests from standard unit tests.
+- Utilize `testcontainers-go` to spin up isolated container sandboxes (Consul, ATC, and network) inside the Go test suite for CI pipeline runs.
+- Implement polled/retry assertions in Go using `context.WithTimeout` and `time.Ticker` rather than hardcoded sleep delays to avoid slow/flaky tests.
+- Reject adding heavy external BDD test frameworks (like Ginkgo/Gomega or Godog) to keep compile times fast, dependencies light, and stack trace debugging standard.
+
+### Consequences
+- **Benefits**:
+  - Keeps testing tooling 100% standard Go, ensuring full IDE debugger, profiling, and runner compatibility.
+  - Zero-dependency sandboxing inside CI runner (GitHub Actions).
+  - Optimizes test speed by avoiding hardcoded sleep buffers.
+- **Consequences**:
+  - Scenarios must be documented using standard code comments rather than natural-language Gherkin specifications.
+
+---
+
+## ADR 0028: Dedicated Port for MCP Server
+
+### Status
+Accepted
+
+### Date
+2026-06-24
+
+### Context
+The native Model Context Protocol (MCP) server currently shares the main application port `:8088`. Because MCP relies on persistent Server-Sent Events (SSE) connections, this can lead to connection socket exhaustion for browser clients loading the Web UI dashboard. Additionally, exposing administrative write-authorized MCP tools on the same port as public-facing dashboard traffic limits the ability to enforce strict network-level firewall access controls (ACLs) to isolate machine-to-machine AI traffic. We need to decide whether to move the MCP server to the unauthenticated metrics port `:8089` or to a dedicated MCP port (e.g. `:8092`).
+
+### Decision
+Move the MCP server to a dedicated listener port (default `:8092` / CLI flag `--mcp-port` / configuration `server.mcp_port`):
+- Reject moving the MCP server to the metrics port (`:8089`) due to a critical authentication conflict (the metrics port is unauthenticated, while MCP tools require write authorization/authentication).
+- Run a third isolated `http.Server` instance dedicated to MCP SSE connections when `--mcp-enabled=true` (default).
+
+### Consequences
+- **Benefits**:
+  - Complete network-level security isolation (operators can firewall the MCP port separately from Web UI traffic).
+  - Prevents browser client socket starvation (dashboard UI responsiveness remains unaffected by active AI agent sessions).
+  - Allows custom TLS/auth settings specifically for MCP traffic.
+- **Consequences**:
+  - Operators must configure and bind an additional port (e.g. `:8092`) in deployment templates (Helm, Nomad, Docker Compose).
+
+
