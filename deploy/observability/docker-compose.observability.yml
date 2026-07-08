@@ -70,5 +70,5 @@ services:
 
 networks:
   demo-net:
-    name: atc-demo_demo-net
+    name: ${COMPOSE_PROJECT_NAME:-atc-demo}_demo-net
     external: true

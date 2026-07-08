@@ -44,6 +44,14 @@ jobs:
         with:
           gotestsum_version: v1.13.0
       - run: make test
+      - name: Install Consul
+        run: |
+          wget https://releases.hashicorp.com/consul/2.0.1/consul_2.0.1_linux_amd64.zip
+          unzip consul_2.0.1_linux_amd64.zip
+          sudo mv consul /usr/local/bin/
+          rm consul_2.0.1_linux_amd64.zip
+      - name: Run Integration Tests
+        run: make test-integration
       - name: Test Frontend
         run: make test-frontend
   build:

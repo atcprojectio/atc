@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	prom "github.com/prometheus/client_golang/prometheus"
@@ -59,23 +60,29 @@ func Init(ctx context.Context, serviceName string) (func(context.Context) error,
 	))
 
 	// 3. Tracing setup (OTLP HTTP)
-	traceExporter, err := otlptracehttp.New(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create OTLP trace exporter: %w", err)
+	if os.Getenv("OTEL_SDK_DISABLED") != "true" {
+		traceExporter, err := otlptracehttp.New(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create OTLP trace exporter: %w", err)
+		}
+		tp := sdktrace.NewTracerProvider(
+			sdktrace.WithBatcher(traceExporter),
+			sdktrace.WithResource(res),
+		)
+		otel.SetTracerProvider(tp)
+		shutdownFuncs = append(shutdownFuncs, tp.Shutdown)
 	}
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(traceExporter),
-		sdktrace.WithResource(res),
-	)
-	otel.SetTracerProvider(tp)
-	shutdownFuncs = append(shutdownFuncs, tp.Shutdown)
 
 	// 4. Metrics setup
-	metricExporter, err := otlpmetrichttp.New(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create OTLP metric exporter: %w", err)
+	var metricReaders []sdkmetric.Reader
+	if os.Getenv("OTEL_SDK_DISABLED") != "true" {
+		metricExporter, err := otlpmetrichttp.New(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create OTLP metric exporter: %w", err)
+		}
+		periodicReader := sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(15*time.Second))
+		metricReaders = append(metricReaders, periodicReader)
 	}
-	periodicReader := sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(15*time.Second))
 
 	registry := prom.NewRegistry()
 	registry.MustRegister(versioncol.NewCollector("atc"))
@@ -86,26 +93,30 @@ func Init(ctx context.Context, serviceName string) (func(context.Context) error,
 		return nil, fmt.Errorf("failed to create Prometheus exporter: %w", err)
 	}
 	GlobalPrometheusHandler = promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+	metricReaders = append(metricReaders, promExporter)
 
-	mp := sdkmetric.NewMeterProvider(
-		sdkmetric.WithResource(res),
-		sdkmetric.WithReader(periodicReader),
-		sdkmetric.WithReader(promExporter),
-	)
+	var metricOpts []sdkmetric.Option
+	metricOpts = append(metricOpts, sdkmetric.WithResource(res))
+	for _, reader := range metricReaders {
+		metricOpts = append(metricOpts, sdkmetric.WithReader(reader))
+	}
+	mp := sdkmetric.NewMeterProvider(metricOpts...)
 	otel.SetMeterProvider(mp)
 	shutdownFuncs = append(shutdownFuncs, mp.Shutdown)
 
 	// 5. Logging setup (OTLP HTTP)
-	logExporter, err := otlploghttp.New(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create OTLP log exporter: %w", err)
+	if os.Getenv("OTEL_SDK_DISABLED") != "true" {
+		logExporter, err := otlploghttp.New(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create OTLP log exporter: %w", err)
+		}
+		lp := sdklog.NewLoggerProvider(
+			sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
+			sdklog.WithResource(res),
+		)
+		global.SetLoggerProvider(lp)
+		shutdownFuncs = append(shutdownFuncs, lp.Shutdown)
 	}
-	lp := sdklog.NewLoggerProvider(
-		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
-		sdklog.WithResource(res),
-	)
-	global.SetLoggerProvider(lp)
-	shutdownFuncs = append(shutdownFuncs, lp.Shutdown)
 
 	return shutdown, nil
 }

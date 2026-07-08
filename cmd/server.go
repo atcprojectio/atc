@@ -116,7 +116,7 @@ var serverCmd = &cobra.Command{
 			viper.WatchConfig()
 		}
 
-		return t.Run()
+		return t.Run(cmd.Context())
 	},
 }
 

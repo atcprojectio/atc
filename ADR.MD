@@ -639,31 +639,32 @@ Provide a centralized `docker-compose.yml` environment containing a local dev Co
 
 ---
 
-## ADR 0027: Go-Native E2E Integration and Acceptance Testing
+## ADR 0027: Go-Native BDD E2E Integration and Acceptance Testing
 
 ### Status
 Accepted
 
 ### Date
-2026-06-24
+2026-07-07
 
 ### Context
-ATC requires automated acceptance testing to validate multi-datacenter watcher, failover, redirect, HA, and MCP workflows. Testing these flows involves multi-step processes, event-driven state transitions, and time-dependent waits (e.g. for HA session lock TTLs and Hysteresis cooldowns). We need to choose between standard procedural testing in Go (using tags and testcontainers-go) vs layering or replacing it with a BDD framework (e.g. Ginkgo/Gomega or Godog/Cucumber).
+ATC requires automated acceptance testing to validate multi-datacenter watcher, failover, redirect, HA, and MCP workflows. Testing these flows involves multi-step processes, event-driven state transitions, and time-dependent waits (e.g. for HA session lock TTLs and Hysteresis cooldowns). We need to choose between standard procedural testing in Go (using tags and testcontainers-go) vs layering or replacing it with a BDD framework (e.g. GoConvey, Ginkgo/Gomega, or Godog/Cucumber).
 
 ### Decision
-Adopt a pure Go-native testing approach:
-- Use `//go:build integration` tags to isolate E2E tests from standard unit tests.
-- Utilize `testcontainers-go` to spin up isolated container sandboxes (Consul, ATC, and network) inside the Go test suite for CI pipeline runs.
-- Implement polled/retry assertions in Go using `context.WithTimeout` and `time.Ticker` rather than hardcoded sleep delays to avoid slow/flaky tests.
-- Reject adding heavy external BDD test frameworks (like Ginkgo/Gomega or Godog) to keep compile times fast, dependencies light, and stack trace debugging standard.
+Adopt GoConvey as the BDD DSL library combined with HashiCorp's Consul `testutil` package to run fast, in-process dev servers:
+- **GoConvey BDD DSL**: Write integration and E2E test scenarios using GoConvey's nested `Convey` and `So` block structures, which execute natively under standard `go test`.
+- **In-Process Consul Test Server**: Utilize HashiCorp's `github.com/hashicorp/consul/sdk/testutil` library to spin up a local Consul server programmatically in-process, managed globally (e.g. in `TestMain`).
+- **Reject `testcontainers-go`**: Avoid the container boot latency and cleanup overhead of Docker containers inside individual test flows, which would degrade performance under GoConvey's nested scope execution.
 
 ### Consequences
 - **Benefits**:
-  - Keeps testing tooling 100% standard Go, ensuring full IDE debugger, profiling, and runner compatibility.
-  - Zero-dependency sandboxing inside CI runner (GitHub Actions).
-  - Optimizes test speed by avoiding hardcoded sleep buffers.
+  - Highly readable, hierarchical, and self-documenting BDD test reports directly in the terminal or GoConvey's Web UI.
+  - Extremely fast E2E execution times because we avoid the overhead of spawning physical Docker containers for each test run.
+  - 100% compatibility with standard Go toolchain (`go test`), native IDE debuggers, and profiling tools.
 - **Consequences**:
-  - Scenarios must be documented using standard code comments rather than natural-language Gherkin specifications.
+  - Introduces external dependencies for GoConvey's DSL and the Consul SDK `testutil` library.
+  - Requires careful management of shared Consul server state across nested `Convey` blocks to avoid cross-test pollution.
+  - Developers must have the `consul` binary available on their system path for the `testutil` server to initialize correctly.
 
 ---
 

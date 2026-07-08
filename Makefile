@@ -1,6 +1,6 @@
 APP-BIN := dist/$(shell basename $(shell pwd))
 
-.PHONY: build build-frontend consul-up consul-down consul-register-test consul-deregister-test darwin fresh lint linux qa release run snapshot tag test watch test-frontend
+.PHONY: build build-frontend consul-up consul-down consul-register-test consul-deregister-test darwin fresh lint linux qa release run snapshot tag test test-integration test-frontend
 
 build-frontend:
 	cd frontend && npm ci && npm run build
@@ -25,16 +25,20 @@ lint:
 	pre-commit run --files $(shell git ls-files -m)
 test:
 	gotestsum --format testname
+test-integration:
+	go test -v -tags=integration ./pkg/atc/integration/...
 test-frontend:
 	cd frontend && npm run test
-qa: lint test test-frontend
+qa: lint test test-integration test-frontend
 run: ## Run binary.
 	OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./${APP-BIN} server --config deploy/strategies.yaml
 fresh: build run
 consul-up:
-	docker compose up -d consul
+	@docker network inspect atc_demo-net >/dev/null 2>&1 || docker network create atc_demo-net || true
+	docker compose up -d consul-dc1 consul-dc2
 
 obs-up:
+	@docker network inspect atc_demo-net >/dev/null 2>&1 || docker network create atc_demo-net || true
 	docker compose up -d
 	@echo "Waiting for services to start..."
 	@sleep 3
@@ -59,9 +63,7 @@ consul-register-test-dc2:
 	@echo "\nRegistered payment-service-dc2-1 in dc2 (pointing to port 8082 mock)"
 
 consul-down:
-	docker compose stop consul || true
+	docker compose stop consul-dc1 consul-dc2 || true
 
 obs-down:
 	docker compose down
-
-

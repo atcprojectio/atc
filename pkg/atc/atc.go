@@ -7,12 +7,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -127,17 +125,14 @@ func New(cfg Config) (*Atc, error) {
 	return atc, nil
 }
 
-func (t *Atc) Run() error {
+func (t *Atc) Run(ctx context.Context) error {
 	for _, module := range t.Cfg.Target {
 		if !slices.Contains(UserVisibleModules, module) {
 			return fmt.Errorf("selected target (%s) is an internal module or invalid target, which is not allowed", module)
 		}
 	}
 
-	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	g, ctx := errgroup.WithContext(signalCtx)
+	g, ctx := errgroup.WithContext(ctx)
 
 	if t.otelShutdown != nil {
 		defer func() {
