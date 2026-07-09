@@ -12,14 +12,7 @@ All roadmap Must Have items have been successfully implemented!
 
 ## Should Have
 
-### 1. Go-Native Integration & Acceptance Testing Suite
-Implement the accepted Go-native E2E integration test suite as defined in [ADR 0027](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/ADR.MD#L640):
-- Use `testcontainers-go` to isolate Consul and ATC daemon execution inside Go test runs.
-- Set up a test suite folder `pkg/atc/integration` tagged with `//go:build integration`.
-- Wire the integration test target in the Makefile (`make test-integration`) and add it to the `.github/workflows/pr.yml` CI pipeline.
-- Implement Go-native MCP server SSE client assertions.
-
-### 2. Dedicated Port for MCP Server
+### 1. Dedicated Port for MCP Server
 Implement the accepted isolated MCP listener configuration as defined in [ADR 0028](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/ADR.MD#L669):
 - Add a new configuration parameter `server.mcp_port` (default `8092`) and a corresponding CLI flag `--mcp-port`.
 - Start a third parallel HTTP listener exclusively for MCP Server-Sent Events (SSE) traffic when `server.mcp_enabled: true` (default).

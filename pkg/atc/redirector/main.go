@@ -20,16 +20,6 @@ import (
 
 var (
 	tracer = otel.Tracer("atc/redirector")
-	meter  = otel.Meter("atc/redirector")
-
-	reconcileCounter, _ = meter.Int64Counter(
-		"atc_redirector_reconcile_runs_total",
-		metric.WithDescription("Total number of redirector reconciliation runs"),
-	)
-	reconcileDuration, _ = meter.Float64Histogram(
-		"atc_redirector_reconcile_duration_seconds",
-		metric.WithDescription("Duration of redirector reconciliation runs in seconds"),
-	)
 )
 
 type RedirectStrategy struct {
@@ -72,9 +62,28 @@ type Redirector struct {
 	pendingWrites map[string]*api.ServiceResolverConfigEntry
 	writeTimers   map[string]*time.Timer
 	forwarder     writeCanceler
+
+	reconcileCounter  metric.Int64Counter
+	reconcileDuration metric.Float64Histogram
 }
 
 func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace, writeRateLimit string, forwarderEnabled bool, redirectStrategies map[string]RedirectStrategy, dampeningPeriod, minDampeningPeriod string, hasDefaultFailover bool, dryRun bool) (*Redirector, error) {
+	meter := otel.Meter("atc/redirector")
+	reconcileCounter, err := meter.Int64Counter(
+		"atc_redirector_reconcile_runs_total",
+		metric.WithDescription("Total number of redirector reconciliation runs"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	reconcileDuration, err := meter.Float64Histogram(
+		"atc_redirector_reconcile_duration_seconds",
+		metric.WithDescription("Duration of redirector reconciliation runs in seconds"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Redirector{
 		logger:             logger,
 		consulAddr:         consulAddr,
@@ -92,6 +101,8 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 		strategiesCache:    make(map[string]cachedStrategies),
 		pendingWrites:      make(map[string]*api.ServiceResolverConfigEntry),
 		writeTimers:        make(map[string]*time.Timer),
+		reconcileCounter:   reconcileCounter,
+		reconcileDuration:  reconcileDuration,
 	}, nil
 }
 
@@ -212,10 +223,10 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 			status = "failure"
 			span.RecordError(err)
 		}
-		reconcileCounter.Add(ctx, 1, metric.WithAttributes(
+		r.reconcileCounter.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("status", status),
 		))
-		reconcileDuration.Record(ctx, duration, metric.WithAttributes(
+		r.reconcileDuration.Record(ctx, duration, metric.WithAttributes(
 			attribute.String("status", status),
 		))
 	}()

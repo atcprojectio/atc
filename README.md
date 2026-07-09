@@ -283,6 +283,27 @@ make consul-register-test
 make consul-deregister-test
 ```
 
+### Running Automated Tests
+
+To validate the codebase, you can run the automated tests locally:
+
+*   **Unit Tests**: Runs all Go unit tests.
+    ```bash
+    make test
+    ```
+*   **Integration/E2E Tests**: Runs the Go BDD integration/E2E test suite (HA failover, manual overrides, hysteresis dampening, authorization and token delegation, config hot-reloading, and telemetry). This requires a `consul` binary (v2.0.1 recommended) to be installed and available on your `PATH`.
+    ```bash
+    make test-integration
+    ```
+*   **Frontend Tests**: Runs frontend Vitest component tests.
+    ```bash
+    make test-frontend
+    ```
+*   **Full QA Check**: Runs linters, unit tests, integration/E2E tests, and frontend tests.
+    ```bash
+    make qa
+    ```
+
 ### Claude Desktop MCP Integration
 
 To enable the ATC Model Context Protocol (MCP) server in **Claude Desktop**, you can bridge the Streamable HTTP SSE transport to Claude's stdio interface using the official `mcp-remote` bridge client.
