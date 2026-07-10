@@ -1,5 +1,4 @@
-import React from 'react';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import App from '../App';
 
@@ -34,7 +33,7 @@ describe('ATC Dashboard App', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     
-    global.fetch = vi.fn().mockImplementation((url, options) => {
+    window.fetch = vi.fn().mockImplementation((url, options) => {
       if (url.includes('/api/federation')) {
         return Promise.resolve({
           ok: true,
@@ -143,7 +142,7 @@ describe('ATC Dashboard App', () => {
     fireEvent.click(purgeButton);
 
     expect(confirmMock).toHaveBeenCalled();
-    expect(global.fetch).not.toHaveBeenCalledWith(expect.stringContaining('DELETE'), expect.any(Object));
+    expect(window.fetch).not.toHaveBeenCalledWith(expect.stringContaining('DELETE'), expect.any(Object));
   });
 
   it('handles the purge trigger with confirmation modal approval', async () => {
@@ -160,7 +159,7 @@ describe('ATC Dashboard App', () => {
 
     expect(confirmMock).toHaveBeenCalled();
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith(
+      expect(window.fetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/services?name=auth-service'),
         expect.objectContaining({ method: 'DELETE' })
       );
@@ -182,7 +181,7 @@ describe('ATC Dashboard App', () => {
       }
     ];
 
-    global.fetch = vi.fn().mockImplementation((url) => {
+    window.fetch = vi.fn().mockImplementation((url) => {
       if (url.includes('/api/services')) {
         return Promise.resolve({
           ok: true,
@@ -202,7 +201,7 @@ describe('ATC Dashboard App', () => {
   });
 
   it('submits manual override with TTL duration', async () => {
-    const { container } = render(<App />);
+    render(<App />);
 
     await waitFor(() => {
       expect(screen.getByText('payment-service')).toBeInTheDocument();
@@ -217,7 +216,7 @@ describe('ATC Dashboard App', () => {
     fireEvent.click(applyBtn);
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith(
+      expect(window.fetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/overrides'),
         expect.objectContaining({
           method: 'POST'

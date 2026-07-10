@@ -1,6 +1,12 @@
-name: Validate PR
+name: Validate Backend
 on:
   pull_request:
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - '.github/workflows/pr-backend.yml'
 permissions:
   contents: read
   pull-requests: read
@@ -13,21 +19,21 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - name: Lint Frontend
-        run: |
-          cd frontend
-          npm ci
-          npm run lint
       - name: Build Frontend
         run: make build-frontend
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v9
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v8
         with:
           version: v2.12.2
-      - name: Lint Helm Chart
-        run: helm lint deploy/helm/atc
+          args: --timeout=5m
+          install-only: true
+      - name: Lint Backend
+        run: |
+          export PATH=$PATH:$(go env GOPATH)/bin
+          make lint-backend
   test:
     runs-on: ubuntu-latest
     steps:
@@ -46,14 +52,12 @@ jobs:
       - run: make test
       - name: Install Consul
         run: |
-          wget https://releases.hashicorp.com/consul/2.0.1/consul_2.0.1_linux_amd64.zip
-          unzip consul_2.0.1_linux_amd64.zip
+          wget https://releases.hashicorp.com/consul/2.0.2/consul_2.0.2_linux_amd64.zip
+          unzip consul_2.0.2_linux_amd64.zip
           sudo mv consul /usr/local/bin/
-          rm consul_2.0.1_linux_amd64.zip
+          rm consul_2.0.2_linux_amd64.zip
       - name: Run Integration Tests
         run: make test-integration
-      - name: Test Frontend
-        run: make test-frontend
   build:
     runs-on: ubuntu-latest
     env:

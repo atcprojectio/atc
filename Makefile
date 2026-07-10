@@ -1,6 +1,6 @@
 APP-BIN := dist/$(shell basename $(shell pwd))
 
-.PHONY: build build-frontend consul-up consul-down consul-register-test consul-deregister-test darwin fresh lint linux qa release run snapshot tag test test-integration test-frontend
+.PHONY: build build-frontend consul-up consul-down consul-register-test consul-deregister-test darwin fresh lint lint-frontend lint-backend linux qa release run snapshot tag test test-integration test-frontend
 
 build-frontend:
 	cd frontend && npm ci && npm run build
@@ -21,8 +21,11 @@ release: tag build-frontend
 
 watch:
 	gotestsum --watch --format testname
-lint:
-	pre-commit run --files $(shell git ls-files -m)
+lint-frontend:
+	cd frontend && npm ci && npm run lint
+lint-backend:
+	golangci-lint run ./...
+lint: lint-frontend lint-backend
 test:
 	gotestsum --format testname
 test-integration:

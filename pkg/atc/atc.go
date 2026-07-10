@@ -23,6 +23,8 @@ import (
 	"github.com/spf13/viper"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -81,6 +83,11 @@ type Atc struct {
 	isLeader         atomic.Bool
 	forwarderLeader  atomic.Bool
 	redirectorLeader atomic.Bool
+
+	leaderTransitionsCounter metric.Int64Counter
+	overridesPurgedCounter    metric.Int64Counter
+	configReloadsCounter     metric.Int64Counter
+	configLastReloadTime     int64
 }
 
 func New(cfg Config) (*Atc, error) {
@@ -91,12 +98,106 @@ func New(cfg Config) (*Atc, error) {
 		logger.Warn("Failed to initialize OpenTelemetry SDK", slog.Any("error", err))
 	}
 
+	meter := otel.Meter("atc/core")
+	leaderTransitionsCounter, _ := meter.Int64Counter(
+		"atc_ha_leader_transitions_total",
+		metric.WithDescription("Total number of leadership transitions on this node"),
+	)
+	overridesPurgedCounter, _ := meter.Int64Counter(
+		"atc_overrides_purged_total",
+		metric.WithDescription("Total number of expired manual overrides purged"),
+	)
+	configReloadsCounter, _ := meter.Int64Counter(
+		"atc_config_reloads_total",
+		metric.WithDescription("Total number of configuration reloads"),
+	)
+
 	atc := &Atc{
-		Cfg:            cfg,
-		logger:         logger,
-		coreLogger:     logger.With(slog.String("module", "core")),
-		enabledModules: resolveModules(cfg.Target),
-		otelShutdown:   otelShutdown,
+		Cfg:                      cfg,
+		logger:                   logger,
+		coreLogger:               logger.With(slog.String("module", "core")),
+		enabledModules:           resolveModules(cfg.Target),
+		otelShutdown:             otelShutdown,
+		leaderTransitionsCounter: leaderTransitionsCounter,
+		overridesPurgedCounter:    overridesPurgedCounter,
+		configReloadsCounter:     configReloadsCounter,
+		configLastReloadTime:     time.Now().Unix(),
+	}
+
+	_, err = meter.Int64ObservableGauge(
+		"atc_ha_is_leader",
+		metric.WithDescription("Leadership status on this node (1 = Leader, 0 = Standby)"),
+		metric.WithInt64Callback(func(_ context.Context, obsrv metric.Int64Observer) error {
+			if atc.Forwarder != nil {
+				val := int64(0)
+				if atc.forwarderLeader.Load() {
+					val = 1
+				}
+				obsrv.Observe(val, metric.WithAttributes(attribute.String("module", "forwarder")))
+			}
+			if atc.Redirector != nil {
+				val := int64(0)
+				if atc.redirectorLeader.Load() {
+					val = 1
+				}
+				obsrv.Observe(val, metric.WithAttributes(attribute.String("module", "redirector")))
+			}
+			if atc.Forwarder == nil && atc.Redirector == nil {
+				val := int64(0)
+				if atc.isLeader.Load() {
+					val = 1
+				}
+				obsrv.Observe(val, metric.WithAttributes(attribute.String("module", "core")))
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		logger.Warn("Failed to register atc_ha_is_leader gauge", slog.Any("error", err))
+	}
+
+	_, err = meter.Int64ObservableGauge(
+		"atc_overrides_active",
+		metric.WithDescription("Number of active manual overrides in Consul"),
+		metric.WithInt64Callback(func(ctx context.Context, obsrv metric.Int64Observer) error {
+			overrides, err := atc.ListActiveOverrides(ctx)
+			if err == nil {
+				obsrv.Observe(int64(len(overrides)))
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		logger.Warn("Failed to register atc_overrides_active gauge", slog.Any("error", err))
+	}
+
+	_, err = meter.Int64ObservableGauge(
+		"atc_config_last_reload_timestamp_seconds",
+		metric.WithDescription("Unix timestamp of the last configuration reload"),
+		metric.WithInt64Callback(func(_ context.Context, obsrv metric.Int64Observer) error {
+			obsrv.Observe(atomic.LoadInt64(&atc.configLastReloadTime))
+			return nil
+		}),
+	)
+	if err != nil {
+		logger.Warn("Failed to register atc_config_last_reload_timestamp_seconds gauge", slog.Any("error", err))
+	}
+
+	_, err = meter.Int64ObservableGauge(
+		"atc_strategies_configured",
+		metric.WithDescription("Number of strategies configured in memory"),
+		metric.WithInt64Callback(func(_ context.Context, obsrv metric.Int64Observer) error {
+			atc.cfgMu.RLock()
+			foCount := len(atc.Cfg.Strategies.Failover)
+			rdCount := len(atc.Cfg.Strategies.Redirect)
+			atc.cfgMu.RUnlock()
+			obsrv.Observe(int64(foCount), metric.WithAttributes(attribute.String("strategy_type", "failover")))
+			obsrv.Observe(int64(rdCount), metric.WithAttributes(attribute.String("strategy_type", "redirect")))
+			return nil
+		}),
+	)
+	if err != nil {
+		logger.Warn("Failed to register atc_strategies_configured gauge", slog.Any("error", err))
 	}
 
 	if atc.enabledModules[Server] {
@@ -282,6 +383,12 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 
 	t.coreLogger.InfoContext(ctx, "Starting leader election loop", slog.String("lock_key", lockKey), slog.String("module", moduleName))
 
+	ctx, span := coreTracer.Start(ctx, "ha/LeadershipLock", trace.WithAttributes(
+		attribute.String("module", moduleName),
+		attribute.String("lock_key", lockKey),
+	))
+	defer span.End()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -293,6 +400,7 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 		lostCh, err := lock.Lock(ctx.Done())
 		if err != nil {
 			t.coreLogger.ErrorContext(ctx, "Error acquiring leadership lock, retrying in 5s", slog.Any("error", err), slog.String("lock_key", lockKey))
+			span.RecordError(err)
 			select {
 			case <-ctx.Done():
 				return nil
@@ -307,21 +415,34 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 
 		leaderFlag.Store(true)
 		t.coreLogger.InfoContext(ctx, "Leadership acquired. Starting workload...", slog.String("lock_key", lockKey))
+		if t.leaderTransitionsCounter != nil {
+			t.leaderTransitionsCounter.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("module", moduleName),
+				attribute.String("transition", "acquired"),
+			))
+		}
+		span.AddEvent("leadership_acquired")
+
+		leaderCtx, cancelLeader := context.WithCancel(ctx)
+		leaderCtx, activeSpan := coreTracer.Start(leaderCtx, "ha/LeaderActive", trace.WithAttributes(
+			attribute.String("module", moduleName),
+			attribute.String("lock_key", lockKey),
+		))
 
 		if runFunc != nil {
-			leaderCtx, cancelLeader := context.WithCancel(ctx)
-
 			var wg sync.WaitGroup
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				if err := runFunc(leaderCtx); err != nil {
 					t.coreLogger.ErrorContext(leaderCtx, "workload run failed", slog.Any("error", err), slog.String("lock_key", lockKey))
+					activeSpan.RecordError(err)
 				}
 			}()
 
 			select {
 			case <-ctx.Done():
+				activeSpan.End()
 				cancelLeader()
 				_ = lock.Unlock()
 				leaderFlag.Store(false)
@@ -329,6 +450,15 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 				return nil
 			case <-lostCh:
 				t.coreLogger.WarnContext(ctx, "Leadership lock lost. Stopping workload and reverting to standby...", slog.String("lock_key", lockKey))
+				activeSpan.AddEvent("leadership_lost")
+				activeSpan.End()
+				span.AddEvent("leadership_lost")
+				if t.leaderTransitionsCounter != nil {
+					t.leaderTransitionsCounter.Add(ctx, 1, metric.WithAttributes(
+						attribute.String("module", moduleName),
+						attribute.String("transition", "lost"),
+					))
+				}
 				cancelLeader()
 				leaderFlag.Store(false)
 				wg.Wait()
@@ -336,11 +466,23 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 		} else {
 			select {
 			case <-ctx.Done():
+				activeSpan.End()
+				cancelLeader()
 				_ = lock.Unlock()
 				leaderFlag.Store(false)
 				return nil
 			case <-lostCh:
 				t.coreLogger.WarnContext(ctx, "Leadership lock lost. Reverting to standby...", slog.String("lock_key", lockKey))
+				activeSpan.AddEvent("leadership_lost")
+				activeSpan.End()
+				span.AddEvent("leadership_lost")
+				if t.leaderTransitionsCounter != nil {
+					t.leaderTransitionsCounter.Add(ctx, 1, metric.WithAttributes(
+						attribute.String("module", moduleName),
+						attribute.String("transition", "lost"),
+					))
+				}
+				cancelLeader()
 				leaderFlag.Store(false)
 			}
 		}
@@ -368,7 +510,12 @@ func (t *Atc) GetAtcEnabledServices(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("failed to connect to consul: %w", err)
 	}
 
-	services, _, err := client.Catalog().Services((&api.QueryOptions{}).WithContext(ctx))
+	var services map[string][]string
+	err = t.traceConsulCall(ctx, "list_services", func() error {
+		var err error
+		services, _, err = client.Catalog().Services((&api.QueryOptions{}).WithContext(ctx))
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch consul services: %w", err)
 	}
@@ -384,20 +531,31 @@ func (t *Atc) GetAtcEnabledServices(ctx context.Context) ([]string, error) {
 }
 
 func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
-	client, err := t.getConsulClient(r.Context())
+	ctx := r.Context()
+	client, err := t.getConsulClient(ctx)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to connect to consul: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	services, _, err := client.Catalog().Services((&api.QueryOptions{}).WithContext(r.Context()))
+	var services map[string][]string
+	err = t.traceConsulCall(ctx, "list_services", func() error {
+		var err error
+		services, _, err = client.Catalog().Services((&api.QueryOptions{}).WithContext(ctx))
+		return err
+	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to fetch services: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	// Fetch all service-resolver config entries to find deleted ones
-	entries, _, err := client.ConfigEntries().List("service-resolver", (&api.QueryOptions{}).WithContext(r.Context()))
+	var entries []api.ConfigEntry
+	err = t.traceConsulCall(ctx, "list_config_entries", func() error {
+		var err error
+		entries, _, err = client.ConfigEntries().List("service-resolver", (&api.QueryOptions{}).WithContext(ctx))
+		return err
+	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to list config entries: %v", err), http.StatusInternalServerError)
 		return
@@ -591,7 +749,12 @@ func (t *Atc) PurgeServiceResolver(ctx context.Context, name string) error {
 		return fmt.Errorf("failed to connect to consul: %w", err)
 	}
 
-	entry, _, err := client.ConfigEntries().Get("service-resolver", name, nil)
+	var entry api.ConfigEntry
+	err = t.traceConsulCall(ctx, "get_config_entry", func() error {
+		var err error
+		entry, _, err = client.ConfigEntries().Get("service-resolver", name, nil)
+		return err
+	})
 	if err != nil {
 		span.RecordError(err)
 		return fmt.Errorf("failed to fetch config entry: %w", err)
@@ -613,7 +776,10 @@ func (t *Atc) PurgeServiceResolver(ctx context.Context, name string) error {
 		t.coreLogger.InfoContext(ctx, "[DRY RUN] Would delete service-resolver config entry", slog.String("service", name))
 	} else {
 		span.AddEvent("purge_service_resolver", trace.WithAttributes(attribute.String("service", name)))
-		_, err = client.ConfigEntries().Delete("service-resolver", name, (&api.WriteOptions{}).WithContext(ctx))
+		err = t.traceConsulCall(ctx, "delete_config_entry", func() error {
+			_, err := client.ConfigEntries().Delete("service-resolver", name, (&api.WriteOptions{}).WithContext(ctx))
+			return err
+		})
 		if err != nil {
 			span.RecordError(err)
 			return fmt.Errorf("failed to delete config entry: %w", err)
@@ -669,7 +835,10 @@ func (t *Atc) ApplyFailoverOverride(ctx context.Context, service string, targetD
 		t.coreLogger.InfoContext(ctx, "[DRY RUN] Would apply manual failover override", slog.String("service", service), slog.String("target_dc", targetDc), slog.String("target_ns", targetNs), slog.String("duration", duration))
 	} else {
 		span.AddEvent("apply_failover_override", trace.WithAttributes(attribute.String("service", service), attribute.String("target_dc", targetDc), attribute.String("target_ns", targetNs)))
-		_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+		err = t.traceConsulCall(ctx, "set_config_entry", func() error {
+			_, _, err := client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+			return err
+		})
 		if err != nil {
 			return fmt.Errorf("failed to set failover override: %w", err)
 		}
@@ -719,7 +888,10 @@ func (t *Atc) TriggerManualRedirect(ctx context.Context, service string, redirec
 		t.coreLogger.InfoContext(ctx, "[DRY RUN] Would apply manual redirect override", slog.String("service", service), slog.String("redirect_dc", redirectDc), slog.String("redirect_ns", redirectNs), slog.String("duration", duration))
 	} else {
 		span.AddEvent("trigger_manual_redirect", trace.WithAttributes(attribute.String("service", service), attribute.String("redirect_dc", redirectDc), attribute.String("redirect_ns", redirectNs)))
-		_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+		err = t.traceConsulCall(ctx, "set_config_entry", func() error {
+			_, _, err := client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+			return err
+		})
 		if err != nil {
 			return fmt.Errorf("failed to set redirect override: %w", err)
 		}
@@ -886,6 +1058,12 @@ func (t *Atc) ReloadConfig(cfg Config) {
 	span.AddEvent("config_reloaded", trace.WithAttributes(attribute.Bool("dry_run", cfg.DryRun)))
 
 	t.coreLogger.InfoContext(ctx, "Configuration reloaded dynamically from file watcher", slog.Bool("dry_run", cfg.DryRun))
+	atomic.StoreInt64(&t.configLastReloadTime, time.Now().Unix())
+	if t.configReloadsCounter != nil {
+		t.configReloadsCounter.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("status", "success"),
+		))
+	}
 
 	if t.Forwarder != nil {
 		t.Forwarder.UpdateConfig(
@@ -913,12 +1091,22 @@ func (t *Atc) TriggerConfigReload() error {
 	t.coreLogger.Info("Triggering manual configuration reload")
 	if configFile := viper.GetString("config"); configFile != "" {
 		if err := viper.ReadInConfig(); err != nil {
+			if t.configReloadsCounter != nil {
+				t.configReloadsCounter.Add(context.Background(), 1, metric.WithAttributes(
+					attribute.String("status", "failure"),
+				))
+			}
 			return fmt.Errorf("failed to read config file %s: %w", configFile, err)
 		}
 	}
 
 	var newCfg Config
 	if err := viper.Unmarshal(&newCfg); err != nil {
+		if t.configReloadsCounter != nil {
+			t.configReloadsCounter.Add(context.Background(), 1, metric.WithAttributes(
+				attribute.String("status", "failure"),
+			))
+		}
 		return fmt.Errorf("failed to unmarshal configuration: %w", err)
 	}
 
@@ -967,7 +1155,12 @@ func (t *Atc) ListActiveOverrides(ctx context.Context) ([]map[string]any, error)
 		return nil, fmt.Errorf("failed to connect to consul: %w", err)
 	}
 
-	entries, _, err := client.ConfigEntries().List("service-resolver", (&api.QueryOptions{}).WithContext(ctx))
+	var entries []api.ConfigEntry
+	err = t.traceConsulCall(ctx, "list_config_entries", func() error {
+		var err error
+		entries, _, err = client.ConfigEntries().List("service-resolver", (&api.QueryOptions{}).WithContext(ctx))
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list config entries: %w", err)
 	}
@@ -1060,6 +1253,9 @@ func (t *Atc) sweepExpiredOverrides(ctx context.Context) {
 							span.RecordError(err)
 						} else {
 							t.coreLogger.InfoContext(purgeCtx, "Purged expired service-resolver override", slog.String("service", svcName))
+							if t.overridesPurgedCounter != nil {
+								t.overridesPurgedCounter.Add(purgeCtx, 1)
+							}
 						}
 					}
 					span.End()
@@ -1067,4 +1263,16 @@ func (t *Atc) sweepExpiredOverrides(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (t *Atc) traceConsulCall(ctx context.Context, op string, fn func() error) error {
+	_, span := coreTracer.Start(ctx, "consul/"+op, trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
+
+	err := fn()
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }
