@@ -1,0 +1,24 @@
+name: Validate Frontend
+on:
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/pr-frontend.yml'
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Lint Frontend
+        run: make lint-frontend
+      - name: Build Frontend
+        run: make build-frontend
+      - name: Test Frontend
+        run: make test-frontend
