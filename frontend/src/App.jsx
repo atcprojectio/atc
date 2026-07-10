@@ -28,7 +28,6 @@ function App() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [countdown, setCountdown] = useState(10);
   const [lastUpdated, setLastUpdated] = useState(null);
-  const [isLeader, setIsLeader] = useState(true);
   const [leaderComponents, setLeaderComponents] = useState({ forwarder: false, redirector: false });
   const [federation, setFederation] = useState({});
   const [token, setToken] = useState(getLocalStorageItem('atc-api-token'));
@@ -84,7 +83,6 @@ function App() {
         }
         if (leaderRes.ok) {
           const leaderData = await leaderRes.json();
-          setIsLeader(leaderData.leader);
           setAuthEnabled(!!leaderData.auth_enabled);
           setLeaderComponents(leaderData.components || { forwarder: false, redirector: false });
         }
