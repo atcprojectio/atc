@@ -1,0 +1,17 @@
+name: Validate Helm
+on:
+  pull_request:
+    paths:
+      - 'deploy/helm/atc/**'
+      - '.github/workflows/pr-helm.yml'
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint Helm Chart
+        run: helm lint deploy/helm/atc
