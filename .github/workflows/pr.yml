@@ -20,11 +20,12 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Run golangci-lint
+      - name: Install golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.12.2
           args: --timeout=5m
+          install-only: true
       - name: Lint Backend
         run: |
           export PATH=$PATH:$(go env GOPATH)/bin
