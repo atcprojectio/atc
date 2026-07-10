@@ -41,6 +41,8 @@ jobs:
           node-version: 22
       - name: Build Frontend
         run: make build-frontend
+      - name: Test Frontend
+        run: make test-frontend
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -56,8 +58,6 @@ jobs:
           rm consul_2.0.2_linux_amd64.zip
       - name: Run Integration Tests
         run: make test-integration
-      - name: Test Frontend
-        run: make test-frontend
   build:
     runs-on: ubuntu-latest
     env:
