@@ -1,6 +1,12 @@
-name: Validate PR
+name: Validate Backend
 on:
   pull_request:
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - '.github/workflows/pr-backend.yml'
 permissions:
   contents: read
   pull-requests: read
@@ -13,8 +19,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - name: Lint Frontend
-        run: make lint-frontend
       - name: Build Frontend
         run: make build-frontend
       - uses: actions/setup-go@v6
@@ -30,8 +34,6 @@ jobs:
         run: |
           export PATH=$PATH:$(go env GOPATH)/bin
           make lint-backend
-      - name: Lint Helm Chart
-        run: helm lint deploy/helm/atc
   test:
     runs-on: ubuntu-latest
     steps:
@@ -41,8 +43,6 @@ jobs:
           node-version: 22
       - name: Build Frontend
         run: make build-frontend
-      - name: Test Frontend
-        run: make test-frontend
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
