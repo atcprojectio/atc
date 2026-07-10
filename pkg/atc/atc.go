@@ -467,7 +467,6 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 			select {
 			case <-ctx.Done():
 				activeSpan.End()
-				cancelLeader()
 				_ = lock.Unlock()
 				leaderFlag.Store(false)
 				return nil
@@ -482,7 +481,6 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 						attribute.String("transition", "lost"),
 					))
 				}
-				cancelLeader()
 				leaderFlag.Store(false)
 			}
 		}
@@ -1266,7 +1264,7 @@ func (t *Atc) sweepExpiredOverrides(ctx context.Context) {
 }
 
 func (t *Atc) traceConsulCall(ctx context.Context, op string, fn func() error) error {
-	_, span := coreTracer.Start(ctx, "consul/"+op, trace.WithSpanKind(trace.SpanKindClient))
+	ctx, span := coreTracer.Start(ctx, "consul/"+op, trace.WithSpanKind(trace.SpanKindClient))
 	defer span.End()
 
 	err := fn()
