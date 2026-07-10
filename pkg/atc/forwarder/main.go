@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/consul/api"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
@@ -40,7 +41,7 @@ type cachedStrategies struct {
 }
 
 type writeCanceler interface {
-	CancelPendingWrite(svcName string)
+	CancelPendingWrite(ctx context.Context, svcName string)
 }
 
 type Forwarder struct {
@@ -65,8 +66,13 @@ type Forwarder struct {
 	writeTimers   map[string]*time.Timer
 	redirector    writeCanceler
 
-	reconcileCounter  metric.Int64Counter
-	reconcileDuration metric.Float64Histogram
+	reconcileCounter        metric.Int64Counter
+	reconcileDuration       metric.Float64Histogram
+	consulRequestsCounter   metric.Int64Counter
+	consulDurationHistogram metric.Float64Histogram
+	coalescedEventsCounter  metric.Int64Counter
+	dampeningTriggered      metric.Int64Counter
+	dampeningCancelled      metric.Int64Counter
 }
 
 func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace, writeRateLimit string, failoverStrategies map[string]FailoverStrategy, dampeningPeriod, minDampeningPeriod string, dryRun bool) (*Forwarder, error) {
@@ -86,24 +92,86 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 		return nil, err
 	}
 
-	return &Forwarder{
-		logger:             logger,
-		consulAddr:         consulAddr,
-		consulToken:        consulToken,
-		consulDC:           consulDC,
-		consulNamespace:    consulNamespace,
-		writeRateLimit:     writeRateLimit,
-		watcher:            watcher.New(logger, consulAddr, consulToken, consulDC, consulNamespace),
-		failoverStrategies: failoverStrategies,
-		dampeningPeriod:    dampeningPeriod,
-		minDampeningPeriod: minDampeningPeriod,
-		dryRun:             dryRun,
-		strategiesCache:    make(map[string]cachedStrategies),
-		pendingWrites:      make(map[string]*api.ServiceResolverConfigEntry),
-		writeTimers:        make(map[string]*time.Timer),
-		reconcileCounter:   reconcileCounter,
-		reconcileDuration:  reconcileDuration,
-	}, nil
+	consulRequestsCounter, err := meter.Int64Counter(
+		"atc_consul_requests_total",
+		metric.WithDescription("Total number of Consul API requests from forwarder"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	consulDurationHistogram, err := meter.Float64Histogram(
+		"atc_consul_request_duration_seconds",
+		metric.WithDescription("Duration of Consul API requests from forwarder in seconds"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	coalescedEventsCounter, err := meter.Int64Counter(
+		"atc_reconcile_coalesced_events_total",
+		metric.WithDescription("Total number of watch events coalesced (debounced)"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	dampeningTriggered, err := meter.Int64Counter(
+		"atc_dampening_writes_triggered_total",
+		metric.WithDescription("Total number of scheduled dampening writes"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	dampeningCancelled, err := meter.Int64Counter(
+		"atc_dampening_writes_cancelled_total",
+		metric.WithDescription("Total number of cancelled dampening writes"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	f := &Forwarder{
+		logger:                  logger,
+		consulAddr:              consulAddr,
+		consulToken:             consulToken,
+		consulDC:                consulDC,
+		consulNamespace:         consulNamespace,
+		writeRateLimit:          writeRateLimit,
+		watcher:                 watcher.New(logger, consulAddr, consulToken, consulDC, consulNamespace),
+		failoverStrategies:      failoverStrategies,
+		dampeningPeriod:         dampeningPeriod,
+		minDampeningPeriod:      minDampeningPeriod,
+		dryRun:                  dryRun,
+		strategiesCache:         make(map[string]cachedStrategies),
+		pendingWrites:           make(map[string]*api.ServiceResolverConfigEntry),
+		writeTimers:             make(map[string]*time.Timer),
+		reconcileCounter:        reconcileCounter,
+		reconcileDuration:       reconcileDuration,
+		consulRequestsCounter:   consulRequestsCounter,
+		consulDurationHistogram: consulDurationHistogram,
+		coalescedEventsCounter:  coalescedEventsCounter,
+		dampeningTriggered:      dampeningTriggered,
+		dampeningCancelled:      dampeningCancelled,
+	}
+
+	_, err = meter.Int64ObservableGauge(
+		"atc_dampening_pending_writes",
+		metric.WithDescription("Number of pending writes currently dampened"),
+		metric.WithInt64Callback(func(_ context.Context, obsrv metric.Int64Observer) error {
+			f.schedMu.Lock()
+			val := int64(len(f.pendingWrites))
+			f.schedMu.Unlock()
+			obsrv.Observe(val, metric.WithAttributes(attribute.String("module", "forwarder")))
+			return nil
+		}),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return f, nil
 }
 
 func (f *Forwarder) SetRedirector(r writeCanceler) {
@@ -112,10 +180,21 @@ func (f *Forwarder) SetRedirector(r writeCanceler) {
 	f.redirector = r
 }
 
-func (f *Forwarder) CancelPendingWrite(svcName string) {
+func (f *Forwarder) CancelPendingWrite(ctx context.Context, svcName string) {
 	f.schedMu.Lock()
 	defer f.schedMu.Unlock()
 	if timer, ok := f.writeTimers[svcName]; ok {
+		f.logger.Info("Cancelled pending service-resolver write", slog.String("service", svcName), slog.String("reason", "reconciliation_canceled"))
+		
+		span := trace.SpanFromContext(ctx)
+		span.AddEvent("dampening_cancelled", trace.WithAttributes(
+			attribute.String("service", svcName),
+			attribute.String("reason", "reconciliation_canceled"),
+		))
+
+		if f.dampeningCancelled != nil {
+			f.dampeningCancelled.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "cancelled")))
+		}
 		timer.Stop()
 		delete(f.writeTimers, svcName)
 	}
@@ -194,6 +273,9 @@ func (f *Forwarder) Run(ctx context.Context) error {
 						debounceTimer.Stop()
 					}
 					f.logger.InfoContext(ctx, "Coalescing/debouncing watcher events, scheduling reconciliation", slog.Duration("window", rateLimit))
+					if f.coalescedEventsCounter != nil {
+						f.coalescedEventsCounter.Add(ctx, 1)
+					}
 					debounceTimer = time.NewTimer(rateLimit)
 					timerChan = debounceTimer.C
 				}
@@ -231,7 +313,12 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 		))
 	}()
 
-	services, _, err := client.Catalog().Services((&api.QueryOptions{}).WithContext(ctx))
+	var services map[string][]string
+	err = f.traceConsulCall(ctx, "list_services", func() error {
+		var err error
+		services, _, err = client.Catalog().Services((&api.QueryOptions{}).WithContext(ctx))
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("failed to fetch consul services: %w", err)
 	}
@@ -243,7 +330,12 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 	}
 
 	// 1. Fetch all existing config entries of type service-resolver
-	entries, _, err := client.ConfigEntries().List("service-resolver", (&api.QueryOptions{}).WithContext(ctx))
+	var entries []api.ConfigEntry
+	err = f.traceConsulCall(ctx, "list_config_entries", func() error {
+		var err error
+		entries, _, err = client.ConfigEntries().List("service-resolver", (&api.QueryOptions{}).WithContext(ctx))
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("failed to list service-resolver config entries: %w", err)
 	}
@@ -288,7 +380,7 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 
 			// Cancel any pending redirect writes in redirector
 			if f.redirector != nil {
-				f.redirector.CancelPendingWrite(svcName)
+				f.redirector.CancelPendingWrite(ctx, svcName)
 			}
 
 			// Determine failover strategy name
@@ -382,14 +474,17 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 
 				dampening := getDampeningDuration(tags, dampeningPeriod, minDampeningPeriod)
 				if dampening <= 0 {
-					f.CancelPendingWrite(svcName)
+					f.CancelPendingWrite(ctx, svcName)
 					if f.dryRun {
 						span.AddEvent("dry_run_set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
 						f.logger.InfoContext(ctx, "[DRY RUN] Would create/update failover service-resolver immediately", slog.String("service", svcName), slog.String("failover-strategy", failoverStrategyName))
 					} else {
 						span.AddEvent("set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
 						f.logger.InfoContext(ctx, "Creating/Updating failover service-resolver immediately", slog.String("service", svcName), slog.String("failover-strategy", failoverStrategyName))
-						_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+						err = f.traceConsulCall(ctx, "set_config_entry", func() error {
+							_, _, err := client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+							return err
+						})
 						if err != nil {
 							f.logger.ErrorContext(ctx, "Failed to set failover service-resolver", slog.String("service", svcName), slog.Any("error", err))
 						}
@@ -413,7 +508,10 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 					} else {
 						span.AddEvent("delete_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
 						f.logger.InfoContext(ctx, "Deleting service-resolver because atc.enabled tag was removed", slog.String("service", svcName))
-						_, err = client.ConfigEntries().Delete("service-resolver", svcName, (&api.WriteOptions{}).WithContext(ctx))
+						err = f.traceConsulCall(ctx, "delete_config_entry", func() error {
+							_, err := client.ConfigEntries().Delete("service-resolver", svcName, (&api.WriteOptions{}).WithContext(ctx))
+							return err
+						})
 						if err != nil {
 							f.logger.ErrorContext(ctx, "Failed to delete service-resolver", slog.String("service", svcName), slog.Any("error", err))
 						}
@@ -512,8 +610,13 @@ func (f *Forwarder) scheduleWrite(svcName string, entry *api.ServiceResolverConf
 	f.schedMu.Lock()
 	defer f.schedMu.Unlock()
 
+	if f.dampeningTriggered != nil {
+		f.dampeningTriggered.Add(context.Background(), 1)
+	}
+
 	if timer, ok := f.writeTimers[svcName]; ok {
 		if !entriesEqual(f.pendingWrites[svcName], entry) {
+			f.logger.Info("Resetting dampening timer for pending write", slog.String("service", svcName), slog.Duration("dampening", dampening))
 			f.pendingWrites[svcName] = entry
 			timer.Reset(dampening)
 		}
@@ -552,11 +655,47 @@ func (f *Forwarder) executeScheduledWrite(svcName string) {
 	} else {
 		span.AddEvent("scheduled_set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
 		f.logger.Info("Executing scheduled failover write for service-resolver", slog.String("service", svcName))
-		_, _, err = client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+		err = f.traceConsulCall(ctx, "set_config_entry", func() error {
+			_, _, err := client.ConfigEntries().Set(entry, (&api.WriteOptions{}).WithContext(ctx))
+			return err
+		})
 		if err != nil {
 			f.logger.Error("Failed to write scheduled failover service-resolver entry", slog.String("service", svcName), slog.Any("error", err))
 			span.RecordError(err)
 		}
+	}
+}
+
+func (f *Forwarder) traceConsulCall(ctx context.Context, op string, fn func() error) error {
+	ctx, span := tracer.Start(ctx, "consul/"+op, trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
+
+	start := time.Now()
+	err := fn()
+	f.recordConsulCall(ctx, op, start, err)
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
+}
+
+func (f *Forwarder) recordConsulCall(ctx context.Context, op string, start time.Time, err error) {
+	status := "success"
+	if err != nil {
+		status = "failure"
+	}
+	if f.consulRequestsCounter != nil {
+		f.consulRequestsCounter.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("operation", op),
+			attribute.String("status", status),
+		))
+	}
+	if f.consulDurationHistogram != nil {
+		f.consulDurationHistogram.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
+			attribute.String("operation", op),
+		))
 	}
 }
 

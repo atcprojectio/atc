@@ -196,7 +196,7 @@ type mockWriteCanceler struct {
 	cancelled []string
 }
 
-func (m *mockWriteCanceler) CancelPendingWrite(svcName string) {
+func (m *mockWriteCanceler) CancelPendingWrite(ctx context.Context, svcName string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cancelled = append(m.cancelled, svcName)

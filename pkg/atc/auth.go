@@ -7,6 +7,9 @@ import (
 	"strings"
 
 	"github.com/hashicorp/consul/api"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func (t *Atc) authMiddleware(next http.Handler) http.Handler {
@@ -18,6 +21,11 @@ func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 		consulAddr := t.Cfg.ConsulAddr
 		consulDC := t.Cfg.ConsulDC
 		t.cfgMu.RUnlock()
+
+		span := trace.SpanFromContext(r.Context())
+		span.SetAttributes(
+			attribute.Bool("auth.enabled", authEnabled),
+		)
 
 		if !authEnabled {
 			next.ServeHTTP(w, r)
@@ -53,6 +61,11 @@ func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		if token == "" {
+			span.SetStatus(codes.Error, "unauthorized: missing token")
+			span.SetAttributes(
+				attribute.String("auth.status", "failure"),
+				attribute.String("auth.error", "missing_token"),
+			)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized: missing token"})
@@ -86,11 +99,20 @@ func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		if !authorized {
+			span.SetStatus(codes.Error, "unauthorized: invalid token")
+			span.SetAttributes(
+				attribute.String("auth.status", "failure"),
+				attribute.String("auth.error", "invalid_token"),
+			)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized: invalid token"})
 			return
 		}
+
+		span.SetAttributes(
+			attribute.String("auth.status", "success"),
+		)
 
 		// Propagate token in context
 		ctx := context.WithValue(r.Context(), tokenContextKey, token)
