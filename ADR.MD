@@ -683,6 +683,7 @@ The native Model Context Protocol (MCP) server currently shares the main applica
 Move the MCP server to a dedicated listener port (default `:8092` / CLI flag `--mcp-port` / configuration `server.mcp_port`):
 - Reject moving the MCP server to the metrics port (`:8089`) due to a critical authentication conflict (the metrics port is unauthenticated, while MCP tools require write authorization/authentication).
 - Run a third isolated `http.Server` instance dedicated to MCP SSE connections when `--mcp-enabled=true` (default).
+- Running the MCP server should be optional. Setting the dedicated port to `0` results in the MCP server not being started
 
 ### Consequences
 - **Benefits**:

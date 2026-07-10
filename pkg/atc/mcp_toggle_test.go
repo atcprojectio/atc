@@ -26,7 +26,7 @@ func TestMcpEnabled(t *testing.T) {
 	req := httptest.NewRequest("GET", "/mcp", nil)
 	w := httptest.NewRecorder()
 
-	atcInstance.Server.Mux.ServeHTTP(w, req)
+	atcInstance.Server.McpMux.ServeHTTP(w, req)
 
 	resp := w.Result()
 	defer resp.Body.Close()
@@ -52,7 +52,7 @@ func TestMcpDisabled(t *testing.T) {
 	req := httptest.NewRequest("GET", "/mcp", nil)
 	w := httptest.NewRecorder()
 
-	atcInstance.Server.Mux.ServeHTTP(w, req)
+	atcInstance.Server.McpMux.ServeHTTP(w, req)
 
 	resp := w.Result()
 	defer resp.Body.Close()

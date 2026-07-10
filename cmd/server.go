@@ -34,6 +34,9 @@ var serverCmd = &cobra.Command{
 		if cfg.Server.MetricsListenPort == 0 {
 			cfg.Server.MetricsListenPort = viper.GetInt("metrics_port")
 		}
+		if cfg.Server.McpListenPort == 0 {
+			cfg.Server.McpListenPort = viper.GetInt("mcp_port")
+		}
 		if len(cfg.Target) == 0 {
 			cfg.Target = viper.GetStringSlice("target")
 		}
@@ -80,6 +83,9 @@ var serverCmd = &cobra.Command{
 				}
 				if newCfg.Server.MetricsListenPort == 0 {
 					newCfg.Server.MetricsListenPort = viper.GetInt("metrics_port")
+				}
+				if newCfg.Server.McpListenPort == 0 {
+					newCfg.Server.McpListenPort = viper.GetInt("mcp_port")
 				}
 				if len(newCfg.Target) == 0 {
 					newCfg.Target = viper.GetStringSlice("target")
@@ -150,6 +156,9 @@ func init() {
 
 	serverCmd.PersistentFlags().Bool("mcp-enabled", true, "Enable serving the Model Context Protocol (MCP) server.")
 	_ = viper.BindPFlag("mcp_enabled", serverCmd.PersistentFlags().Lookup("mcp-enabled"))
+
+	serverCmd.PersistentFlags().Int("mcp-port", 8092, "port to expose MCP server on.")
+	_ = viper.BindPFlag("mcp_port", serverCmd.PersistentFlags().Lookup("mcp-port"))
 
 	serverCmd.PersistentFlags().Bool("dry-run", false, "Disable writing to Consul, log actions instead.")
 	_ = viper.BindPFlag("dry_run", serverCmd.PersistentFlags().Lookup("dry-run"))

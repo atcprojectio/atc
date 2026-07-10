@@ -322,7 +322,7 @@ To enable the ATC Model Context Protocol (MCP) server in **Claude Desktop**, you
       "args": [
         "-y",
         "mcp-remote",
-        "http://localhost:8088/mcp"
+        "http://localhost:8092/mcp"
       ]
     }
   }

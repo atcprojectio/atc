@@ -12,11 +12,7 @@ All roadmap Must Have items have been successfully implemented!
 
 ## Should Have
 
-### 1. Dedicated Port for MCP Server
-Implement the accepted isolated MCP listener configuration as defined in [ADR 0028](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/ADR.MD#L669):
-- Add a new configuration parameter `server.mcp_port` (default `8092`) and a corresponding CLI flag `--mcp-port`.
-- Start a third parallel HTTP listener exclusively for MCP Server-Sent Events (SSE) traffic when `server.mcp_enabled: true` (default).
-- Wire the new port mapping into Kubernetes Helm charts, Nomad jobs, and local Docker Compose files.
+All roadmap Should Have items have been successfully implemented!
 
 ---
 

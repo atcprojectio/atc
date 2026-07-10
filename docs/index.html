@@ -263,6 +263,12 @@ brew install atc</code></pre>
               <td>Port to expose the Prometheus scraping endpoint.</td>
             </tr>
             <tr>
+              <td><code>--mcp-port</code></td>
+              <td><code>MCP_PORT</code></td>
+              <td>8092</td>
+              <td>Port to expose the Model Context Protocol (MCP) server.</td>
+            </tr>
+            <tr>
               <td><code>--consul_addr</code></td>
               <td><code>CONSUL_HTTP_ADDR</code></td>
               <td>localhost:8500</td>
@@ -831,10 +837,10 @@ make obs-up</code></pre>
       <section id="mcp-server" class="content-section">
         <div class="badge">Agent API</div>
         <h1>Model Context Protocol (MCP) Server</h1>
-        <p>ATC natively exposes a Model Context Protocol (MCP) server over HTTP at <code>/mcp</code> using Server-Sent Events (SSE). This allows AI coding assistants, autonomous agents, and CLI tools to interact with ATC dynamically, inspect routing policies, and apply manual failovers.</p>
+        <p>ATC natively exposes a Model Context Protocol (MCP) server over HTTP at <code>/mcp</code> on a dedicated listener port (default <code>8092</code>) using Server-Sent Events (SSE). This allows AI coding assistants, autonomous agents, and CLI tools to interact with ATC dynamically, inspect routing policies, and apply manual failovers without socket starvation on the main dashboard port.</p>
 
         <div class="glass-panel" style="padding: 1.2rem; margin: 1.5rem 0; border-left: 4px solid var(--accent-blue);">
-          <strong>Optional MCP Server:</strong> The MCP server is enabled by default. In environments where you want to disable the MCP server (e.g., for security constraints or minimal resource footprint), you can set <code>server.mcp_enabled: false</code> in your configuration file, or pass the <code>--mcp-enabled=false</code> command-line flag. When disabled, requests to <code>/mcp</code> will return a <code>404 Not Found</code> response with "MCP server is disabled".
+          <strong>Optional MCP Server:</strong> The MCP server is enabled by default. In environments where you want to disable the MCP server (e.g., for security constraints or minimal resource footprint), you can set <code>server.mcp_enabled: false</code> or <code>server.mcp_port: 0</code> in your configuration file, or pass the <code>--mcp-enabled=false</code> or <code>--mcp-port=0</code> command-line flags. When disabled, the MCP listener is not started.
         </div>
 
         <h2>SSE Connection Details</h2>
@@ -842,7 +848,7 @@ make obs-up</code></pre>
         <pre><code class="language-bash"># Establish connection (SSE)
 curl -N -H "Accept: application/json, text/event-stream" \
      -H "Authorization: Bearer &lt;token&gt;" \
-     http://localhost:8088/mcp
+     http://localhost:8092/mcp
 
 # Call tools by posting JSON-RPC requests to the session endpoint</code></pre>
 

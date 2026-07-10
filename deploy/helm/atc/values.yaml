@@ -40,6 +40,10 @@ metricsService:
   type: ClusterIP
   port: 8089
 
+mcpService:
+  type: ClusterIP
+  port: 8092
+
 resources:
   limits:
     cpu: 200m

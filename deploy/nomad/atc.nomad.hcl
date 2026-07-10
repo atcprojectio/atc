@@ -54,6 +54,9 @@ job "atc" {
       port "metrics" {
         to = 8089
       }
+      port "mcp" {
+        to = 8092
+      }
     }
 
     service {
@@ -82,12 +85,18 @@ job "atc" {
       }
     }
 
+    service {
+      name = "atc-mcp"
+      port = "mcp"
+      tags = ["mcp", "ai-agent"]
+    }
+
     task "atc" {
       driver = "docker"
 
       config {
         image = "atcprojectio/atc:${var.image_tag}"
-        ports = ["http", "metrics"]
+        ports = ["http", "metrics", "mcp"]
         args = [
           "server",
           "--config", "local/atc-config.yaml"
@@ -97,6 +106,7 @@ job "atc" {
       env {
         ATC_PORT             = "${NOMAD_PORT_http}"
         ATC_METRICS_PORT     = "${NOMAD_PORT_metrics}"
+        ATC_MCP_PORT         = "${NOMAD_PORT_mcp}"
         ATC_CONSUL_ADDR      = "${var.consul_address}"
         ATC_CONSUL_DC        = "${var.consul_dc}"
         ATC_CONSUL_NAMESPACE = "${var.consul_namespace}"

@@ -20,6 +20,7 @@ var frontendFS embed.FS
 type Config struct {
 	HTTPListenPort    int    `yaml:"http_listen_port" mapstructure:"http_listen_port"`
 	MetricsListenPort int    `yaml:"metrics_listen_port" mapstructure:"metrics_listen_port"`
+	McpListenPort     int    `yaml:"mcp_port" mapstructure:"mcp_port"`
 	MetricsNamespace  string `yaml:"metrics_namespace" mapstructure:"metrics_namespace"`
 	LogFormat         string `yaml:"log_format" mapstructure:"log_format"`
 	LogLevel          string `yaml:"log_level" mapstructure:"log_level"`
@@ -32,11 +33,13 @@ type Server struct {
 	logger     *slog.Logger
 	Mux        *http.ServeMux
 	MetricsMux *http.ServeMux
+	McpMux     *http.ServeMux
 }
 
 func New(cfg Config, logger *slog.Logger) (*Server, error) {
 	mux := http.NewServeMux()
 	metricsMux := http.NewServeMux()
+	mcpMux := http.NewServeMux()
 
 	if cfg.UiEnabled {
 		sub, err := fs.Sub(frontendFS, "dist")
@@ -69,6 +72,7 @@ func New(cfg Config, logger *slog.Logger) (*Server, error) {
 		logger:     logger,
 		Mux:        mux,
 		MetricsMux: metricsMux,
+		McpMux:     mcpMux,
 	}, nil
 }
 
@@ -87,7 +91,18 @@ func (s *Server) Run(ctx context.Context) error {
 		ReadHeaderTimeout: 3 * time.Second,
 	}
 
-	errChan := make(chan error, 2)
+	var mcpServer *http.Server
+	mcpEnabled := s.cfg.McpEnabled && s.cfg.McpListenPort > 0
+	if mcpEnabled {
+		mcpAddr := fmt.Sprintf(":%d", s.cfg.McpListenPort)
+		mcpServer = &http.Server{
+			Addr:              mcpAddr,
+			Handler:           otelhttp.NewHandler(s.McpMux, "atc-mcp-server"),
+			ReadHeaderTimeout: 3 * time.Second,
+		}
+	}
+
+	errChan := make(chan error, 3)
 
 	go func() {
 		s.logger.InfoContext(ctx, "HTTP server listening", slog.String("address", mainAddr))
@@ -103,9 +118,19 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
+	if mcpEnabled {
+		go func() {
+			mcpAddr := fmt.Sprintf(":%d", s.cfg.McpListenPort)
+			s.logger.InfoContext(ctx, "MCP server listening", slog.String("address", mcpAddr))
+			if err := mcpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errChan <- fmt.Errorf("mcp server error: %w", err)
+			}
+		}()
+	}
+
 	select {
 	case <-ctx.Done():
-		s.logger.InfoContext(ctx, "shutting down HTTP and Metrics servers")
+		s.logger.InfoContext(ctx, "shutting down HTTP, Metrics, and MCP servers")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
@@ -120,13 +145,25 @@ func (s *Server) Run(ctx context.Context) error {
 				shutdownErr = fmt.Errorf("metrics server shutdown error: %w", err)
 			}
 		}
+		if mcpEnabled {
+			if err := mcpServer.Shutdown(shutdownCtx); err != nil {
+				if shutdownErr != nil {
+					shutdownErr = fmt.Errorf("%v; mcp server shutdown error: %w", shutdownErr, err)
+				} else {
+					shutdownErr = fmt.Errorf("mcp server shutdown error: %w", err)
+				}
+			}
+		}
 		return shutdownErr
 	case err := <-errChan:
-		// Attempt to shut down the other running server
+		// Attempt to shut down the other running servers
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = mainServer.Shutdown(shutdownCtx)
 		_ = metricsServer.Shutdown(shutdownCtx)
+		if mcpEnabled {
+			_ = mcpServer.Shutdown(shutdownCtx)
+		}
 		return err
 	}
 }

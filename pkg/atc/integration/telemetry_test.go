@@ -70,6 +70,7 @@ func TestTelemetryAndHealthCheck(t *testing.T) {
 
 		httpPort := getFreePort(t)
 		metricsPort := getFreePort(t)
+		mcpPort := getFreePort(t)
 
 		cfg := atc.Config{
 			Name:               "integration-test-node",
@@ -82,6 +83,8 @@ func TestTelemetryAndHealthCheck(t *testing.T) {
 				LogLevel:          "error",
 				HTTPListenPort:    httpPort,
 				MetricsListenPort: metricsPort,
+				McpListenPort:     mcpPort,
+				McpEnabled:        true,
 			},
 			Strategies: atc.StrategiesConfig{
 				Failover: map[string]forwarder.FailoverStrategy{
@@ -132,6 +135,21 @@ func TestTelemetryAndHealthCheck(t *testing.T) {
 			body, err := io.ReadAll(readyResp.Body)
 			So(err, ShouldBeNil)
 			So(string(body), ShouldEqual, "OK")
+
+			Convey("And when querying the dedicated MCP endpoint", func() {
+				var mcpResp *http.Response
+				for i := 0; i < 50; i++ {
+					resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/mcp", mcpPort))
+					if err == nil {
+						mcpResp = resp
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+				So(mcpResp, ShouldNotBeNil)
+				defer mcpResp.Body.Close()
+				So(mcpResp.StatusCode, ShouldNotEqual, http.StatusNotFound)
+			})
 
 			Convey("And when registering a service to trigger forwarder reconciliation", func() {
 				reg := &api.AgentServiceRegistration{
