@@ -21,7 +21,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Install golangci-lint
-        run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.61.0
+        run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.12.2
       - name: Lint Backend
         run: |
           export PATH=$PATH:$(go env GOPATH)/bin
@@ -46,10 +46,10 @@ jobs:
       - run: make test
       - name: Install Consul
         run: |
-          wget https://releases.hashicorp.com/consul/2.0.1/consul_2.0.1_linux_amd64.zip
-          unzip consul_2.0.1_linux_amd64.zip
+          wget https://releases.hashicorp.com/consul/2.0.2/consul_2.0.2_linux_amd64.zip
+          unzip consul_2.0.2_linux_amd64.zip
           sudo mv consul /usr/local/bin/
-          rm consul_2.0.1_linux_amd64.zip
+          rm consul_2.0.2_linux_amd64.zip
       - name: Run Integration Tests
         run: make test-integration
       - name: Test Frontend

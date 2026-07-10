@@ -174,6 +174,7 @@ function App() {
     Promise.resolve().then(() => {
       fetchServices(false);
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -193,6 +194,7 @@ function App() {
     }, 1000);
 
     return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRefresh]);
 
   const formatExpiry = (expiresAtStr) => {
