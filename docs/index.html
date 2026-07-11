@@ -1000,6 +1000,31 @@ curl -N -H "Accept: application/json, text/event-stream" \
             </tr>
           </tbody>
         </table>
+
+        <h2>Claude Desktop MCP Integration</h2>
+        <p>To enable the ATC Model Context Protocol (MCP) server in <strong>Claude Desktop</strong>, bridge the Streamable HTTP SSE transport to Claude's stdio interface using the official <code>mcp-remote</code> bridge client.</p>
+
+        <ol>
+          <li>Open the Claude Desktop configuration file:
+            <ul>
+              <li><strong>macOS:</strong> <code>~/Library/Application Support/Claude/claude_desktop_config.json</code></li>
+              <li><strong>Windows:</strong> <code>%APPDATA%\Claude\claude_desktop_config.json</code></li>
+            </ul>
+          </li>
+          <li>Add the <code>atc</code> configuration block under <code>mcpServers</code> pointing to the remote HTTP SSE endpoint:</li>
+        </ol>
+        <pre><code class="language-json">{
+  "mcpServers": {
+    "atc": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://localhost:8092/mcp"
+      ]
+    }
+  }
+}</code></pre>
       </section>
 
       <!-- Authentication & Security Section -->

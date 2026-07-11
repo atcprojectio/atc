@@ -718,4 +718,36 @@ Operators required a way to query cluster-wide leadership states, identify which
 - **Consequences**:
   - The `/api/leader` payload size is slightly larger, but remains backward compatible.
 
+---
+
+## ADR 0030: Documentation Split Policy (README vs. Technical Reference Site)
+
+### Status
+Accepted
+
+### Date
+2026-07-12
+
+### Context
+As the project evolved, the `README.md` file grew significantly in size (~380 lines), mixing high-level project introductions and setup instructions with detailed API response schemas, RBAC configurations, predefined strategy formats, and Claude Desktop MCP integrations. This made the file difficult to scan for quick onboarding. Since we already maintain a comprehensive, custom-built single-page reference documentation site (`docs/index.html`), we need a policy to split documentation concerns.
+
+### Decision
+- **README.md (Onboarding & Quickstart)**: Limit to high-level features, quick installation commands (`brew` and source compiling), basic running guidelines (key flags), and short developer testing commands. All detailed configuration guides, payload schemas, and client integrations must be replaced with links pointing to the reference site. The file should be kept short (under 150 lines).
+- **docs/index.html (Comprehensive Reference)**: Serve as the single source of truth for detailed technical documentation, including:
+  - Complete configuration YAML structures.
+  - Exhaustive REST API request/response JSON schemas.
+  - Step-by-step RBAC and Consul token delegation details.
+  - Advanced features (dampening, dry-run, reload, overrides).
+  - Model Context Protocol (MCP) details and Claude Desktop integration configs.
+  - Complete OpenTelemetry metrics tables.
+
+### Consequences
+- **Benefits**:
+  - `README.md` remains clean, highly readable, and focused on quick onboarding.
+  - Prevents duplication of schemas and configurations between `README.md` and `docs/index.html`.
+  - Encourages developers to read and contribute to the single-page docs portal.
+- **Consequences**:
+  - Offline users reading the repository directly on GitHub must click through to `docs/` or view pages online to read detailed API schemas.
+
+
 
