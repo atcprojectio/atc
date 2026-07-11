@@ -693,4 +693,29 @@ Move the MCP server to a dedicated listener port (default `:8092` / CLI flag `--
 - **Consequences**:
   - Operators must configure and bind an additional port (e.g. `:8092`) in deployment templates (Helm, Nomad, Docker Compose).
 
+---
+
+## ADR 0029: CLI Leader Management and Detailed Leader Discovery
+
+### Status
+Accepted
+
+### Date
+2026-07-11
+
+### Context
+Operators required a way to query cluster-wide leadership states, identify which node is the current active leader for each module, and execute administrative force-unlock actions to resolve hung locks without needing direct access to the Consul CLI or agent commands.
+
+### Decision
+- **Add native CLI subcommands:** Implement `atc leader status` and `atc leader force-unlock --module=<module>` to display the leadership topology and release component locks.
+- **Extend REST API:** Update `/api/leader` response to return a detailed `modules` block containing the lock key, active Consul session ID, and owner node name for each module, while retaining legacy top-level keys for backward compatibility.
+- **Standardize Default Node Name:** Populate the node `Name` configuration fallback (`atc-node-<hostname>`) at instantiation time in `atc.New()` to ensure consistent status comparisons between the CLI and running daemons.
+
+### Consequences
+- **Benefits**:
+  - Operators can inspect and resolve HA lock states cleanly using native CLI utilities without exposing Consul's internal structures.
+  - Consistent node name resolution eliminates status reporting mismatches between the dashboard and CLI.
+- **Consequences**:
+  - The `/api/leader` payload size is slightly larger, but remains backward compatible.
+
 

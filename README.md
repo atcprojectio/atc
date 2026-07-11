@@ -145,6 +145,22 @@ ATC supports linting and validating configuration files (e.g., `strategies.yaml`
 
 This parses and verifies all configuration options (such as target modules, dampening durations, HA election parameters, failover targets, and connect timeouts) against schema validation rules. It exits with code `0` if the configuration is valid, and prints detailed error messages to stderr and exits with code `1` if validation fails—making it ideal for integration into GitOps CI/CD pipelines.
 
+### Leader Election & Status Management
+
+ATC provides administrative subcommands under `leader` to query active leaders and force release locks:
+
+- **Check Leadership Status:**
+  ```bash
+  ./dist/atc leader status
+  ```
+  This prints a formatted list of all active modules, their status (LEADER/STANDBY), Consul lock keys, current leader nodes, and session IDs.
+
+- **Force Unlock/Release Lock:**
+  ```bash
+  ./dist/atc leader force-unlock --module=<forwarder|redirector>
+  ```
+  This forces the stand-down of the active leader of the specified component by destroying its associated Consul session.
+
 ---
 
 ## Predefined Routing & Failover Strategies
@@ -237,7 +253,23 @@ Sensitive tokens in the `actor` field are automatically masked (e.g., `abc...xyz
 - `/ready` (GET): Simple readiness check (`200 OK`, bypassed by authentication).
 - `/services` (GET): Prints a formatted ASCII table showing the status of all active components.
 - `/api/services` (GET): JSON list of active Consul services tagged with `atc.enabled=true`.
-- `/api/leader` (GET): JSON representing leadership status and component details (e.g., `{"leader":true,"components":{"forwarder":true,"redirector":true}}`).
+- `/api/leader` (GET): JSON representing leadership status, current active leader node names, and component details:
+  ```json
+  {
+    "leader": true,
+    "auth_enabled": false,
+    "components": {"forwarder": true, "redirector": true},
+    "local_node": "atc-node-01",
+    "modules": {
+      "forwarder": {
+        "is_leader": true,
+        "leader_node": "atc-node-01",
+        "lock_key": "atc/leader/lock/forwarder",
+        "session_id": "c1a9a8be-e086-455b-b9d9-2ea11e1f76f7"
+      }
+    }
+  }
+  ```
 - `/api/federation` (GET): JSON list of WAN-federated datacenters and connection statuses.
 - `/api/overrides` (POST): Manually override automatic failover/redirect routes in Consul.
   - JSON payload:

@@ -91,6 +91,14 @@ type Atc struct {
 }
 
 func New(cfg Config) (*Atc, error) {
+	if cfg.Name == "" {
+		if hn, err := os.Hostname(); err == nil && hn != "" {
+			cfg.Name = "atc-node-" + hn
+		} else {
+			cfg.Name = "atc-node"
+		}
+	}
+
 	logger := initLogger(cfg.Server.LogFormat, cfg.Server.LogLevel)
 
 	otelShutdown, err := telemetry.Init(context.Background(), "atc")
@@ -376,11 +384,6 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 		SessionName: "atc-leader-election",
 	}
 
-	lock, err := client.LockOpts(opts)
-	if err != nil {
-		return fmt.Errorf("failed to configure consul lock: %w", err)
-	}
-
 	t.coreLogger.InfoContext(ctx, "Starting leader election loop", slog.String("lock_key", lockKey), slog.String("module", moduleName))
 
 	ctx, span := coreTracer.Start(ctx, "ha/LeadershipLock", trace.WithAttributes(
@@ -394,6 +397,17 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 		case <-ctx.Done():
 			return nil
 		default:
+		}
+
+		lock, err := client.LockOpts(opts)
+		if err != nil {
+			t.coreLogger.ErrorContext(ctx, "failed to configure consul lock, retrying in 5s", slog.Any("error", err), slog.String("lock_key", lockKey))
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(5 * time.Second):
+				continue
+			}
 		}
 
 		t.coreLogger.InfoContext(ctx, "Attempting to acquire leadership lock...", slog.String("lock_key", lockKey))
@@ -444,6 +458,7 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 			case <-ctx.Done():
 				activeSpan.End()
 				cancelLeader()
+				t.coreLogger.InfoContext(ctx, "Releasing leadership lock in Consul on graceful shutdown...", slog.String("lock_key", lockKey))
 				_ = lock.Unlock()
 				leaderFlag.Store(false)
 				wg.Wait()
@@ -468,6 +483,7 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 			case <-ctx.Done():
 				activeSpan.End()
 				cancelLeader()
+				t.coreLogger.InfoContext(ctx, "Releasing leadership lock in Consul on graceful shutdown...", slog.String("lock_key", lockKey))
 				_ = lock.Unlock()
 				leaderFlag.Store(false)
 				return nil

@@ -390,3 +390,118 @@ func TestLeaderElection_TeardownOnLockLoss(t *testing.T) {
 	<-electionErrChan
 }
 
+func TestLeaderElectionGracefulShutdown(t *testing.T) {
+	var mu sync.Mutex
+	sessionCreated := false
+	lockAcquired := false
+	lockReleased := false
+	lockSession := ""
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		// 1. Session create
+		if r.Method == "PUT" && r.URL.Path == "/v1/session/create" {
+			sessionCreated = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ID":"mock-session-id"}`))
+			return
+		}
+
+		// 2. KV acquire / release
+		if r.Method == "PUT" && r.URL.Path == "/v1/kv/atc/leader/lock" {
+			if r.URL.Query().Get("acquire") == "mock-session-id" {
+				lockAcquired = true
+				lockSession = "mock-session-id"
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = w.Write([]byte("true"))
+				return
+			}
+			if r.URL.Query().Get("release") == "mock-session-id" {
+				lockReleased = true
+				lockSession = ""
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = w.Write([]byte("true"))
+				return
+			}
+		}
+
+		// 3. KV read
+		if r.Method == "GET" && r.URL.Path == "/v1/kv/atc/leader/lock" {
+			if lockSession == "" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{
+					"Key": "atc/leader/lock",
+					"Value": "dGVzdC1ub2Rl",
+					"Session": "mock-session-id",
+					"CreateIndex": 100,
+					"ModifyIndex": 100
+				}
+			]`))
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Name:       "test-node",
+		ConsulAddr: server.Listener.Addr().String(),
+		HA: HaConfig{
+			Enabled:    true,
+			LockKey:    "atc/leader/lock",
+			SessionTTL: "15s",
+		},
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	atcInstance := &Atc{
+		Cfg:        cfg,
+		logger:     logger,
+		coreLogger: logger,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	electionErrChan := make(chan error, 1)
+	go func() {
+		electionErrChan <- atcInstance.runLeaderElection(ctx)
+	}()
+
+	// Wait up to 2s for leadership to be acquired
+	start := time.Now()
+	for time.Since(start) < 2*time.Second {
+		if atcInstance.IsLeader() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	mu.Lock()
+	sc := sessionCreated
+	la := lockAcquired
+	mu.Unlock()
+
+	if !sc || !la || !atcInstance.IsLeader() {
+		t.Fatalf("Failed to acquire initial leadership")
+	}
+
+	// Trigger graceful shutdown
+	cancel()
+	<-electionErrChan
+
+	mu.Lock()
+	lr := lockReleased
+	mu.Unlock()
+
+	if !lr {
+		t.Errorf("Expected lock to be released on graceful shutdown")
+	}
+}
+

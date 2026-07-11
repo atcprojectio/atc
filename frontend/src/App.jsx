@@ -29,6 +29,7 @@ function App() {
   const [countdown, setCountdown] = useState(10);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [leaderComponents, setLeaderComponents] = useState({ forwarder: false, redirector: false });
+  const [leaderInfo, setLeaderInfo] = useState(null);
   const [federation, setFederation] = useState({});
   const [token, setToken] = useState(getLocalStorageItem('atc-api-token'));
   const [showToken, setShowToken] = useState(false);
@@ -85,6 +86,7 @@ function App() {
           const leaderData = await leaderRes.json();
           setAuthEnabled(!!leaderData.auth_enabled);
           setLeaderComponents(leaderData.components || { forwarder: false, redirector: false });
+          setLeaderInfo(leaderData);
         }
       } catch (err) {
         console.error("Failed to fetch leader status:", err);
@@ -327,11 +329,22 @@ function App() {
             <div className="modules-badges-list">
               {modules.map(mod => {
                 const isModLeader = !!leaderComponents[mod];
+                const modDetails = leaderInfo?.modules?.[mod];
+                const leaderNode = modDetails?.leader_node || '<none>';
+                const sessionId = modDetails?.session_id || '<none>';
+                const lockKey = modDetails?.lock_key || '';
+                
+                const tooltipText = `Module: ${mod}
+Status: ${isModLeader ? 'Active Leader' : 'Standby'}
+Leader Node: ${leaderNode}
+Consul Session: ${sessionId}
+Lock Key: ${lockKey}`;
+
                 return (
                   <span
                     key={mod}
                     className={`module-badge ${isModLeader ? 'active' : 'standby'}`}
-                    title={`Module ${mod} is ${isModLeader ? 'active leader' : 'in standby'}`}
+                    title={tooltipText}
                   >
                     📦 {mod.toUpperCase()}: {isModLeader ? '● LEADER' : '○ STANDBY'}
                   </span>

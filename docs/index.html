@@ -431,7 +431,7 @@ strategies:
         <h2>Configuration Validation & Linting (GitOps)</h2>
         <p>ATC provides a configuration validation tool to verify strategy configuration syntax and semantic rules before deploying changes to production. This is highly recommended for GitOps workflows to prevent loading invalid configurations at runtime.</p>
         <p>To validate a configuration file, run the <code>validate</code> subcommand:</p>
-        <pre><code class="language-bash">./dist/atc validate --config deploy/strategies.yaml</code></pre>
+        <pre><code class="language-bash">atc validate --config deploy/strategies.yaml</code></pre>
         <p>If the configuration is valid, it prints a success message and exits with status <code>0</code>. If any validation rules fail, it prints detailed error messages to standard error and exits with status <code>1</code>.</p>
         
         <h3>Validation Rules</h3>
@@ -529,6 +529,17 @@ jobs:
   lock_key: "atc/leader/lock"
   session_ttl: "15s"</code></pre>
 
+        <h2>HA Leadership CLI Commands</h2>
+        <p>ATC provides dedicated administrative subcommands under the <code>leader</code> namespace to query status and force stand-down lock owners:</p>
+        
+        <h3>1. Query Leadership Status</h3>
+        <p>Prints module-level leadership states, active lock keys, current leader nodes, and session IDs:</p>
+        <pre><code class="language-bash">atc leader status</code></pre>
+
+        <h3>2. Force Unlock Module Locks</h3>
+        <p>Forces the stand-down of the active leader of a component by destroying its associated Consul session:</p>
+        <pre><code class="language-bash">atc leader force-unlock --module=&lt;forwarder|redirector&gt;</code></pre>
+
         <h2>WAN Federation Indicators</h2>
         <p>ATC queries the local Consul agent's WAN coordinate/member list (via the `/api/federation` endpoint) to verify that configured target datacenters are WAN-federated and reachable. Status badges are rendered directly in the failover visualization path on the dashboard:</p>
         <ul>
@@ -547,7 +558,7 @@ jobs:
         <h2>1. Dry-Run Mode</h2>
         <p>In dry-run mode, ATC runs the watcher and reconciler engines normally but bypasses writing or deleting configuration entries in the Consul KV registry. All actions that would be taken are written to the logs with a <code>[DRY RUN]</code> prefix. Enable dry-run via configuration or CLI flags:</p>
         <pre><code class="language-yaml">dry_run: true</code></pre>
-        <pre><code class="language-bash">./dist/atc server --config deploy/strategies.yaml --dry-run</code></pre>
+        <pre><code class="language-bash">atc server --config deploy/strategies.yaml --dry-run</code></pre>
 
         <h2>2. Dynamic Configuration Hot-Reloading</h2>
         <p>ATC supports watching its central configuration files for changes. If strategies, namespaces, or rate limits are updated in the configuration file, the changes are applied automatically without restarting the process.
@@ -568,7 +579,7 @@ jobs:
         <p>To prevent API write thrashing and protect the Consul cluster from overloading in large environments, a token-bucket rate limiter is applied to all state-changing Consul API updates. Rate limits can be configured in the YAML file or via command-line flags:</p>
         <pre><code class="language-yaml"># Limit write operations to Consul to 10 per second
 write_rate_limit: "10/s"</code></pre>
-        <pre><code class="language-bash">./dist/atc server --config deploy/strategies.yaml --write-rate-limit="10/s"</code></pre>
+        <pre><code class="language-bash">atc server --config deploy/strategies.yaml --write-rate-limit="10/s"</code></pre>
       </section>
 
       <!-- Forwarder Module Section -->
@@ -828,6 +839,28 @@ make obs-up</code></pre>
     "standard-redirect": {
       "service": "payment-service",
       "datacenter": "dc2"
+    }
+  }
+}</code></pre>
+
+        <h2>6. GET /api/leader</h2>
+        <p>Returns the detailed JSON representation of the cluster leadership status, current active leader node names, and component-specific Consul lock keys and sessions.</p>
+
+        <h3>Response Schema</h3>
+        <pre><code class="language-json">{
+  "leader": true,
+  "auth_enabled": false,
+  "components": {
+    "forwarder": true,
+    "redirector": true
+  },
+  "local_node": "atc-node-01",
+  "modules": {
+    "forwarder": {
+      "is_leader": true,
+      "leader_node": "atc-node-01",
+      "lock_key": "atc/leader/lock/forwarder",
+      "session_id": "c1a9a8be-e086-455b-b9d9-2ea11e1f76f7"
     }
   }
 }</code></pre>

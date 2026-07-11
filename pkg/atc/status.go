@@ -1,12 +1,14 @@
 package atc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
 
+	"github.com/hashicorp/consul/api"
 	"github.com/jedib0t/go-pretty/v6/table"
 )
 
@@ -44,14 +46,139 @@ func RenderServicesTable(enabledModules map[string]bool) string {
 	return x.Render()
 }
 
+type LeaderDetails struct {
+	IsLeader   bool   `json:"is_leader"`
+	LeaderNode string `json:"leader_node,omitempty"`
+	LockKey    string `json:"lock_key"`
+	SessionID  string `json:"session_id,omitempty"`
+}
+
+func (t *Atc) GetLeaderDetails(ctx context.Context, moduleName string) (LeaderDetails, error) {
+	t.cfgMu.RLock()
+	lockKey := t.Cfg.HA.LockKey
+	haEnabled := t.Cfg.HA.Enabled
+	localNodeName := t.Cfg.Name
+	t.cfgMu.RUnlock()
+
+	if lockKey == "" {
+		lockKey = "atc/leader/lock"
+	}
+	if moduleName != "" {
+		lockKey = lockKey + "/" + moduleName
+	}
+
+	details := LeaderDetails{
+		LockKey: lockKey,
+	}
+
+	if !haEnabled {
+		isLocalActive := false
+		switch moduleName {
+		case "forwarder":
+			isLocalActive = t.Forwarder != nil
+		case "redirector":
+			isLocalActive = t.Redirector != nil
+		}
+		details.IsLeader = isLocalActive
+		if isLocalActive {
+			details.LeaderNode = localNodeName
+		}
+		return details, nil
+	}
+
+	client, err := t.getConsulClient(ctx)
+	if err != nil {
+		return details, err
+	}
+
+	var pair *api.KVPair
+	err = t.traceConsulCall(ctx, "get_leader_key", func() error {
+		var err error
+		pair, _, err = client.KV().Get(lockKey, nil)
+		return err
+	})
+	if err != nil {
+		return details, err
+	}
+
+	if pair != nil && pair.Session != "" {
+		details.SessionID = pair.Session
+		details.LeaderNode = string(pair.Value)
+		details.IsLeader = (details.LeaderNode == localNodeName)
+	}
+
+	return details, nil
+}
+
+func (t *Atc) ForceUnlock(ctx context.Context, moduleName string) error {
+	client, err := t.getConsulClient(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to connect to consul: %w", err)
+	}
+
+	t.cfgMu.RLock()
+	lockKey := t.Cfg.HA.LockKey
+	t.cfgMu.RUnlock()
+
+	if lockKey == "" {
+		lockKey = "atc/leader/lock"
+	}
+	if moduleName != "" {
+		lockKey = lockKey + "/" + moduleName
+	}
+
+	var pair *api.KVPair
+	err = t.traceConsulCall(ctx, "get_leader_key", func() error {
+		var err error
+		pair, _, err = client.KV().Get(lockKey, nil)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+
+	if pair == nil {
+		return fmt.Errorf("no lock found for module %q", moduleName)
+	}
+
+	if pair.Session != "" {
+		err = t.traceConsulCall(ctx, "destroy_session", func() error {
+			_, err := client.Session().Destroy(pair.Session, nil)
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("failed to destroy consul session %q: %w", pair.Session, err)
+		}
+	} else {
+		err = t.traceConsulCall(ctx, "delete_leader_key", func() error {
+			_, err := client.KV().Delete(lockKey, nil)
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("failed to delete lock key %q: %w", lockKey, err)
+		}
+	}
+
+	return nil
+}
+
+type LeaderStatusResponse struct {
+	Leader      bool                     `json:"leader"`
+	AuthEnabled bool                     `json:"auth_enabled"`
+	Components  map[string]bool          `json:"components"`
+	LocalNode   string                   `json:"local_node"`
+	Modules     map[string]LeaderDetails `json:"modules"`
+}
+
 func (t *Atc) apiLeaderHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	
 	leader := t.IsLeader()
 
 	t.cfgMu.RLock()
 	haEnabled := t.Cfg.HA.Enabled
 	authEnabled := t.Cfg.Auth.Enabled
+	localNode := t.Cfg.Name
 	t.cfgMu.RUnlock()
 
 	var forwarderLeader, redirectorLeader bool
@@ -63,8 +190,28 @@ func (t *Atc) apiLeaderHandler(w http.ResponseWriter, r *http.Request) {
 		redirectorLeader = t.redirectorLeader.Load()
 	}
 
-	_, _ = fmt.Fprintf(w, `{"leader":%t,"auth_enabled":%t,"components":{"forwarder":%t,"redirector":%t}}`,
-		leader, authEnabled, forwarderLeader, redirectorLeader)
+	ctx := r.Context()
+	modules := make(map[string]LeaderDetails)
+	for _, m := range []string{"forwarder", "redirector"} {
+		details, err := t.GetLeaderDetails(ctx, m)
+		if err == nil {
+			modules[m] = details
+		}
+	}
+
+	resp := LeaderStatusResponse{
+		Leader:      leader,
+		AuthEnabled: authEnabled,
+		Components: map[string]bool{
+			"forwarder":  forwarderLeader,
+			"redirector": redirectorLeader,
+		},
+		LocalNode: localNode,
+		Modules:   modules,
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (t *Atc) apiFederationHandler(w http.ResponseWriter, r *http.Request) {
