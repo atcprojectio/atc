@@ -324,3 +324,21 @@ func (t *Atc) apiModulesHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(active)
 }
 
+func (t *Atc) apiReloadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	err := t.TriggerConfigReload()
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"status":"error","message":"failed to reload config: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"success","message":"Configuration reloaded successfully"}`))
+}
+
+

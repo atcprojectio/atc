@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/consul/api"
+	"github.com/spf13/viper"
 )
 
 func TestResolveModules(t *testing.T) {
@@ -477,3 +478,66 @@ func TestApiOverridesHandler(t *testing.T) {
 		t.Errorf("expected PUT /v1/config request to Consul, got %s %s", method, path)
 	}
 }
+
+func TestApiModulesHandler(t *testing.T) {
+	atcInstance := &Atc{
+		enabledModules: map[string]bool{
+			Forwarder:  true,
+			Redirector: true,
+		},
+	}
+
+	req, err := http.NewRequest("GET", "/api/modules", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	atcInstance.apiModulesHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status OK, got %d", rr.Code)
+	}
+
+	var results []string
+	err = json.Unmarshal(rr.Body.Bytes(), &results)
+	if err != nil {
+		t.Fatalf("failed to unmarshal results: %v", err)
+	}
+
+	if len(results) != 2 || results[0] != "forwarder" || results[1] != "redirector" {
+		t.Errorf("unexpected results: %v", results)
+	}
+}
+
+func TestApiReloadHandler(t *testing.T) {
+	viper.Set("config", "")
+
+	atcInstance := &Atc{
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		coreLogger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// 1. GET request (should be method not allowed)
+	reqGet, err := http.NewRequest("GET", "/api/reload", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	rrGet := httptest.NewRecorder()
+	atcInstance.apiReloadHandler(rrGet, reqGet)
+	if rrGet.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected status MethodNotAllowed, got %d", rrGet.Code)
+	}
+
+	// 2. POST request (should trigger reload)
+	reqPost, err := http.NewRequest("POST", "/api/reload", nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	rrPost := httptest.NewRecorder()
+	atcInstance.apiReloadHandler(rrPost, reqPost)
+
+	if rrPost.Code != http.StatusOK {
+		t.Errorf("expected status OK, got %d. Body: %s", rrPost.Code, rrPost.Body.String())
+	}
+}
+

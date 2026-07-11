@@ -45,6 +45,7 @@ func (t *Atc) initServer() error {
 	serv.Mux.Handle("POST /api/overrides", t.authMiddleware(http.HandlerFunc(t.apiOverridesHandler)))
 	serv.Mux.Handle("GET /api/strategies", t.authMiddleware(http.HandlerFunc(t.apiStrategiesHandler)))
 	serv.Mux.Handle("GET /api/modules", t.authMiddleware(http.HandlerFunc(t.apiModulesHandler)))
+	serv.Mux.Handle("POST /api/reload", t.authMiddleware(http.HandlerFunc(t.apiReloadHandler)))
 	if t.Cfg.Server.McpEnabled {
 		mcpHandler := t.authMiddleware(mcp_server.NewHandler(t))
 		serv.McpMux.Handle("/mcp", mcpHandler)

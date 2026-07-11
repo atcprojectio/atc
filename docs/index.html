@@ -231,7 +231,7 @@ brew install atc</code></pre>
 
         <h2>3. Running the Daemon</h2>
         <p>Launch the server command by passing the path to the predefined strategies configuration file:</p>
-        <pre><code class="language-bash">./dist/atc server --config deploy/strategies.yaml</code></pre>
+        <pre><code class="language-bash">atc server --config deploy/strategies.yaml</code></pre>
         
         <h2>Available CLI Flags</h2>
         <table class="docs-table">
@@ -659,6 +659,26 @@ write_rate_limit: "10/s"</code></pre>
               <td>Histogram</td>
               <td>Duration of redirector reconciliation loops.</td>
             </tr>
+            <tr>
+              <td><code>atc_ha_leader_transitions_total</code></td>
+              <td>Counter</td>
+              <td>Total number of leadership transitions on this node, labeled by module (<code>forwarder</code>, <code>redirector</code>) and transition type (<code>acquired</code>, <code>lost</code>).</td>
+            </tr>
+            <tr>
+              <td><code>atc_overrides_purged_total</code></td>
+              <td>Counter</td>
+              <td>Total number of expired manual overrides purged automatically.</td>
+            </tr>
+            <tr>
+              <td><code>atc_config_reloads_total</code></td>
+              <td>Counter</td>
+              <td>Total number of configuration reloads triggered by changes in YAML configuration.</td>
+            </tr>
+            <tr>
+              <td><code>atc_ha_is_leader</code></td>
+              <td>Gauge</td>
+              <td>Leadership status on this node (1 = Leader, 0 = Standby), labeled by module.</td>
+            </tr>
           </tbody>
         </table>
       </section>
@@ -861,9 +881,41 @@ make obs-up</code></pre>
       "leader_node": "atc-node-01",
       "lock_key": "atc/leader/lock/forwarder",
       "session_id": "c1a9a8be-e086-455b-b9d9-2ea11e1f76f7"
-    }
+}</code></pre>
+
+        <h2>7. GET /api/modules</h2>
+        <p>Returns a JSON array of all active reconciliation modules enabled on this ATC daemon instance.</p>
+
+        <h3>Response Schema</h3>
+        <pre><code class="language-json">[
+  "forwarder",
+  "redirector"
+]</code></pre>
+
+        <h2>8. GET /api/federation</h2>
+        <p>Returns the WAN federation status of all configured target datacenters, including local Consul agent WAN member states.</p>
+
+        <h3>Response Schema</h3>
+        <pre><code class="language-json">{
+  "dc2": {
+    "status": "alive",
+    "rtt": "1.24ms"
   }
 }</code></pre>
+
+        <h2>9. GET /ready</h2>
+        <p>A simple health check endpoint returning HTTP <code>200 OK</code> if the daemon is running normally and accepting traffic, or HTTP <code>503 Service Unavailable</code> when a shutdown is in progress.</p>
+
+        <h3>Response Schema</h3>
+        <pre><code class="language-json">{
+  "status": "ok"
+}</code></pre>
+
+        <h2>10. GET /services</h2>
+        <p>Returns an ASCII representation of the active services catalog and their routing configurations (intended for quick terminal debugging).</p>
+
+        <h3>Response Headers</h3>
+        <pre><code class="language-http">Content-Type: text/plain; charset=utf-8</code></pre>
       </section>
 
       <!-- Model Context Protocol Section -->
