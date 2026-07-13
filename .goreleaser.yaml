@@ -69,44 +69,21 @@ builds:
       - -X "github.com/prometheus/common/version.Branch={{.Branch}}"
       - -X "github.com/prometheus/common/version.BuildDate={{.Date}}"
       - -X "github.com/prometheus/common/version.Version={{.Version}}"
-dockers:
-  - image_templates:
-      - "ghcr.io/atcprojectio/{{.ProjectName}}:{{ .Version }}-amd64"
-    use: buildx
-    dockerfile: Dockerfile
-    build_flag_templates:
-      - "--label=org.opencontainers.image.source https://github.com/atcprojectio/{{.ProjectName}}"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.title={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.ShortCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
-      - "--platform=linux/amd64"
-  - image_templates:
-      - "ghcr.io/atcprojectio/{{.ProjectName}}:{{ .Version }}-arm64v8"
-    use: buildx
-    goarch: arm64
-    goarm: "8"
-    dockerfile: Dockerfile
-    build_flag_templates:
-      - "--label=org.opencontainers.image.source https://github.com/atcprojectio/{{.ProjectName}}"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.title={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.ShortCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
-      - "--platform=linux/arm64/v8"
-docker_manifests:
-  - name_template: "ghcr.io/atcprojectio/{{.ProjectName}}:{{ .Version }}"
-    image_templates:
-      - "ghcr.io/atcprojectio/{{.ProjectName}}:{{ .Version }}-amd64"
-      - "ghcr.io/atcprojectio/{{.ProjectName}}:{{ .Version }}-arm64v8"
-  - name_template: "ghcr.io/atcprojectio/{{.ProjectName}}:v{{ .Major }}"
-    image_templates:
-      - "ghcr.io/atcprojectio/{{.ProjectName}}:{{ .Version }}-amd64"
-      - "ghcr.io/atcprojectio/{{.ProjectName}}:{{ .Version }}-arm64v8"
-  - name_template: "ghcr.io/atcprojectio/{{.ProjectName}}:latest"
-    image_templates:
-      - "ghcr.io/atcprojectio/{{.ProjectName}}:{{ .Version }}-amd64"
-      - "ghcr.io/atcprojectio/{{.ProjectName}}:{{ .Version }}-arm64v8"
+dockers_v2:
+  - images:
+      - "ghcr.io/atcprojectio/{{.ProjectName}}"
+    tags:
+      - "{{ .Version }}"
+      - "v{{ .Major }}"
+      - "{{ if not .IsNightly }}latest{{ end }}"
+    labels:
+      "org.opencontainers.image.description": "Foo bar"
+      "org.opencontainers.image.name": "{{.ProjectName}}"
+      "org.opencontainers.image.source": "{{.GitURL}}"
+      "org.opencontainers.image.created": "{{.Date}}"
+      "org.opencontainers.image.title=": "{{.ProjectName}}"
+      "org.opencontainers.image.revision": "{{.ShortCommit}}"
+      "org.opencontainers.image.version": "{{.Version}}"
 nfpms:
   - id: linux
     maintainer: 'bram vogelaar <bram@attachmentgenie.com>'
