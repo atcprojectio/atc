@@ -687,11 +687,22 @@ write_rate_limit: "10/s"</code></pre>
       <section id="docker-stack" class="content-section">
         <div class="badge">Docker</div>
         <h1>Local Observability Stack</h1>
-        <p>ATC provides a complete Docker Compose environment to spin up a fully integrated developer sandbox containing Consul, ATC, and the LGTM (Loki, Grafana, Tempo, Mimir/Prometheus) observability stack.</p>
+        <p>The ATC developer Docker Compose environment is maintained in the <a href="https://github.com/atcprojectio/atc-demo" target="_blank">atc-demo</a> repository. It spins up a fully integrated sandbox containing Consul, ATC, and the LGTM (Loki, Grafana, Tempo, Mimir/Prometheus) observability stack.</p>
 
         <h2>Starting the Stack</h2>
-        <pre><code class="language-bash"># Start all containers in the background
-make obs-up</code></pre>
+        <p>To run the developer environment, clone the demo repository and bring up the services:</p>
+        <pre><code class="language-bash"># Clone the demo repository
+git clone https://github.com/atcprojectio/atc-demo.git
+cd atc-demo
+
+# Spin up Consul infrastructure and mock services
+make up-infra
+
+# Spin up the LGTM observability stack
+make up-obs
+
+# (Optional) Spin up the containerized ATC daemons
+make up-atc</code></pre>
         <p>This launches the following endpoints locally:</p>
         <ul>
           <li><strong>Grafana:</strong> <code>http://localhost:3000</code> (preconfigured with Loki, Prometheus, and Tempo datasources)</li>

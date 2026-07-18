@@ -37,15 +37,14 @@ run: ## Run binary.
 	OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./${APP-BIN} server --config deploy/strategies.yaml
 fresh: build run
 consul-up:
-	@docker network inspect atc_demo-net >/dev/null 2>&1 || docker network create atc_demo-net || true
-	docker compose up -d consul-dc1 consul-dc2
+	@echo "Local Docker Compose environment has been moved to the atc-demo repository."
+	@echo "Please run 'make up-infra' or 'make up' inside the atc-demo repository instead."
+	@exit 1
 
 obs-up:
-	@docker network inspect atc_demo-net >/dev/null 2>&1 || docker network create atc_demo-net || true
-	docker compose up -d
-	@echo "Waiting for services to start..."
-	@sleep 3
-	@make join-wan
+	@echo "Local Docker Compose environment has been moved to the atc-demo repository."
+	@echo "Please run 'make up-obs' inside the atc-demo repository instead."
+	@exit 1
 
 join-wan:
 	docker exec consul-dc2 consul join -wan consul-dc1 || true
@@ -66,7 +65,11 @@ consul-register-test-dc2:
 	@echo "\nRegistered payment-service-dc2-1 in dc2 (pointing to port 8082 mock)"
 
 consul-down:
-	docker compose stop consul-dc1 consul-dc2 || true
+	@echo "Local Docker Compose environment has been moved to the atc-demo repository."
+	@echo "Please run 'make down-infra' inside the atc-demo repository instead."
+	@exit 1
 
 obs-down:
-	docker compose down
+	@echo "Local Docker Compose environment has been moved to the atc-demo repository."
+	@echo "Please run 'make down-obs' inside the atc-demo repository instead."
+	@exit 1

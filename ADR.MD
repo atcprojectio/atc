@@ -612,30 +612,31 @@ Reject embedding webhook alert dispatch logic inside the ATC daemon core. Instea
   - Operators must configure external alerts based on ATC logs or metrics to receive notifications.
 
 ---
-
 ## ADR 0026: Local Developer Observability Stack
 
 ### Status
-Accepted
+Accepted (Consolidated into atc-demo)
 
 ### Date
-2026-06-19
+2026-06-19 (Updated 2026-07-18)
 
 ### Context
 Developing and validating the OpenTelemetry instrumentation locally required a standardized, easy-to-use logging, metrics, and tracing backend. Setting up these tools individually (Prometheus, Loki, Tempo, Grafana) was tedious and prone to configuration drift between developers.
 
 ### Decision
-Provide a centralized `docker-compose.yml` environment containing a local dev Consul agent and a complete LGTM (Loki, Grafana, Tempo, Mimir/Prometheus) observability stack:
-- Include an OpenTelemetry Collector acting as the central gateway for all OTel signals.
-- Auto-provision Grafana datasources to load the Loki, Prometheus, and Tempo endpoints automatically on startup.
-- Consolidate all container configuration files into a dedicated `deploy/observability/` folder.
+Rather than maintaining duplicate local Docker Compose environments in both the `atc` and `atc-demo` repositories, we decide to:
+- Completely consolidate and migrate the developer Docker Compose configurations and LGTM observability configs into the `atc-demo` repository.
+- Remove all local compose files and configurations from the main `atc` repository.
+- Maintain simple redirect targets in the main `atc` Makefile and point developers to the `atc-demo` workspace for spinning up local development clusters.
+- Add `up-infra` and `down-infra` targets in the demo workspace to allow running only Consul/mock services in Docker while developers test and run local `atc` binaries directly on the host machine.
 
 ### Consequences
 - **Benefits**:
-  - Zero-configuration local verification of traces, logs, and metrics.
-  - Isolated developer environment mimicking production observability pipelines.
+  - Single source of truth for the local developer/demo sandbox.
+  - Zero-configuration local verification of traces, logs, and metrics remains easy.
+  - Developers can run local host-based binaries of `atc` against Docker-based Consul agents without container conflicts.
 - **Consequences**:
-  - Developers need Docker/Docker Compose installed locally, consuming minor system resources.
+  - Running a local observability stack now requires checking out/using the `atc-demo` repository.
 
 ---
 

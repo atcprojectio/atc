@@ -79,9 +79,12 @@ ATC exposes a Model Context Protocol (MCP) server over SSE on a dedicated port (
 ## Testing & Development
 
 ### Local Observability Sandbox
-A complete developer environment containing Consul, ATC, and the LGTM (Loki, Grafana, Tempo, Prometheus) stack is available under [deploy/observability](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/deploy/observability):
+A complete developer environment containing Consul, ATC, and the LGTM (Loki, Grafana, Tempo, Prometheus) stack is maintained in the [atc-demo](https://github.com/atcprojectio/atc-demo) repository. To start the observability stack:
 ```bash
-docker compose -f deploy/observability/docker-compose.yml up -d
+# Clone the demo repository and spin it up
+git clone https://github.com/atcprojectio/atc-demo.git
+cd atc-demo
+make up-obs
 ```
 
 ### Running Tests

@@ -1,5 +1,0 @@
-name: atc
-
-include:
-  - path: ./deploy/observability/docker-compose.observability.yml
-  - path: ./deploy/docker-compose.infrastructure.yml
