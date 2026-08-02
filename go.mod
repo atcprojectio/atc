@@ -6,7 +6,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/hashicorp/consul/api v1.34.4
 	github.com/hashicorp/consul/sdk v0.18.1
-	github.com/jedib0t/go-pretty/v6 v6.8.2
+	github.com/jedib0t/go-pretty/v6 v6.8.3
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/common v0.70.0
