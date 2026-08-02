@@ -21,7 +21,7 @@ jobs:
           node-version: 22
       - name: Build Frontend
         run: make build-frontend
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Install golangci-lint
@@ -43,7 +43,7 @@ jobs:
           node-version: 22
       - name: Build Frontend
         run: make build-frontend
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - uses: autero1/action-gotestsum@v2.0.0
@@ -69,7 +69,7 @@ jobs:
           node-version: 22
       - name: Build Frontend
         run: make build-frontend
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - uses: goreleaser/goreleaser-action@v7
