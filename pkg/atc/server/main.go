@@ -82,6 +82,9 @@ func (s *Server) Run(ctx context.Context) error {
 		Addr:              mainAddr,
 		Handler:           otelhttp.NewHandler(s.Mux, "atc-server"),
 		ReadHeaderTimeout: 3 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	metricsAddr := fmt.Sprintf(":%d", s.cfg.MetricsListenPort)
@@ -89,6 +92,9 @@ func (s *Server) Run(ctx context.Context) error {
 		Addr:              metricsAddr,
 		Handler:           s.MetricsMux,
 		ReadHeaderTimeout: 3 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	var mcpServer *http.Server
@@ -99,6 +105,9 @@ func (s *Server) Run(ctx context.Context) error {
 			Addr:              mcpAddr,
 			Handler:           otelhttp.NewHandler(s.McpMux, "atc-mcp-server"),
 			ReadHeaderTimeout: 3 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		}
 	}
 

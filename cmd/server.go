@@ -15,7 +15,6 @@ var serverCmd = &cobra.Command{
 	Short: "Start as a background process.",
 	Long:  "Start as a background process.",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var cfg atc.Config
 		configFile := viper.GetString("config")
 		if configFile != "" {
 			viper.SetConfigFile(configFile)
@@ -24,48 +23,10 @@ var serverCmd = &cobra.Command{
 			}
 		}
 
-		if err := viper.Unmarshal(&cfg); err != nil {
-			return fmt.Errorf("failed to unmarshal configuration: %w", err)
+		cfg, err := atc.LoadConfigFromViper(viper.GetViper())
+		if err != nil {
+			return err
 		}
-
-		if cfg.Server.HTTPListenPort == 0 {
-			cfg.Server.HTTPListenPort = viper.GetInt("port")
-		}
-		if cfg.Server.MetricsListenPort == 0 {
-			cfg.Server.MetricsListenPort = viper.GetInt("metrics_port")
-		}
-		if cfg.Server.McpListenPort == 0 {
-			cfg.Server.McpListenPort = viper.GetInt("mcp_port")
-		}
-		if len(cfg.Target) == 0 {
-			cfg.Target = viper.GetStringSlice("target")
-		}
-		if cfg.Server.LogLevel == "" {
-			cfg.Server.LogLevel = viper.GetString("log_level")
-		}
-		if cfg.ConsulAddr == "" {
-			cfg.ConsulAddr = viper.GetString("consul_addr")
-		}
-		if cfg.ConsulToken == "" {
-			cfg.ConsulToken = viper.GetString("consul_token")
-		}
-		if cfg.ConsulDC == "" {
-			cfg.ConsulDC = viper.GetString("consul_dc")
-		}
-		if cfg.ConsulNamespace == "" {
-			cfg.ConsulNamespace = viper.GetString("consul_namespace")
-		}
-		if cfg.WriteRateLimit == "" {
-			cfg.WriteRateLimit = viper.GetString("write_rate_limit")
-		}
-		if !viper.IsSet("server.ui_enabled") {
-			cfg.Server.UiEnabled = viper.GetBool("ui_enabled")
-		}
-		if !viper.IsSet("server.mcp_enabled") {
-			cfg.Server.McpEnabled = viper.GetBool("mcp_enabled")
-		}
-		cfg.Server.MetricsNamespace = "atc"
-		cfg.DryRun = viper.GetBool("dry_run")
 
 		t, err := atc.New(cfg)
 		if err != nil {
@@ -74,48 +35,10 @@ var serverCmd = &cobra.Command{
 
 		if configFile != "" {
 			viper.OnConfigChange(func(e fsnotify.Event) {
-				var newCfg atc.Config
-				if err := viper.Unmarshal(&newCfg); err != nil {
+				newCfg, err := atc.LoadConfigFromViper(viper.GetViper())
+				if err != nil {
 					return
 				}
-				if newCfg.Server.HTTPListenPort == 0 {
-					newCfg.Server.HTTPListenPort = viper.GetInt("port")
-				}
-				if newCfg.Server.MetricsListenPort == 0 {
-					newCfg.Server.MetricsListenPort = viper.GetInt("metrics_port")
-				}
-				if newCfg.Server.McpListenPort == 0 {
-					newCfg.Server.McpListenPort = viper.GetInt("mcp_port")
-				}
-				if len(newCfg.Target) == 0 {
-					newCfg.Target = viper.GetStringSlice("target")
-				}
-				if newCfg.Server.LogLevel == "" {
-					newCfg.Server.LogLevel = viper.GetString("log_level")
-				}
-				if newCfg.ConsulAddr == "" {
-					newCfg.ConsulAddr = viper.GetString("consul_addr")
-				}
-				if newCfg.ConsulToken == "" {
-					newCfg.ConsulToken = viper.GetString("consul_token")
-				}
-				if newCfg.ConsulDC == "" {
-					newCfg.ConsulDC = viper.GetString("consul_dc")
-				}
-				if newCfg.ConsulNamespace == "" {
-					newCfg.ConsulNamespace = viper.GetString("consul_namespace")
-				}
-				if newCfg.WriteRateLimit == "" {
-					newCfg.WriteRateLimit = viper.GetString("write_rate_limit")
-				}
-				if !viper.IsSet("server.ui_enabled") {
-					newCfg.Server.UiEnabled = viper.GetBool("ui_enabled")
-				}
-				if !viper.IsSet("server.mcp_enabled") {
-					newCfg.Server.McpEnabled = viper.GetBool("mcp_enabled")
-				}
-				newCfg.Server.MetricsNamespace = "atc"
-				newCfg.DryRun = viper.GetBool("dry_run")
 
 				t.ReloadConfig(newCfg)
 			})

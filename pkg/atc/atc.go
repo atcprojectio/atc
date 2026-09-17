@@ -550,7 +550,7 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	client, err := t.getConsulClient(ctx)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to connect to consul: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to connect to consul: %v", err))
 		return
 	}
 
@@ -561,7 +561,7 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to fetch services: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to fetch services: %v", err))
 		return
 	}
 
@@ -573,7 +573,7 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to list config entries: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list config entries: %v", err))
 		return
 	}
 
@@ -919,27 +919,27 @@ func (t *Atc) TriggerManualRedirect(ctx context.Context, service string, redirec
 
 func (t *Atc) apiServicesDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	svcName := r.URL.Query().Get("name")
 	if svcName == "" {
-		http.Error(w, "Missing 'name' query parameter", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Missing 'name' query parameter")
 		return
 	}
 
 	err := t.PurgeServiceResolver(r.Context(), svcName)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			writeJSONError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		if strings.Contains(err.Error(), "not created by ATC") {
-			http.Error(w, err.Error(), http.StatusForbidden)
+			writeJSONError(w, http.StatusForbidden, err.Error())
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -1116,50 +1116,15 @@ func (t *Atc) TriggerConfigReload() error {
 		}
 	}
 
-	var newCfg Config
-	if err := viper.Unmarshal(&newCfg); err != nil {
+	newCfg, err := LoadConfigFromViper(viper.GetViper())
+	if err != nil {
 		if t.configReloadsCounter != nil {
 			t.configReloadsCounter.Add(context.Background(), 1, metric.WithAttributes(
 				attribute.String("status", "failure"),
 			))
 		}
-		return fmt.Errorf("failed to unmarshal configuration: %w", err)
+		return err
 	}
-
-	if newCfg.Server.HTTPListenPort == 0 {
-		newCfg.Server.HTTPListenPort = viper.GetInt("port")
-	}
-	if newCfg.Server.MetricsListenPort == 0 {
-		newCfg.Server.MetricsListenPort = viper.GetInt("metrics_port")
-	}
-	if len(newCfg.Target) == 0 {
-		newCfg.Target = viper.GetStringSlice("target")
-	}
-	if newCfg.Server.LogLevel == "" {
-		newCfg.Server.LogLevel = viper.GetString("log_level")
-	}
-	if newCfg.ConsulAddr == "" {
-		newCfg.ConsulAddr = viper.GetString("consul_addr")
-	}
-	if newCfg.ConsulToken == "" {
-		newCfg.ConsulToken = viper.GetString("consul_token")
-	}
-	if newCfg.ConsulDC == "" {
-		newCfg.ConsulDC = viper.GetString("consul_dc")
-	}
-	if newCfg.ConsulNamespace == "" {
-		newCfg.ConsulNamespace = viper.GetString("consul_namespace")
-	}
-	if newCfg.WriteRateLimit == "" {
-		newCfg.WriteRateLimit = viper.GetString("write_rate_limit")
-	}
-	if !viper.IsSet("server.ui_enabled") {
-		newCfg.Server.UiEnabled = viper.GetBool("ui_enabled")
-	}
-	if !viper.IsSet("server.mcp_enabled") {
-		newCfg.Server.McpEnabled = viper.GetBool("mcp_enabled")
-	}
-	newCfg.Server.MetricsNamespace = "atc"
 
 	t.ReloadConfig(newCfg)
 	return nil

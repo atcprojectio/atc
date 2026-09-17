@@ -214,10 +214,16 @@ func (t *Atc) apiLeaderHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
 func (t *Atc) apiFederationHandler(w http.ResponseWriter, r *http.Request) {
 	dcMap, err := t.GetFederationStatus(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to fetch federation status: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to fetch federation status: %v", err))
 		return
 	}
 
@@ -253,22 +259,22 @@ type overrideRequest struct {
 
 func (t *Atc) apiOverridesHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	var req overrideRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("invalid request payload: %v", err), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid request payload: %v", err))
 		return
 	}
 
 	if req.Service == "" {
-		http.Error(w, "missing 'service' field", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "missing 'service' field")
 		return
 	}
 	if req.TargetDc == "" {
-		http.Error(w, "missing 'target_dc' field", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "missing 'target_dc' field")
 		return
 	}
 
@@ -279,12 +285,12 @@ func (t *Atc) apiOverridesHandler(w http.ResponseWriter, r *http.Request) {
 	case "redirect":
 		err = t.TriggerManualRedirect(r.Context(), req.Service, req.TargetDc, req.Namespace, req.Duration)
 	default:
-		http.Error(w, fmt.Sprintf("invalid override type %q, must be 'failover' or 'redirect'", req.Type), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid override type %q, must be 'failover' or 'redirect'", req.Type))
 		return
 	}
 
 	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to apply override: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to apply override: %v", err))
 		return
 	}
 
@@ -326,16 +332,17 @@ func (t *Atc) apiModulesHandler(w http.ResponseWriter, r *http.Request) {
 
 func (t *Atc) apiReloadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	err := t.TriggerConfigReload()
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"status":"error","message":"failed to reload config: %v"}`, err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to reload config: %v", err))
 		return
 	}
 
+	t.logAudit(r.Context(), r, "reload_config", "", nil)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"success","message":"Configuration reloaded successfully"}`))
