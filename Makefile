@@ -1,6 +1,10 @@
 APP-BIN := dist/$(shell basename $(shell pwd))
+# Go packages to build/test. Listed explicitly so ./... does not pick up Go code
+# vendored inside frontend/node_modules.
+GO_PKGS := . ./cmd/... ./pkg/...
+GOVULNCHECK_VERSION ?= v1.1.4
 
-.PHONY: build build-frontend consul-up consul-down consul-register-test consul-deregister-test darwin fresh lint lint-frontend lint-backend linux qa release run snapshot tag test test-integration test-frontend
+.PHONY: vuln build build-frontend consul-up consul-down consul-register-test consul-deregister-test darwin fresh lint lint-frontend lint-backend linux qa release run snapshot tag test test-integration test-frontend
 
 build-frontend:
 	cd frontend && npm ci && npm run build
@@ -27,12 +31,15 @@ lint-backend:
 	golangci-lint run ./...
 lint: lint-frontend lint-backend
 test:
-	gotestsum --format testname
+	gotestsum --format testname -- -race -coverprofile=coverage.out $(GO_PKGS)
+	@go tool cover -func=coverage.out | tail -1
 test-integration:
-	go test -v -tags=integration ./pkg/atc/integration/...
+	go test -race -v -tags=integration ./pkg/atc/integration/...
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) $(GO_PKGS)
 test-frontend:
 	cd frontend && npm run test
-qa: lint test test-integration test-frontend
+qa: lint test test-integration test-frontend vuln
 run: ## Run binary.
 	OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./${APP-BIN} server --config deploy/strategies.yaml
 fresh: build run
