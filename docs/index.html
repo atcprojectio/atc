@@ -61,6 +61,7 @@
             <li><a href="#overview" class="active"><i class="fa-solid fa-house"></i> Overview</a></li>
             <li><a href="#architecture"><i class="fa-solid fa-network-wired"></i> Architecture</a></li>
             <li><a href="#installation"><i class="fa-solid fa-download"></i> Installation</a></li>
+            <li><a href="#versioning"><i class="fa-solid fa-code-branch"></i> Versioning</a></li>
             <li><a href="#demo-project"><i class="fa-solid fa-play"></i> Demo Project</a></li>
           </ul>
         </div>
@@ -361,6 +362,58 @@ brew install atc</code></pre>
         <h2>5. Deploying to Nomad</h2>
         <p>A Nomad job definition is available at <code>deploy/nomad/atc.nomad.hcl</code>. To run ATC in an active-passive HA mode with two instances, run:</p>
         <pre><code class="language-bash">nomad job run ./deploy/nomad/atc.nomad.hcl</code></pre>
+      </section>
+
+      <!-- Versioning Section -->
+      <section id="versioning" class="content-section">
+        <div class="badge">Releases</div>
+        <h1>Versioning</h1>
+        <p>ATC uses <a href="https://semver.org">Semantic Versioning</a>. A version is written <code>X.Y.Z</code> everywhere, with one exception: git tags and GitHub releases are named <code>vX.Y.Z</code>, because Go modules require the <code>v</code> on tags.</p>
+
+        <table class="docs-table">
+          <thead>
+            <tr><th>Where</th><th>Example for release <code>v0.5.0</code></th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Git tag and GitHub release</td><td><code>v0.5.0</code></td></tr>
+            <tr><td>Binaries, archives, <code>.deb</code> / <code>.rpm</code>, Homebrew</td><td><code>0.5.0</code> (e.g. <code>atc_0.5.0_linux_amd64.zip</code>)</td></tr>
+            <tr><td><code>atc version</code> and the <code>atc_build_info</code> metric</td><td><code>0.5.0</code></td></tr>
+            <tr><td>Container image</td><td><code>ghcr.io/atcprojectio/atc:0.5.0</code></td></tr>
+            <tr><td>Helm chart version and <code>appVersion</code></td><td><code>0.5.0</code> (<code>oci://ghcr.io/atcprojectio/charts/atc</code>)</td></tr>
+            <tr><td>Go module</td><td><code>go install github.com/atcprojectio/atc@v0.5.0</code></td></tr>
+          </tbody>
+        </table>
+
+        <h2>Image tags</h2>
+        <ul>
+          <li><code>X.Y.Z</code> (e.g. <code>0.5.0</code>): one release. It never changes. Use this in production.</li>
+          <li><code>X.Y</code> (e.g. <code>0.5</code>): the latest patch release of that minor version.</li>
+          <li><code>X</code> (e.g. <code>0</code>): the latest release of that major version. <strong>Before 1.0 this includes minor releases with breaking changes</strong>, so do not use it for anything you cannot afford to break.</li>
+          <li><code>latest</code>: the newest full release.</li>
+        </ul>
+        <p>Pre-releases (tags like <code>v0.5.0-rc.1</code>) are published only under their exact version (<code>0.5.0-rc.1</code>). They never move <code>X.Y</code>, <code>X</code> or <code>latest</code>, are marked as pre-release on GitHub, are not published to Homebrew, and need <code>helm install --devel</code> or an explicit <code>--version</code>.</p>
+        <p>Images up to 0.4.0 were also tagged <code>v0</code>. That tag is no longer updated and stays at 0.4.0; use <code>0</code> instead.</p>
+
+        <h2>Before 1.0</h2>
+        <p>ATC is in initial development (<code>0.y.z</code>). Semantic Versioning allows anything to change before 1.0; ATC uses these rules:</p>
+        <ul>
+          <li><strong>Patch releases</strong> (<code>0.5.1</code>) contain fixes only. Upgrading needs no configuration change.</li>
+          <li><strong>Minor releases</strong> (<code>0.6.0</code>) contain new features and <strong>may contain breaking changes</strong>. Each one is listed under <em>Breaking changes</em> in the release notes, with what changes and what to do.</li>
+          <li><strong>Security fixes</strong> may change behaviour (for example a safer default) when that is the only safe fix. They are also listed under <em>Breaking changes</em>.</li>
+          <li>Where practical, a behaviour that is going away first logs a deprecation warning for one minor release. Before 1.0 this is not guaranteed.</li>
+          <li>Fixes are released for the latest minor version only.</li>
+        </ul>
+        <p>A change counts as breaking when an existing setup may stop working or behave differently after upgrading without changes. That covers: configuration keys, their meaning and defaults; CLI flags and <code>ATC_*</code> environment variables; service tags (<code>atc.*</code>); REST API paths, payloads and status codes; MCP tool names and arguments; metric names and labels; the metadata ATC writes on <code>service-resolver</code> entries; Helm values; and startup checks that reject a configuration that used to start.</p>
+        <p>To stay safe before 1.0: pin an exact version (<code>X.Y.Z</code>) or the minor line (<code>X.Y</code>), and read the <em>Breaking changes</em> section before moving to a new minor version.</p>
+
+        <h2>From 1.0</h2>
+        <p>From 1.0 on, breaking changes are made only in major releases (<code>2.0.0</code>), and minor and patch releases are backwards compatible.</p>
+
+        <h2>For maintainers</h2>
+        <ul>
+          <li>Pull requests are squash-merged, so the PR title becomes the commit message. Use <a href="https://www.conventionalcommits.org">Conventional Commits</a> titles and mark breaking changes with <code>!</code> (e.g. <code>feat(auth)!: require auth on network addresses</code>). The release changelog groups them under <em>Breaking changes</em>.</li>
+          <li><code>make tag</code> creates the next tag with <code>svu next --v0</code>, which keeps the major version at 0 when a breaking change is merged. Moving to 1.0 is a deliberate, manual tag.</li>
+        </ul>
       </section>
 
       <!-- Demo Project Section -->

@@ -778,3 +778,34 @@ A review found that reconciliation only ran on catalog and health-check events. 
   - Each leader does a full reconcile every resync interval (a handful of Consul reads per interval).
   - Existing ATC-written resolvers are rewritten once after upgrade to record the redirect intent.
   - Services whose resolver was not created by ATC no longer get automatic failover until they are tagged `atc.adopt=true` — a behaviour change for anyone relying on ATC taking over existing resolvers.
+
+---
+
+## ADR 0032: Versioning Scheme and Pre-1.0 Compatibility Policy
+
+### Status
+Accepted
+
+### Date
+2026-11-17
+
+### Context
+Releases used the `v` prefix inconsistently. Git tags and GitHub releases were `vX.Y.Z`; binaries, packages, Homebrew, images and the Helm chart were `X.Y.Z`; but the floating image tag was `v0`, snapshot builds were `vX.Y.Z-next`, and the Helm `appVersion` briefly carried a `v`, which pointed the published chart at an image tag that did not exist. `latest` also moved for pre-releases, Homebrew would have received pre-releases, and `make tag` (svu) would have jumped from 0.4.0 to 1.0.0 because of a `BREAKING CHANGE` footer. The project had not been announced yet, so a clean cut was possible.
+
+### Decision
+- **Scheme**: Git tags and GitHub releases are `vX.Y.Z` (required by Go modules and svu). Every artifact uses `X.Y.Z`: binaries, archives, packages, Homebrew, `atc version`, the container image and the Helm chart version and `appVersion`.
+- **Image tags**: `X.Y.Z`, plus the floating `X.Y`, `X` and `latest`, which move only for full releases (not pre-releases or nightlies). The `v0` tag is no longer published and stays at 0.4.0.
+- **Pre-releases** (`vX.Y.Z-rc.N`) are GitHub pre-releases, are not published to Homebrew, and do not move floating tags.
+- **Pre-1.0 policy**: patch releases contain fixes only; minor releases may contain breaking changes, each listed under *Breaking changes* in the release notes; security fixes may change behaviour when necessary. The breaking surface is defined in the docs (config, CLI/env, tags, REST API, MCP tools, metrics, resolver metadata, Helm values, startup checks).
+- **Tooling**: `make tag` uses `svu next --v0`; PR titles use Conventional Commits with `!` for breaking changes, and the GoReleaser changelog groups them under *Breaking changes*.
+
+### Consequences
+- **Benefits**:
+  - One rule: "the tag has a v, versions don't".
+  - Floating tags and Homebrew never surprise users with a pre-release.
+  - Breaking changes are visible in the generated release notes.
+  - Tests render the real tag templates and check the release settings, so drift is caught in CI.
+- **Consequences**:
+  - Anyone using the `v0` image tag must switch to `0`.
+  - The `0` tag follows breaking minor releases before 1.0; the docs recommend pinning `X.Y.Z` or `X.Y`.
+  - PR titles must follow Conventional Commits for the changelog grouping to work.

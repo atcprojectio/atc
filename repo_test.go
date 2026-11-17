@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"text/template"
 
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
@@ -75,4 +76,98 @@ func TestShippedConfigsAreValid(t *testing.T) {
 		}
 	})
 	validateShipped(t, "Nomad job template", tpl)
+}
+
+// releaseContext holds the GoReleaser template fields the image tag templates use.
+type releaseContext struct {
+	Version    string
+	Major      uint64
+	Minor      uint64
+	Prerelease string
+	IsNightly  bool
+}
+
+func renderTags(t *testing.T, templates []string, ctx releaseContext) []string {
+	t.Helper()
+	var tags []string
+	for _, src := range templates {
+		tpl, err := template.New("tag").Parse(src)
+		require.NoError(t, err, src)
+		var b strings.Builder
+		require.NoError(t, tpl.Execute(&b, ctx), src)
+		if tag := strings.TrimSpace(b.String()); tag != "" { // GoReleaser skips empty tags
+			tags = append(tags, tag)
+		}
+	}
+	return tags
+}
+
+// TestImageTagsFollowVersioningPolicy renders the real image tag templates from
+// .goreleaser.yaml: artifacts use X.Y.Z without a "v", and the floating tags (X.Y, X,
+// latest) only move for full releases.
+func TestImageTagsFollowVersioningPolicy(t *testing.T) {
+	v := viper.New()
+	v.SetConfigFile(".goreleaser.yaml")
+	require.NoError(t, v.ReadInConfig())
+	dockers, ok := v.Get("dockers_v2").([]any)
+	require.True(t, ok && len(dockers) == 1, "expected one dockers_v2 entry")
+	var templates []string
+	for _, tag := range dockers[0].(map[string]any)["tags"].([]any) {
+		templates = append(templates, tag.(string))
+	}
+
+	assert.Equal(t, []string{"0.5.0", "0.5", "0", "latest"},
+		renderTags(t, templates, releaseContext{Version: "0.5.0", Major: 0, Minor: 5}), "full release")
+	assert.Equal(t, []string{"0.5.0-rc.1"},
+		renderTags(t, templates, releaseContext{Version: "0.5.0-rc.1", Major: 0, Minor: 5, Prerelease: "rc.1"}),
+		"pre-releases must not move latest or the floating tags")
+	assert.Equal(t, []string{"0.5.1-nightly"},
+		renderTags(t, templates, releaseContext{Version: "0.5.1-nightly", Major: 0, Minor: 5, IsNightly: true}))
+	for _, tpl := range templates {
+		assert.NotContains(t, tpl, "v{{", "image tags must not carry a v prefix")
+	}
+}
+
+// TestReleaseConfigFollowsVersioningPolicy checks the other release settings of the policy.
+func TestReleaseConfigFollowsVersioningPolicy(t *testing.T) {
+	v := viper.New()
+	v.SetConfigFile(".goreleaser.yaml")
+	require.NoError(t, v.ReadInConfig())
+
+	assert.NotContains(t, v.GetString("snapshot.version_template"), ".Tag", "snapshot versions must be plain X.Y.Z")
+	casks, ok := v.Get("homebrew_casks").([]any)
+	require.True(t, ok && len(casks) > 0)
+	for _, c := range casks {
+		assert.Equal(t, "auto", c.(map[string]any)["skip_upload"], "pre-releases must not be published to Homebrew")
+	}
+
+	makefile, err := os.ReadFile("Makefile")
+	require.NoError(t, err)
+	assert.Contains(t, string(makefile), "svu next --v0", "make tag must not jump to 1.0.0 on a breaking change")
+}
+
+// TestChangelogGroupsBreakingChanges: PR titles marked with "!" land under Breaking changes.
+func TestChangelogGroupsBreakingChanges(t *testing.T) {
+	v := viper.New()
+	v.SetConfigFile(".goreleaser.yaml")
+	require.NoError(t, v.ReadInConfig())
+	groups, ok := v.Get("changelog.groups").([]any)
+	require.True(t, ok && len(groups) > 0)
+
+	// GoReleaser puts a commit in the first group (by order) whose regexp matches.
+	groupOf := func(subject string) string {
+		for _, g := range groups {
+			m := g.(map[string]any)
+			re, _ := m["regexp"].(string)
+			if re == "" || regexp.MustCompile(re).MatchString(subject) {
+				return m["title"].(string)
+			}
+		}
+		return ""
+	}
+	assert.Equal(t, "Breaking changes", groupOf("feat(auth)!: require auth on network addresses (#181)"))
+	assert.Equal(t, "Breaking changes", groupOf("fix!: drop the v0 image tag"))
+	assert.Equal(t, "Features", groupOf("feat: readiness reflects Consul reachability"))
+	assert.Equal(t, "Fixes", groupOf("fix(deploy): published chart image tag"))
+	assert.Equal(t, "Other changes", groupOf("chore(deps): Bump grpc"))
 }
