@@ -246,63 +246,81 @@ brew install atc</code></pre>
           <tbody>
             <tr>
               <td><code>--config</code></td>
-              <td>-</td>
+              <td><code>ATC_CONFIG</code></td>
               <td>""</td>
-              <td>Path to YAML configuration file containing predefined strategies.</td>
-            </tr>
-            <tr>
-              <td><code>--port</code></td>
-              <td><code>PORT</code></td>
-              <td>8088</td>
-              <td>Port to expose the dashboard UI and services API.</td>
-            </tr>
-            <tr>
-              <td><code>--metrics_port</code></td>
-              <td><code>METRICS_PORT</code></td>
-              <td>8089</td>
-              <td>Port to expose the Prometheus scraping endpoint.</td>
-            </tr>
-            <tr>
-              <td><code>--mcp-port</code></td>
-              <td><code>MCP_PORT</code></td>
-              <td>8092</td>
-              <td>Port to expose the Model Context Protocol (MCP) server.</td>
+              <td>Path to the YAML configuration file.</td>
             </tr>
             <tr>
               <td><code>--consul_addr</code></td>
-              <td><code>CONSUL_HTTP_ADDR</code></td>
-              <td>localhost:8500</td>
-              <td>The Consul agent HTTP address.</td>
-            </tr>
-            <tr>
-              <td><code>--consul_dc</code></td>
-              <td><code>CONSUL_DC</code></td>
+              <td><code>ATC_CONSUL_ADDR</code></td>
               <td>""</td>
-              <td>Consul Datacenter. Defaults to local agent DC.</td>
+              <td>Consul HTTP address (e.g. <code>http://localhost:8500</code>). Shared by all commands.</td>
             </tr>
             <tr>
               <td><code>--consul_token</code></td>
-              <td><code>CONSUL_HTTP_TOKEN</code></td>
+              <td><code>ATC_CONSUL_TOKEN</code></td>
               <td>""</td>
-              <td>ACL token for authenticating with Consul.</td>
+              <td>ATC's own Consul ACL token. Prefer the environment variable or a mounted secret over the command line.</td>
+            </tr>
+            <tr>
+              <td><code>--consul_dc</code></td>
+              <td><code>ATC_CONSUL_DC</code></td>
+              <td>""</td>
+              <td>Consul datacenter. Empty means the local agent's datacenter.</td>
+            </tr>
+            <tr>
+              <td><code>--consul-namespace</code></td>
+              <td><code>ATC_CONSUL_NAMESPACE</code></td>
+              <td>""</td>
+              <td>Consul Enterprise namespace to scope watches and configuration writes to.</td>
+            </tr>
+            <tr>
+              <td><code>--node-name</code></td>
+              <td><code>ATC_NODE_NAME</code></td>
+              <td>""</td>
+              <td>Unique node identity for HA leader election. Defaults to a hostname-based identity.</td>
+            </tr>
+            <tr>
+              <td><code>--port</code></td>
+              <td><code>ATC_PORT</code></td>
+              <td>8088</td>
+              <td>Port for the dashboard UI and REST API.</td>
+            </tr>
+            <tr>
+              <td><code>--metrics_port</code></td>
+              <td><code>ATC_METRICS_PORT</code></td>
+              <td>8089</td>
+              <td>Port for the Prometheus <code>/metrics</code> endpoint.</td>
+            </tr>
+            <tr>
+              <td><code>--mcp-port</code></td>
+              <td><code>ATC_MCP_PORT</code></td>
+              <td>8092</td>
+              <td>Port for the Model Context Protocol (MCP) server. <code>0</code> disables it.</td>
             </tr>
             <tr>
               <td><code>--target</code></td>
-              <td>-</td>
-              <td>"all"</td>
-              <td>Comma-separated list of components to run (<code>forwarder</code>, <code>redirector</code>, <code>server</code>).</td>
+              <td><code>ATC_TARGET</code></td>
+              <td>all</td>
+              <td>Comma-separated modules to run (<code>all</code>, <code>consul</code>, <code>forwarder</code>, <code>redirector</code>). Run <code>atc modules</code> to list them.</td>
+            </tr>
+            <tr>
+              <td><code>--log_level</code></td>
+              <td><code>ATC_LOG_LEVEL</code></td>
+              <td>info</td>
+              <td>Minimum log severity (<code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code>).</td>
             </tr>
             <tr>
               <td><code>--ui-enabled</code></td>
-              <td>-</td>
+              <td><code>ATC_UI_ENABLED</code></td>
               <td>true</td>
-              <td>Enable serving the embedded React Web UI dashboard. If disabled, static endpoints return 404, while API & MCP routes remain active.</td>
+              <td>Serve the embedded web UI. If disabled, UI routes return 404 while the API and MCP stay available.</td>
             </tr>
             <tr>
               <td><code>--mcp-enabled</code></td>
-              <td>-</td>
+              <td><code>ATC_MCP_ENABLED</code></td>
               <td>true</td>
-              <td>Enable serving the Model Context Protocol (MCP) server. If disabled, the <code>/mcp</code> endpoint returns 404.</td>
+              <td>Serve the MCP server. If disabled, the MCP listener is not started.</td>
             </tr>
             <tr>
               <td><code>--listen-address</code></td>
@@ -318,24 +336,19 @@ brew install atc</code></pre>
             </tr>
             <tr>
               <td><code>--dry-run</code></td>
-              <td>-</td>
+              <td><code>ATC_DRY_RUN</code></td>
               <td>false</td>
-              <td>Enable dry-run mode to simulate configuration updates and log them without modifying Consul.</td>
-            </tr>
-            <tr>
-              <td><code>--consul-namespace</code></td>
-              <td>-</td>
-              <td>""</td>
-              <td>Consul Enterprise namespace to scope watcher and configuration updates to.</td>
+              <td>Log the Consul changes ATC would make without writing them.</td>
             </tr>
             <tr>
               <td><code>--write-rate-limit</code></td>
-              <td>-</td>
+              <td><code>ATC_WRITE_RATE_LIMIT</code></td>
               <td>"1s"</td>
-              <td>Coalesce configuration write actions within this window to limit frequency.</td>
+              <td>Coalescing window: catalog events within this duration are combined into one reconciliation. Must be a Go duration such as <code>1s</code> or <code>500ms</code>.</td>
             </tr>
           </tbody>
         </table>
+        <p>Settings are resolved in this order: command-line flags, then <code>ATC_*</code> environment variables, then the configuration file. The connection flags (<code>--consul_*</code>, <code>--node-name</code>) also apply to <code>atc leader</code> and <code>atc validate</code>. Settings without a flag, such as <code>resync_interval</code>, are set in the configuration file.</p>
 
         <h2>4. Deploying to Kubernetes (Helm)</h2>
         <p>An official versioned Helm chart is published directly to GitHub Container Registry (GHCR) as an OCI artifact. You can install it on your Kubernetes cluster using the following command:</p>
@@ -597,10 +610,10 @@ jobs:
         </p>
 
         <h2>4. Write Rate Limiting</h2>
-        <p>To prevent API write thrashing and protect the Consul cluster from overloading in large environments, a token-bucket rate limiter is applied to all state-changing Consul API updates. Rate limits can be configured in the YAML file or via command-line flags:</p>
-        <pre><code class="language-yaml"># Limit write operations to Consul to 10 per second
-write_rate_limit: "10/s"</code></pre>
-        <pre><code class="language-bash">atc server --config deploy/strategies.yaml --write-rate-limit="10/s"</code></pre>
+        <p>To avoid write thrashing when many catalog events arrive at once, ATC coalesces them: events within the <code>write_rate_limit</code> window are combined into a single reconciliation. It is a debounce window, not a requests-per-second limit, and must be a Go duration such as <code>"1s"</code> or <code>"500ms"</code> (<code>"0s"</code> reconciles on every event). Values such as <code>"10/s"</code> are rejected at startup.</p>
+        <pre><code class="language-yaml"># Combine catalog events that arrive within 1 second into one reconciliation
+write_rate_limit: "1s"</code></pre>
+        <pre><code class="language-bash">atc server --config deploy/strategies.yaml --write-rate-limit=500ms</code></pre>
       </section>
 
       <!-- Forwarder Module Section -->
@@ -646,6 +659,10 @@ write_rate_limit: "10/s"</code></pre>
         <div class="badge">Telemetry</div>
         <h1>OpenTelemetry Instrumentation</h1>
         <p>ATC is built with native cloud-observability support. It uses the OpenTelemetry SDK to emit structured logs, standard runtime and application metrics, and distributed trace spans.</p>
+
+        <h2>Enabling OTLP export</h2>
+        <p>Prometheus metrics are always served on the metrics port. OTLP export of traces, metrics and logs (over HTTP) is enabled only when an endpoint is configured with <code>OTEL_EXPORTER_OTLP_ENDPOINT</code>, or per signal with <code>OTEL_EXPORTER_OTLP_TRACES_ENDPOINT</code>, <code>OTEL_EXPORTER_OTLP_METRICS_ENDPOINT</code> or <code>OTEL_EXPORTER_OTLP_LOGS_ENDPOINT</code>. <code>OTEL_SDK_DISABLED=true</code> turns it off entirely. In the Helm chart, set these through <code>extraEnv</code>.</p>
+<pre><code class="language-bash">OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 atc server --config deploy/strategies.yaml</code></pre>
 
         <h2>Trace Spans</h2>
         <p>All reconciliation runs, watchers, and API handlers generate tracing spans. They propagate context using standard headers, allowing developers to trace reconciliation latency and Consul client overhead.</p>
@@ -733,7 +750,7 @@ make up-atc</code></pre>
         </ul>
 
         <h2>Docker Architecture</h2>
-        <p>The ATC binary sends OTLP metrics, traces, and logs directly to the OpenTelemetry Collector container listening on port <code>4317</code> (gRPC) and <code>4318</code> (HTTP). The Collector filters and distributes these signals to Prometheus, Tempo, and Loki respectively.</p>
+        <p>The ATC binary sends OTLP metrics, traces, and logs directly to the OpenTelemetry Collector container over OTLP/HTTP on port <code>4318</code> (set through <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> in the demo's Compose file). The Collector filters and distributes these signals to Prometheus, Tempo, and Loki respectively.</p>
       </section>
 
       <!-- Live Dashboard UI Section -->
@@ -837,10 +854,13 @@ make up-atc</code></pre>
           <li><code>name</code> (required): The name of the service to purge.</li>
         </ul>
 
-          <li><code>204 No Content</code>: Purge succeeded.</li>
+        <h3>Response Codes</h3>
+        <ul>
+          <li><code>204 No Content</code>: Purge succeeded. ATC reconciles right away, so automatic routing for the service is restored.</li>
           <li><code>400 Bad Request</code>: Missing service name parameter.</li>
           <li><code>403 Forbidden</code>: The entry was not created by ATC (cannot purge).</li>
           <li><code>404 Not Found</code>: The config entry does not exist in Consul.</li>
+          <li><code>500 Internal Server Error</code>: Consul could not be queried or the delete failed.</li>
         </ul>
 
         <h2>3. POST /api/overrides</h2>
@@ -916,6 +936,14 @@ make up-atc</code></pre>
       "leader_node": "atc-node-01",
       "lock_key": "atc/leader/lock/forwarder",
       "session_id": "c1a9a8be-e086-455b-b9d9-2ea11e1f76f7"
+    },
+    "redirector": {
+      "is_leader": false,
+      "leader_node": "atc-node-02",
+      "lock_key": "atc/leader/lock/redirector",
+      "session_id": "7f3c2d1e-5b4a-4c3d-9e8f-0a1b2c3d4e5f"
+    }
+  }
 }</code></pre>
 
         <h2>7. GET /api/modules</h2>
@@ -931,12 +959,10 @@ make up-atc</code></pre>
         <p>Returns the WAN federation status of all configured target datacenters, including local Consul agent WAN member states.</p>
 
         <h3>Response Schema</h3>
-        <pre><code class="language-json">{
-  "dc2": {
-    "status": "alive",
-    "rtt": "1.24ms"
-  }
-}</code></pre>
+        <pre><code class="language-json">[
+  {"datacenter": "dc1", "status": "alive"},
+  {"datacenter": "dc2", "status": "failed"}
+]</code></pre>
 
         <h2>9. GET /ready and GET /health</h2>
         <p>Both probes return <code>200 OK</code> with the plain-text body <code>OK</code>, or <code>503 Service Unavailable</code> while a shutdown is in progress. They skip authentication and Host/Origin checks so orchestrator probes keep working.</p>

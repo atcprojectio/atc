@@ -6,7 +6,9 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'Makefile'
-      - '.github/workflows/pr-backend.yml'
+      - '.github/workflows/**'
+      - 'deploy/**'
+      - 'docs/index.html'
 permissions:
   contents: read
   pull-requests: read
@@ -25,7 +27,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Install golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.12.2
           args: --timeout=5m
@@ -46,7 +48,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - uses: autero1/action-gotestsum@v2.0.0
+      - uses: autero1/action-gotestsum@7263b9d73912eec65f46337689e59fac865c425f # v2.0.0
         with:
           gotestsum_version: v1.13.0
       - run: make test
@@ -76,7 +78,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - uses: goreleaser/goreleaser-action@v7
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser
           version: '~> v2'
