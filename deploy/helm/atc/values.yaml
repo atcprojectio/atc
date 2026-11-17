@@ -73,7 +73,17 @@ nodeSelector: {}
 
 tolerations: []
 
+# Explicit affinity rules. When empty and replicaCount > 1, the chart adds pod
+# anti-affinity on kubernetes.io/hostname according to podAntiAffinity.
 affinity: {}
+
+# soft (prefer different nodes), hard (require them) or none.
+podAntiAffinity: soft
+
+# Keep at least one replica running during node drains (only when replicaCount > 1).
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
 
 config:
   logLevel: info

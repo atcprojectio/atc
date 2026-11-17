@@ -40,6 +40,20 @@ check "extraEnv is rendered" "$custom" 'name: OTEL_EXPORTER_OTLP_ENDPOINT'
 packaged=$(helm template t "$chart" --set image.tag="" | grep 'image:' || true)
 check "appVersion drives the image tag" "$packaged" 'atc:[0-9]+\.[0-9]+\.[0-9]+'
 
+# HA: replicas are spread over nodes and protected during drains.
+check "PodDisruptionBudget rendered for 2 replicas" "$defaults" 'kind: PodDisruptionBudget'
+check "PDB allows at most one replica down" "$defaults" 'maxUnavailable: 1'
+check "soft anti-affinity by default" "$defaults" 'preferredDuringSchedulingIgnoredDuringExecution'
+check "anti-affinity spreads over nodes" "$defaults" 'topologyKey: kubernetes.io/hostname'
+hard=$(helm template t "$chart" --set podAntiAffinity=hard)
+check "hard anti-affinity on request" "$hard" 'requiredDuringSchedulingIgnoredDuringExecution'
+single=$(helm template t "$chart" --set replicaCount=1)
+check "no PDB for a single replica (it would block drains)" "$single" 'kind: PodDisruptionBudget' absent
+check "no anti-affinity for a single replica" "$single" 'podAntiAffinity' absent
+explicit=$(helm template t "$chart" --set 'affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].key=pool' --set 'affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].operator=Exists')
+check "explicit affinity replaces the default" "$explicit" 'nodeAffinity'
+check "explicit affinity has no default anti-affinity" "$explicit" 'podAntiAffinity' absent
+
 # Simulate the release workflow: the chart is packaged from a git tag like "v0.5.0".
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 GITHUB_REF_NAME=v0.5.0
