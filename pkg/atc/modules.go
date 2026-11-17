@@ -37,6 +37,9 @@ func (t *Atc) initServer() error {
 		serv.MetricsMux.Handle("/metrics", telemetry.GlobalPrometheusHandler)
 	}
 
+	// Unauthenticated on purpose: the dashboard must be able to explain a Consul outage even
+	// when delegated tokens cannot be verified. It only exposes fixed status messages.
+	serv.Mux.HandleFunc("GET /api/status", t.apiStatusHandler)
 	serv.Mux.Handle("GET /api/services", t.authMiddleware(http.HandlerFunc(t.apiServicesHandler)))
 	serv.Mux.Handle("DELETE /api/services", t.authMiddleware(http.HandlerFunc(t.apiServicesDeleteHandler)))
 	serv.Mux.Handle("GET /api/leader", t.authMiddleware(http.HandlerFunc(t.apiLeaderHandler)))

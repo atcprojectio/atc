@@ -926,11 +926,23 @@ make up-atc</code></pre>
 }</code></pre>
 
         <h2>9. GET /ready and GET /health</h2>
-        <p><code>/ready</code> is the readiness probe. It returns <code>200 OK</code> with the plain-text body <code>OK</code> when the instance can serve requests: it is not shutting down and it can reach a Consul cluster that has a leader. Otherwise it returns <code>503 Service Unavailable</code> with the reason (for example <code>Not ready: consul unreachable: ...</code>). The Consul check uses ATC's own token and is cached for 5 seconds. The <code>check_readiness</code> MCP tool reports the same result.</p>
-        <p><code>/health</code> is the liveness probe. It returns <code>200 OK</code> unless a shutdown is in progress, and deliberately does not check Consul, so a Consul outage does not cause orchestrators to restart ATC.</p>
-        <p>Both endpoints skip authentication and Host/Origin checks so that orchestrator probes keep working.</p>
+        <p>Both probes return <code>200 OK</code> with the plain-text body <code>OK</code>, or <code>503 Service Unavailable</code> while a shutdown is in progress. They skip authentication and Host/Origin checks so orchestrator probes keep working.</p>
+        <p>Neither probe checks Consul, on purpose. Consul is shared by every replica, so failing readiness during a Consul outage would remove all replicas from the load balancer at once and replace the dashboard with a bare error page. Instead, the dashboard explains the outage (see <code>GET /api/status</code>).</p>
 
-        <h2>10. GET /services</h2>
+        <h2>10. GET /api/status</h2>
+        <p>Reports whether ATC can use Consul. It needs no token, so the dashboard can explain an outage even when delegated tokens cannot be verified. It returns fixed messages only; the underlying error is logged by ATC (<code>Consul is not usable</code> / <code>Consul connection restored</code>). The check uses ATC's own token and is cached for 5 seconds.</p>
+        <pre><code class="language-json">{
+  "consul": {
+    "reachable": false,
+    "problem": "unreachable",
+    "message": "ATC cannot reach Consul.",
+    "last_contact": "2026-11-17T12:44:49+01:00",
+    "checked_at": "2026-11-17T12:45:08+01:00"
+  }
+}</code></pre>
+        <p><code>problem</code> is <code>unreachable</code> or <code>no_leader</code>, and is omitted when Consul is reachable. While Consul is unusable, the dashboard shows an outage banner and disables override and purge actions, and requests authenticated with a delegated Consul token get <code>503</code> with <code>{"error": "consul_unavailable"}</code> instead of <code>401</code>.</p>
+
+        <h2>11. GET /services</h2>
         <p>Returns an ASCII representation of the active services catalog and their routing configurations (intended for quick terminal debugging).</p>
 
         <h3>Response Headers</h3>

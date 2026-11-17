@@ -28,6 +28,10 @@ function App() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [countdown, setCountdown] = useState(10);
   const [lastUpdated, setLastUpdated] = useState(null);
+  // Consul connectivity as reported by GET /api/status (null until the first answer).
+  const [consulStatus, setConsulStatus] = useState(null);
+  // False when the browser cannot reach the ATC server at all.
+  const [atcReachable, setAtcReachable] = useState(true);
   const [leaderComponents, setLeaderComponents] = useState({ forwarder: false, redirector: false });
   const [leaderInfo, setLeaderInfo] = useState(null);
   const [federation, setFederation] = useState({});
@@ -101,18 +105,39 @@ function App() {
       const headers = getHeaders(currentToken);
 
       const [
+        statusOutcome,
         leaderOutcome,
         fedOutcome,
         stratOutcome,
         modulesOutcome,
         servicesOutcome,
       ] = await Promise.allSettled([
+        fetch('/api/status', { headers }),
         fetch('/api/leader', { headers }),
         fetch('/api/federation', { headers }),
         fetch('/api/strategies', { headers }),
         fetch('/api/modules', { headers }),
         fetch('/api/services', { headers }),
       ]);
+
+      // The status endpoint needs no token; if even it cannot be fetched, ATC itself is down
+      // or unreachable from this browser.
+      let consulDown = false;
+      if (statusOutcome.status === 'rejected') {
+        setAtcReachable(false);
+        return;
+      }
+      setAtcReachable(true);
+      if (statusOutcome.value && statusOutcome.value.ok) {
+        try {
+          const statusData = await statusOutcome.value.json();
+          const consul = statusData && statusData.consul ? statusData.consul : null;
+          setConsulStatus(consul);
+          consulDown = !!consul && consul.reachable === false;
+        } catch (err) {
+          console.error('Failed to parse ATC status:', err);
+        }
+      }
 
       const outcomes = [
         leaderOutcome,
@@ -189,6 +214,11 @@ function App() {
 
       const res = servicesOutcome.value;
       if (!res.ok) {
+        if (consulDown) {
+          // The Consul outage banner explains this; keep showing the last known services.
+          setError(null);
+          return;
+        }
         throw new Error(`Failed to fetch services: ${res.statusText}`);
       }
       const data = await res.json();
@@ -315,6 +345,21 @@ function App() {
     } catch (err) {
       alert(err.message);
     }
+  };
+
+  // Changing routing needs Consul (and ATC); block the buttons rather than let them fail.
+  const writesBlocked = !atcReachable || (!!consulStatus && consulStatus.reachable === false);
+
+  // "How long ago" is measured against the server's latest check, so it needs no clock read
+  // during render and is not skewed by the browser's clock.
+  const formatTimestamp = (iso, asOfIso) => {
+    const then = new Date(iso);
+    if (Number.isNaN(then.getTime())) return iso;
+    const asOf = new Date(asOfIso);
+    if (Number.isNaN(asOf.getTime())) return then.toLocaleTimeString();
+    const minutes = Math.max(0, Math.round((asOf.getTime() - then.getTime()) / 60000));
+    const ago = minutes < 1 ? 'less than a minute ago' : minutes === 1 ? '1 minute ago' : `${minutes} minutes ago`;
+    return `${then.toLocaleTimeString()} (${ago})`;
   };
 
   const renderDatacenterNode = (service, dc, isRedirect = false) => {
@@ -503,8 +548,43 @@ Lock Key: ${lockKey}`;
               </div>
             </section>
 
+            {/* Outage banners: plain-language explanations instead of raw errors */}
+            {!atcReachable && (
+              <div className="outage-banner glass-panel" role="alert">
+                <span className="outage-icon" aria-hidden="true">🔌</span>
+                <div className="outage-message">
+                  <h4>Lost connection to ATC</h4>
+                  <p>This page cannot reach the ATC server. It may be restarting, or your network connection may have dropped.</p>
+                  {lastUpdated && <p className="outage-detail">The information below is from {lastUpdated} and may be out of date.</p>}
+                  {autoRefresh && <p className="outage-detail">Checking again automatically every 10 seconds.</p>}
+                </div>
+                <button onClick={handleManualRefresh} className="btn btn-retry">
+                  Retry now
+                </button>
+              </div>
+            )}
+            {atcReachable && consulStatus && consulStatus.reachable === false && (
+              <div className="outage-banner glass-panel" role="alert">
+                <span className="outage-icon" aria-hidden="true">⚠️</span>
+                <div className="outage-message">
+                  <h4>{consulStatus.problem === 'no_leader' ? 'Consul has no cluster leader' : 'Consul is unreachable'}</h4>
+                  <p>{consulStatus.message} While this lasts, ATC cannot read or change routing: automatic failover and redirects are paused and manual overrides cannot be applied. Routing rules already stored in Consul stay as they are.</p>
+                  <p className="outage-detail">
+                    {consulStatus.last_contact
+                      ? `Last successful contact: ${formatTimestamp(consulStatus.last_contact, consulStatus.checked_at)}.`
+                      : 'ATC has not reached Consul since it started.'}
+                    {lastUpdated ? ` Services below show the last known state (synced ${lastUpdated}).` : ''}
+                  </p>
+                  {autoRefresh && <p className="outage-detail">Checking again automatically every 10 seconds.</p>}
+                </div>
+                <button onClick={handleManualRefresh} className="btn btn-retry">
+                  Retry now
+                </button>
+              </div>
+            )}
+
             {/* Error State */}
-            {error && (
+            {error && atcReachable && !(consulStatus && consulStatus.reachable === false) && (
               <div className="error-banner glass-panel">
                 <span className="error-icon">⚠️</span>
                 <div className="error-message">
@@ -556,6 +636,7 @@ Lock Key: ${lockKey}`;
                             </span>
                             <button
                               onClick={() => handlePurge(svc.name)}
+                              disabled={writesBlocked}
                               className="btn-purge btn-remove-override"
                               title="Remove manual override and resume automatic routing"
                             >
@@ -568,6 +649,7 @@ Lock Key: ${lockKey}`;
                             <span className="deleted-badge">Offline (Redirecting)</span>
                             <button
                               onClick={() => handlePurge(svc.name)}
+                              disabled={writesBlocked}
                               className="btn-purge"
                               title="Purge resolver config entry from Consul"
                             >
@@ -709,6 +791,8 @@ Lock Key: ${lockKey}`;
                               <div className="form-buttons">
                                 <button 
                                   onClick={() => handleApplyOverride(svc.name)} 
+                                  disabled={writesBlocked}
+                                  title={writesBlocked ? 'Unavailable while ATC cannot reach Consul' : undefined}
                                   className="btn btn-apply-override"
                                 >
                                   Apply Override
@@ -734,6 +818,8 @@ Lock Key: ${lockKey}`;
                                       : (svc.failover_targets && svc.failover_targets.length > 0 ? svc.failover_targets[0].datacenter : '')
                                   );
                                 }}
+                                disabled={writesBlocked}
+                                title={writesBlocked ? 'Unavailable while ATC cannot reach Consul' : undefined}
                                 className="btn btn-override-trigger"
                               >
                                 ⚡ Apply Manual Override

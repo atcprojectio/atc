@@ -6,10 +6,12 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/hashicorp/consul/api"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -84,7 +86,25 @@ func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 
 		// Validate Consul token delegation (with short TTL cache)
 		if !authorized && tokenDelegation {
-			authorized = t.verifyDelegatedConsulToken(consulAddr, consulDC, token)
+			var verifyErr error
+			authorized, verifyErr = t.verifyDelegatedConsulToken(consulAddr, consulDC, token)
+			if verifyErr != nil {
+				// Consul is down: we cannot tell whether the token is valid. Saying "invalid
+				// token" here would send operators hunting for a credentials problem.
+				span.SetStatus(codes.Error, "consul unavailable for token verification")
+				span.SetAttributes(
+					attribute.String("auth.status", "failure"),
+					attribute.String("auth.error", "consul_unavailable"),
+				)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "10")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error":   "consul_unavailable",
+					"message": "Your token could not be checked because ATC cannot reach Consul. This is not a problem with your token.",
+				})
+				return
+			}
 		}
 
 		if !authorized {
@@ -109,7 +129,9 @@ func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func (t *Atc) verifyDelegatedConsulToken(consulAddr, consulDC, token string) bool {
+// verifyDelegatedConsulToken reports whether Consul accepts token. A non-nil error means
+// Consul could not be asked (unreachable, no leader, 5xx), as opposed to a rejected token.
+func (t *Atc) verifyDelegatedConsulToken(consulAddr, consulDC, token string) (bool, error) {
 	cacheKey := consulAddr + "|" + consulDC + "|" + token
 	now := time.Now()
 
@@ -117,7 +139,7 @@ func (t *Atc) verifyDelegatedConsulToken(consulAddr, consulDC, token string) boo
 	if t.tokenCache != nil {
 		if exp, ok := t.tokenCache[cacheKey]; ok && now.Before(exp) {
 			t.tokenCacheMu.RUnlock()
-			return true
+			return true, nil
 		}
 	}
 	t.tokenCacheMu.RUnlock()
@@ -126,10 +148,14 @@ func (t *Atc) verifyDelegatedConsulToken(consulAddr, consulDC, token string) boo
 	// the client cache without bound by sending random tokens.
 	client, err := t.newRequestConsulClient(consulAddr, token, consulDC, "")
 	if err != nil {
-		return false
+		return false, err
 	}
 	if _, err := client.Agent().Self(); err != nil {
-		return false
+		var se api.StatusError
+		if errors.As(err, &se) && (se.Code == http.StatusForbidden || se.Code == http.StatusUnauthorized) {
+			return false, nil // Consul answered: the token is not valid.
+		}
+		return false, err
 	}
 
 	t.tokenCacheMu.Lock()
@@ -143,7 +169,7 @@ func (t *Atc) verifyDelegatedConsulToken(consulAddr, consulDC, token string) boo
 	}
 	t.tokenCache[cacheKey] = now.Add(delegatedTokenCacheTTL)
 	t.tokenCacheMu.Unlock()
-	return true
+	return true, nil
 }
 
 // isStaticKey reports, in constant time per key, whether token is one of the static API keys.

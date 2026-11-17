@@ -30,6 +30,11 @@ type ReadinessChecker interface {
 	CheckReadiness(ctx context.Context) error
 }
 
+// ConsulStatusReporter is optionally implemented by a Service to report Consul connectivity.
+type ConsulStatusReporter interface {
+	ConsulStatusMessage(ctx context.Context) (reachable bool, message string)
+}
+
 type Auditor interface {
 	LogAudit(ctx context.Context, action, service string, details map[string]any)
 }
@@ -60,6 +65,11 @@ func NewHandler(svc Service) http.Handler {
 		if rc, ok := svc.(ReadinessChecker); ok {
 			if err := rc.CheckReadiness(ctx); err != nil {
 				text = "NOT READY: " + err.Error()
+			}
+		}
+		if cs, ok := svc.(ConsulStatusReporter); ok && text == "OK" {
+			if reachable, msg := cs.ConsulStatusMessage(ctx); !reachable {
+				text = "DEGRADED: " + msg + " Routing cannot be read or changed until Consul is back."
 			}
 		}
 		return &mcp.CallToolResult{

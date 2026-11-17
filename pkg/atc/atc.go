@@ -111,9 +111,8 @@ type Atc struct {
 	overridesCount   int64
 	overridesCountAt time.Time
 
-	readyMu        sync.Mutex
-	readyCheckedAt time.Time
-	readyErr       error
+	consulStatusMu sync.Mutex
+	consulStatus   ConsulStatus
 
 	isLeader         atomic.Bool
 	forwarderLeader  atomic.Bool
@@ -610,14 +609,25 @@ func (t *Atc) healthHandler(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "OK")
 }
 
-// readyHandler is the readiness probe: the instance can serve API/MCP requests only while it
-// is not shutting down and can reach a Consul cluster that has a leader.
+// readyHandler is the readiness probe. It only fails while shutting down. It deliberately
+// does NOT depend on Consul: Consul is shared by all replicas, so failing readiness on a
+// Consul outage would pull every replica out of the Service at once and leave operators
+// with a bare load-balancer error instead of a dashboard that explains the outage.
+// Consul health is reported by GET /api/status and shown in the dashboard instead.
 func (t *Atc) readyHandler(w http.ResponseWriter, r *http.Request) {
 	if err := t.CheckReadiness(r.Context()); err != nil {
 		http.Error(w, "Not ready: "+err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	fmt.Fprintf(w, "OK")
+}
+
+// CheckReadiness reports why this instance cannot serve requests, or nil if it can.
+func (t *Atc) CheckReadiness(_ context.Context) error {
+	if t.shutdownRequested.Load() {
+		return errors.New("application is stopping")
+	}
+	return nil
 }
 
 // overridesGaugeTTL bounds how often the atc_overrides_active gauge queries Consul. Without it
@@ -642,31 +652,71 @@ func (t *Atc) activeOverridesCount(ctx context.Context) (n int64, ok bool) {
 	return t.overridesCount, true
 }
 
-// readinessCacheTTL bounds how often readiness probes hit Consul. Var for tests.
-var readinessCacheTTL = 5 * time.Second
+// consulStatusCacheTTL bounds how often status checks hit Consul. Var for tests.
+var consulStatusCacheTTL = 5 * time.Second
 
-// CheckReadiness reports why this instance cannot serve requests, or nil if it can.
-// The Consul check uses ATC's own token and is cached for readinessCacheTTL.
-func (t *Atc) CheckReadiness(ctx context.Context) error {
-	if t.shutdownRequested.Load() {
-		return errors.New("application is stopping")
+// ConsulStatus is what the dashboard shows about ATC's connection to Consul. It is served
+// without authentication, so it carries fixed, human-readable messages only; raw errors
+// (which may contain internal addresses) are logged instead.
+type ConsulStatus struct {
+	Reachable   bool       `json:"reachable"`
+	Problem     string     `json:"problem,omitempty"` // "unreachable" or "no_leader"
+	Message     string     `json:"message"`
+	LastContact *time.Time `json:"last_contact,omitempty"`
+	CheckedAt   time.Time  `json:"checked_at"`
+}
+
+const (
+	consulProblemUnreachable = "unreachable"
+	consulProblemNoLeader    = "no_leader"
+)
+
+// GetConsulStatus checks Consul with ATC's own token, cached for consulStatusCacheTTL.
+// Changes in reachability are logged once, with the underlying error.
+func (t *Atc) GetConsulStatus(ctx context.Context) ConsulStatus {
+	t.consulStatusMu.Lock()
+	defer t.consulStatusMu.Unlock()
+	if !t.consulStatus.CheckedAt.IsZero() && time.Since(t.consulStatus.CheckedAt) < consulStatusCacheTTL {
+		return t.consulStatus
 	}
 
-	t.readyMu.Lock()
-	if !t.readyCheckedAt.IsZero() && time.Since(t.readyCheckedAt) < readinessCacheTTL {
-		err := t.readyErr
-		t.readyMu.Unlock()
-		return err
-	}
-	t.readyMu.Unlock()
-
+	prev := t.consulStatus
+	st := ConsulStatus{CheckedAt: time.Now(), LastContact: prev.LastContact}
 	err := t.probeConsul(ctx)
+	switch {
+	case err == nil:
+		now := st.CheckedAt
+		st.Reachable, st.LastContact, st.Message = true, &now, "Connected to Consul."
+	case errors.Is(err, errConsulNoLeader):
+		st.Problem, st.Message = consulProblemNoLeader, "Consul is reachable but has no cluster leader, so it cannot serve or store routing configuration."
+	default:
+		st.Problem, st.Message = consulProblemUnreachable, "ATC cannot reach Consul."
+	}
 
-	t.readyMu.Lock()
-	t.readyCheckedAt = time.Now()
-	t.readyErr = err
-	t.readyMu.Unlock()
-	return err
+	firstCheck := prev.CheckedAt.IsZero()
+	if st.Reachable && !firstCheck && !prev.Reachable {
+		t.coreLogger.InfoContext(ctx, "Consul connection restored")
+	} else if !st.Reachable && (firstCheck || prev.Reachable || prev.Problem != st.Problem) {
+		t.coreLogger.WarnContext(ctx, "Consul is not usable", slog.String("problem", st.Problem), slog.Any("error", err))
+	}
+
+	t.consulStatus = st
+	return st
+}
+
+var errConsulNoLeader = errors.New("consul cluster has no leader")
+
+func (t *Atc) apiStatusHandler(w http.ResponseWriter, r *http.Request) {
+	st := t.GetConsulStatus(r.Context())
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{"consul": st})
+}
+
+// ConsulStatusMessage lets the MCP check_readiness tool describe Consul connectivity.
+func (t *Atc) ConsulStatusMessage(ctx context.Context) (bool, string) {
+	st := t.GetConsulStatus(ctx)
+	return st.Reachable, st.Message
 }
 
 func (t *Atc) probeConsul(ctx context.Context) error {
@@ -685,7 +735,7 @@ func (t *Atc) probeConsul(ctx context.Context) error {
 		return fmt.Errorf("consul unreachable: %w", err)
 	}
 	if leader == "" {
-		return errors.New("consul cluster has no leader")
+		return errConsulNoLeader
 	}
 	return nil
 }

@@ -34,6 +34,12 @@ describe('ATC Dashboard App', () => {
     vi.restoreAllMocks();
     
     window.fetch = vi.fn().mockImplementation((url, options) => {
+      if (url.includes('/api/status')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ consul: { reachable: true, message: 'Connected to Consul.' } })
+        });
+      }
       if (url.includes('/api/federation')) {
         return Promise.resolve({
           ok: true,
@@ -263,11 +269,95 @@ describe('ATC Dashboard App', () => {
     // Should not fire requests immediately on each keystroke
     expect(window.fetch).not.toHaveBeenCalled();
 
-    // Flushing on blur triggers a single batch of 5 parallel requests
+    // Flushing on blur triggers a single batch of 6 parallel requests (status + 5 API calls)
     fireEvent.blur(tokenInput);
 
     await waitFor(() => {
-      expect(window.fetch).toHaveBeenCalledTimes(5);
+      expect(window.fetch).toHaveBeenCalledTimes(6);
+    });
+  });
+
+  describe('outages', () => {
+    const consulDownStatus = {
+      ok: true,
+      json: () => Promise.resolve({
+        consul: {
+          reachable: false,
+          problem: 'unreachable',
+          message: 'ATC cannot reach Consul.',
+          last_contact: '2026-11-17T10:00:00Z',
+          checked_at: '2026-11-17T10:07:00Z'
+        }
+      })
+    };
+
+    it('explains a Consul outage instead of showing an authentication or raw error', async () => {
+      const origImpl = window.fetch.getMockImplementation();
+      window.fetch.mockImplementation((url, options) => {
+        if (url.includes('/api/status')) return Promise.resolve(consulDownStatus);
+        if (url.includes('/api/services')) {
+          // Delegated token cannot be verified while Consul is down.
+          return Promise.resolve({
+            ok: false,
+            status: 503,
+            statusText: 'Service Unavailable',
+            json: () => Promise.resolve({ error: 'consul_unavailable' })
+          });
+        }
+        return origImpl(url, options);
+      });
+
+      render(<App />);
+
+      expect(await screen.findByText('Consul is unreachable')).toBeInTheDocument();
+      expect(screen.getByText(/automatic failover and redirects are paused/i)).toBeInTheDocument();
+      expect(screen.getByText(/Last successful contact: .*\(7 minutes ago\)/)).toBeInTheDocument();
+      expect(screen.queryByText(/Authentication failed/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Failed to fetch services/i)).not.toBeInTheDocument();
+    });
+
+    it('distinguishes a Consul cluster without a leader', async () => {
+      const origImpl = window.fetch.getMockImplementation();
+      window.fetch.mockImplementation((url, options) => {
+        if (url.includes('/api/status')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              consul: { reachable: false, problem: 'no_leader', message: 'Consul is reachable but has no cluster leader.' }
+            })
+          });
+        }
+        return origImpl(url, options);
+      });
+
+      render(<App />);
+
+      expect(await screen.findByText('Consul has no cluster leader')).toBeInTheDocument();
+      expect(screen.getByText(/has not reached Consul since it started/i)).toBeInTheDocument();
+    });
+
+    it('disables routing changes while Consul is down', async () => {
+      const origImpl = window.fetch.getMockImplementation();
+      window.fetch.mockImplementation((url, options) => {
+        if (url.includes('/api/status')) return Promise.resolve(consulDownStatus);
+        return origImpl(url, options);
+      });
+
+      render(<App />);
+
+      await screen.findByText('Consul is unreachable');
+      const overrideButtons = await screen.findAllByText(/Apply Manual Override/);
+      overrideButtons.forEach((btn) => expect(btn.closest('button')).toBeDisabled());
+      expect(screen.getByText(/Purge/).closest('button')).toBeDisabled();
+    });
+
+    it('tells the user when ATC itself cannot be reached', async () => {
+      window.fetch.mockImplementation(() => Promise.reject(new TypeError('Failed to fetch')));
+
+      render(<App />);
+
+      expect(await screen.findByText('Lost connection to ATC')).toBeInTheDocument();
+      expect(screen.queryByText('Failed to fetch')).not.toBeInTheDocument();
     });
   });
 });
