@@ -41,6 +41,14 @@ func ValidateConfig(cfg Config) []error {
 		}
 	}
 
+	if cfg.ResyncInterval != "" {
+		if d, err := time.ParseDuration(cfg.ResyncInterval); err != nil {
+			errs = append(errs, fmt.Errorf("invalid resync_interval %q: %w", cfg.ResyncInterval, err))
+		} else if d < 0 {
+			errs = append(errs, fmt.Errorf("resync_interval %q must not be negative", cfg.ResyncInterval))
+		}
+	}
+
 	// Validate HA Leader Election
 	if cfg.HA.Enabled {
 		if cfg.HA.SessionTTL != "" {

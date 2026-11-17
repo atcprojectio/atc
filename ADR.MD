@@ -750,5 +750,31 @@ As the project evolved, the `README.md` file grew significantly in size (~380 li
 - **Consequences**:
   - Offline users reading the repository directly on GitHub must click through to `docs/` or view pages online to read detailed API schemas.
 
+---
 
+## ADR 0031: Reconciliation Triggers, Persisted Redirect Intent and Resolver Ownership
 
+### Status
+Accepted
+
+### Date
+2026-11-17
+
+### Context
+A review found that reconciliation only ran on catalog and health-check events. Failed writes were never retried; deleting a resolver (clearing or expiring an override) left the service without one; configuration reloads were not applied until an unrelated event. A service's redirect strategy lived only in the leader's memory, so a newly elected leader redirected a disappearing service to the wrong target. Finally, ATC replaced any existing `service-resolver` for an `atc.enabled` service, silently dropping hand-written fields such as subsets and load balancing.
+
+### Decision
+- **Triggers and resync**: Reloads and purges broadcast a reconcile request to the running modules, and the leader runs a full resync every `resync_interval` (default 60s). A reconcile with failed writes returns an error so it is counted as failed and retried by the next resync.
+- **Connection changes**: Reloads pass the Consul address, token, datacenter and namespace to the watcher and modules. The modules use the current client for every reconcile, and the watcher restarts its watches when the settings change.
+- **Persisted redirect intent**: Resolvers written by ATC record the service's `atc.redirect` and `atc.dampening` tags under `atc-redirect-on-removal` and `atc-dampening-on-removal`. When a service disappears, the redirector uses its in-memory cache, then this metadata, then the `default` redirect strategy.
+- **Resolver ownership**: ATC only writes resolvers it created (`created-by: atc` or `atc-override`) or that do not exist yet. An existing resolver created by someone else is left untouched, logged once and counted in `atc_foreign_resolvers`, unless the service is tagged `atc.adopt=true`. Overrides refuse to replace such a resolver unless `force` is set.
+
+### Consequences
+- **Benefits**:
+  - Routing converges within one resync interval after transient failures, deletions and reloads.
+  - Redirects follow the configured strategy regardless of which node is leader.
+  - Operator-written resolvers are never silently overwritten.
+- **Consequences**:
+  - Each leader does a full reconcile every resync interval (a handful of Consul reads per interval).
+  - Existing ATC-written resolvers are rewritten once after upgrade to record the redirect intent.
+  - Services whose resolver was not created by ATC no longer get automatic failover until they are tagged `atc.adopt=true` — a behaviour change for anyone relying on ATC taking over existing resolvers.

@@ -29,6 +29,10 @@ type ConsulWatcher struct {
 	consulNamespace string
 	Events          *Broadcaster
 
+	// restartCh asks a running watch to rebuild its Consul client and plans, so that
+	// connection changes (address, token, datacenter, namespace) take effect without a restart.
+	restartCh chan struct{}
+
 	runMu         sync.Mutex
 	activeRunners int
 	currentWatch  *activeWatch
@@ -55,15 +59,34 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 		consulDC:        consulDC,
 		consulNamespace: consulNamespace,
 		Events:          NewBroadcaster(),
+		restartCh:       make(chan struct{}, 1),
 		eventsCounter:   eventsCounter,
 		errorsCounter:   errorsCounter,
 	}
 }
 
 func (w *ConsulWatcher) SetNamespace(ns string) {
+	w.mu.RLock()
+	addr, token, dc := w.consulAddr, w.consulToken, w.consulDC
+	w.mu.RUnlock()
+	w.SetConnection(addr, token, dc, ns)
+}
+
+// SetConnection updates the Consul connection settings. If they changed and a watch is
+// running, the watch is restarted with the new settings and a "connection_changed" event is
+// broadcast so subscribers reconcile against the new connection.
+func (w *ConsulWatcher) SetConnection(addr, token, dc, ns string) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.consulNamespace = ns
+	changed := w.consulAddr != addr || w.consulToken != token || w.consulDC != dc || w.consulNamespace != ns
+	w.consulAddr, w.consulToken, w.consulDC, w.consulNamespace = addr, token, dc, ns
+	w.mu.Unlock()
+	if !changed || w.restartCh == nil {
+		return
+	}
+	select {
+	case w.restartCh <- struct{}{}:
+	default: // a restart is already pending
+	}
 }
 
 var tracer = otel.Tracer("atc/watcher")
@@ -121,7 +144,25 @@ func (w *ConsulWatcher) Run(ctx context.Context) error {
 	}
 }
 
+// runWatchPlans runs the services and checks watches, restarting them whenever
+// SetConnection changes the connection settings.
 func (w *ConsulWatcher) runWatchPlans(ctx context.Context) error {
+	// A change made while no watch was running is already reflected in the settings.
+	select {
+	case <-w.restartCh:
+	default:
+	}
+	for {
+		restart, err := w.runWatchPlansOnce(ctx)
+		if err != nil || !restart {
+			return err
+		}
+		w.logger.InfoContext(ctx, "Consul connection settings changed, restarting watches")
+		w.Events.Broadcast("connection_changed")
+	}
+}
+
+func (w *ConsulWatcher) runWatchPlansOnce(ctx context.Context) (restart bool, err error) {
 	ctx, span := tracer.Start(ctx, "ConsulWatcher.Run")
 	defer span.End()
 
@@ -132,11 +173,11 @@ func (w *ConsulWatcher) runWatchPlans(ctx context.Context) error {
 	ns := w.consulNamespace
 	w.mu.RUnlock()
 
-	client, err := api.NewClient(consulCfg(addr, token, dc, ns))
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("failed to connect to consul: %w", err)
+	client, clientErr := api.NewClient(consulCfg(addr, token, dc, ns))
+	if clientErr != nil {
+		span.RecordError(clientErr)
+		span.SetStatus(codes.Error, clientErr.Error())
+		return false, fmt.Errorf("failed to connect to consul: %w", clientErr)
 	}
 
 	servicesParams := map[string]any{"type": "services"}
@@ -150,7 +191,7 @@ func (w *ConsulWatcher) runWatchPlans(ctx context.Context) error {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("failed to create services watcher plan: %w", err)
+		return false, fmt.Errorf("failed to create services watcher plan: %w", err)
 	}
 	servicesWatcher.HybridHandler = func(_ watch.BlockingParamVal, _ any) {
 		w.logger.DebugContext(ctx, "Watcher received services update from Consul")
@@ -174,7 +215,7 @@ func (w *ConsulWatcher) runWatchPlans(ctx context.Context) error {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("failed to create checks watcher plan: %w", err)
+		return false, fmt.Errorf("failed to create checks watcher plan: %w", err)
 	}
 	checksWatcher.HybridHandler = func(_ watch.BlockingParamVal, _ any) {
 		w.logger.DebugContext(ctx, "Watcher received checks update from Consul")
@@ -209,7 +250,10 @@ func (w *ConsulWatcher) runWatchPlans(ctx context.Context) error {
 	case <-ctx.Done():
 		w.logger.InfoContext(ctx, "Watcher loop shutting down gracefully")
 		span.AddEvent("watcher_shutdown_graceful")
-		return nil
+		return false, nil
+	case <-w.restartCh:
+		span.AddEvent("watcher_restart_requested")
+		return true, nil
 	case err = <-errChan:
 		if w.errorsCounter != nil {
 			w.errorsCounter.Add(ctx, 1)
@@ -217,7 +261,7 @@ func (w *ConsulWatcher) runWatchPlans(ctx context.Context) error {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		w.logger.ErrorContext(ctx, "Consul watcher routine terminated", slog.Any("error", err))
-		return fmt.Errorf("services or checks watcher terminated: %w", err)
+		return false, fmt.Errorf("services or checks watcher terminated: %w", err)
 	}
 }
 

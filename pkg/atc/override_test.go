@@ -41,7 +41,7 @@ func TestApplyOverride_Expiration(t *testing.T) {
 	}
 
 	// 1. Test ApplyFailoverOverride with duration "5m"
-	err := atc.ApplyFailoverOverride(context.Background(), "payment-service", "dc2", "custom-ns", "5m")
+	err := atc.ApplyFailoverOverride(context.Background(), "payment-service", "dc2", "custom-ns", "5m", false)
 	assert.NoError(t, err)
 	assert.NotNil(t, writtenEntry)
 	assert.Equal(t, "payment-service", writtenEntry.Name)
@@ -55,7 +55,7 @@ func TestApplyOverride_Expiration(t *testing.T) {
 
 	// 2. Test TriggerManualRedirect with duration "10m"
 	writtenEntry = nil
-	err = atc.TriggerManualRedirect(context.Background(), "billing-service", "dc3", "", "10m")
+	err = atc.TriggerManualRedirect(context.Background(), "billing-service", "dc3", "", "10m", false)
 	assert.NoError(t, err)
 	assert.NotNil(t, writtenEntry)
 	assert.Equal(t, "billing-service", writtenEntry.Name)

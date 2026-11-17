@@ -63,10 +63,13 @@ type Config struct {
 	WriteRateLimit     string            `yaml:"write_rate_limit" mapstructure:"write_rate_limit"`
 	DampeningPeriod    string            `yaml:"dampening_period" mapstructure:"dampening_period"`
 	MinDampeningPeriod string            `yaml:"min_dampening_period" mapstructure:"min_dampening_period"`
-	Strategies         StrategiesConfig  `yaml:"strategies" json:"strategies" mapstructure:"strategies"`
-	HA                 HaConfig          `yaml:"ha" json:"ha" mapstructure:"ha"`
-	Auth               AuthConfig        `yaml:"auth" json:"auth" mapstructure:"auth"`
-	DryRun             bool              `yaml:"dry_run" json:"dry_run" mapstructure:"dry_run"`
+	// ResyncInterval is how often the leader reconciles everything even without catalog
+	// events, to retry failed writes and repair drift. Empty means the default (60s); "0s" disables it.
+	ResyncInterval string           `yaml:"resync_interval" mapstructure:"resync_interval"`
+	Strategies     StrategiesConfig `yaml:"strategies" json:"strategies" mapstructure:"strategies"`
+	HA             HaConfig         `yaml:"ha" json:"ha" mapstructure:"ha"`
+	Auth           AuthConfig       `yaml:"auth" json:"auth" mapstructure:"auth"`
+	DryRun         bool             `yaml:"dry_run" json:"dry_run" mapstructure:"dry_run"`
 }
 
 type contextKey string
@@ -375,6 +378,64 @@ func (t *Atc) Run(ctx context.Context) error {
 	return err
 }
 
+// managedByOf describes who controls an existing resolver, for the dashboard.
+func managedByOf(e *api.ServiceResolverConfigEntry, tags []string) string {
+	switch {
+	case e.Meta != nil && e.Meta["created-by"] == forwarder.CreatedByOverride:
+		return "override"
+	case forwarder.IsATCOwned(e):
+		return "atc"
+	case slices.Contains(tags, forwarder.AdoptTag):
+		return "adopting"
+	default:
+		return "foreign"
+	}
+}
+
+// ErrForeignResolver is returned when an override would replace a service-resolver that ATC
+// did not create. Clearing the override later deletes the entry, so the original would be lost.
+var ErrForeignResolver = errors.New("service already has a service-resolver that ATC did not create")
+
+// checkOverrideAllowed refuses to replace a resolver ATC does not own unless force is set.
+func checkOverrideAllowed(ctx context.Context, client *api.Client, service string, force bool) error {
+	if force {
+		return nil
+	}
+	entry, _, err := client.ConfigEntries().Get("service-resolver", service, (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		var se api.StatusError
+		if errors.As(err, &se) && se.Code == http.StatusNotFound {
+			return nil
+		}
+		return fmt.Errorf("failed to check existing service-resolver: %w", err)
+	}
+	if res, ok := entry.(*api.ServiceResolverConfigEntry); ok && !forwarder.IsATCOwned(res) {
+		return fmt.Errorf("%w: %q. Applying an override replaces it, and clearing the override later deletes it, so the original configuration would be lost. Retry with force to replace it anyway", ErrForeignResolver, service)
+	}
+	return nil
+}
+
+// requestReconcile asks running forwarder/redirector loops on this node to reconcile, for
+// changes that produce no catalog event (config reloads, deleted resolvers). On a standby
+// node nothing is subscribed; the leader's periodic resync picks the change up instead.
+func (t *Atc) requestReconcile(reason string) {
+	if t.Watcher != nil {
+		t.Watcher.Events.Broadcast(reason)
+	}
+}
+
+// resyncInterval returns the configured periodic resync interval.
+func resyncInterval(cfg Config) time.Duration {
+	if cfg.ResyncInterval == "" {
+		return forwarder.DefaultResyncInterval
+	}
+	d, err := time.ParseDuration(cfg.ResyncInterval)
+	if err != nil || d < 0 {
+		return forwarder.DefaultResyncInterval
+	}
+	return d
+}
+
 func (t *Atc) IsLeader() bool {
 	t.cfgMu.RLock()
 	haEnabled := t.Cfg.HA.Enabled
@@ -490,6 +551,11 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 		default:
 		}
 
+		// Re-resolve the client each attempt so a reloaded Consul address or token is used
+		// the next time this node competes for leadership.
+		if c, cerr := t.getConsulClient(ctx); cerr == nil {
+			client = c
+		}
 		lock, err := client.LockOpts(opts)
 		if err != nil {
 			t.coreLogger.ErrorContext(ctx, "failed to configure consul lock, retrying in 5s", slog.Any("error", err), slog.String("lock_key", lockKey))
@@ -824,6 +890,9 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 		FailoverTargets  []TargetItem      `json:"failover_targets,omitempty"`
 		RedirectTarget   *TargetItem       `json:"redirect_target,omitempty"`
 		Meta             map[string]string `json:"meta,omitempty"`
+		// ManagedBy is "atc", "override", "foreign" (an existing resolver ATC leaves alone),
+		// "adopting" (foreign, but tagged atc.adopt=true) or "none" (no resolver yet).
+		ManagedBy string `json:"managed_by"`
 	}
 
 	resultMap := make(map[string]ServiceItem)
@@ -838,8 +907,10 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 			var redirectTarget *TargetItem
 
 			var entryMeta map[string]string
+			managedBy := "none"
 			if existing, exists := existingResolverEntries[svcName]; exists {
 				entryMeta = existing.Meta
+				managedBy = managedByOf(existing, tags)
 				if len(existing.Failover) > 0 {
 					resType = "failover"
 				} else if existing.Redirect != nil && existing.Redirect.Service != "" {
@@ -889,6 +960,7 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 				FailoverTargets:  failoverTargets,
 				RedirectTarget:   redirectTarget,
 				Meta:             entryMeta,
+				ManagedBy:        managedBy,
 			}
 		}
 	}
@@ -958,6 +1030,7 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 							FailoverTargets:  failoverTargets,
 							RedirectTarget:   redirectTarget,
 							Meta:             res.Meta,
+							ManagedBy:        managedByOf(res, nil),
 						}
 					}
 				}
@@ -1024,15 +1097,21 @@ func (t *Atc) PurgeServiceResolver(ctx context.Context, name string) error {
 			span.RecordError(err)
 			return fmt.Errorf("failed to delete config entry: %w", err)
 		}
+		// Deleting a resolver changes no catalog data, so without this the service would have
+		// no resolver until an unrelated catalog event (e.g. after clearing an override).
+		t.requestReconcile("resolver_purged")
 	}
 
 	return nil
 }
 
-func (t *Atc) ApplyFailoverOverride(ctx context.Context, service string, targetDc string, targetNs string, duration string) error {
+func (t *Atc) ApplyFailoverOverride(ctx context.Context, service string, targetDc string, targetNs string, duration string, force bool) error {
 	client, err := t.getConsulClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to connect to consul: %w", err)
+	}
+	if err := checkOverrideAllowed(ctx, client, service, force); err != nil {
+		return err
 	}
 
 	meta := map[string]string{
@@ -1088,10 +1167,13 @@ func (t *Atc) ApplyFailoverOverride(ctx context.Context, service string, targetD
 	return nil
 }
 
-func (t *Atc) TriggerManualRedirect(ctx context.Context, service string, redirectDc string, redirectNs string, duration string) error {
+func (t *Atc) TriggerManualRedirect(ctx context.Context, service string, redirectDc string, redirectNs string, duration string, force bool) error {
 	client, err := t.getConsulClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to connect to consul: %w", err)
+	}
+	if err := checkOverrideAllowed(ctx, client, service, force); err != nil {
+		return err
 	}
 
 	meta := map[string]string{
@@ -1333,7 +1415,15 @@ func (t *Atc) ReloadConfig(cfg Config) {
 	t.cfgMu.Unlock()
 
 	if t.Watcher != nil {
-		t.Watcher.SetNamespace(cfg.ConsulNamespace)
+		t.Watcher.SetConnection(cfg.ConsulAddr, cfg.ConsulToken, cfg.ConsulDC, cfg.ConsulNamespace)
+	}
+	if t.Forwarder != nil {
+		t.Forwarder.SetConnection(cfg.ConsulAddr, cfg.ConsulToken, cfg.ConsulDC, cfg.ConsulNamespace)
+		t.Forwarder.SetResyncInterval(resyncInterval(cfg))
+	}
+	if t.Redirector != nil {
+		t.Redirector.SetConnection(cfg.ConsulAddr, cfg.ConsulToken, cfg.ConsulDC, cfg.ConsulNamespace)
+		t.Redirector.SetResyncInterval(resyncInterval(cfg))
 	}
 
 	ctx, span := coreTracer.Start(context.Background(), "ReloadConfig")
@@ -1370,6 +1460,9 @@ func (t *Atc) ReloadConfig(cfg Config) {
 			cfg.DryRun,
 		)
 	}
+
+	// Apply the new strategies and settings now rather than on the next catalog change.
+	t.requestReconcile("config_reload")
 }
 
 func (t *Atc) TriggerConfigReload() error {

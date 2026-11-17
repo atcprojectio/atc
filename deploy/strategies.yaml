@@ -16,6 +16,10 @@ write_rate_limit: "1s"
 dampening_period: "5s"
 min_dampening_period: "0s"
 
+# Full resync interval: retries failed writes and repairs drift even without catalog events
+# ("0s" disables it). Default "60s".
+resync_interval: "60s"
+
 # Dry run mode: logs reconciliation decisions without writing them to Consul
 dry_run: false
 

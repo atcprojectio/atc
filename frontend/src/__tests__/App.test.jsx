@@ -277,6 +277,65 @@ describe('ATC Dashboard App', () => {
     });
   });
 
+  describe('resolvers not created by ATC', () => {
+    const withForeignService = (origImpl, overrideResponses) => (url, options) => {
+      if (url.includes('/api/services') && !(options && options.method)) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve([{ ...mockServices[0], managed_by: 'foreign' }])
+        });
+      }
+      if (url.includes('/api/overrides')) return Promise.resolve(overrideResponses.shift());
+      return origImpl(url, options);
+    };
+
+    it('flags a service whose resolver ATC leaves alone', async () => {
+      const origImpl = window.fetch.getMockImplementation();
+      window.fetch.mockImplementation(withForeignService(origImpl, []));
+
+      render(<App />);
+
+      const badge = await screen.findByText('Not managed by ATC');
+      expect(badge.getAttribute('title')).toMatch(/atc\.adopt=true/);
+    });
+
+    it('asks before an override replaces it, then resends with force', async () => {
+      const origImpl = window.fetch.getMockImplementation();
+      window.fetch.mockImplementation(withForeignService(origImpl, [
+        { ok: false, status: 409, json: () => Promise.resolve({ error: 'service already has a service-resolver that ATC did not create' }) },
+        { ok: true, status: 200, text: () => Promise.resolve('') }
+      ]));
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+      render(<App />);
+      fireEvent.click((await screen.findAllByRole('button', { name: /Apply Manual Override/i }))[0]);
+      fireEvent.click(screen.getByRole('button', { name: /Apply Override/i }));
+
+      await waitFor(() => expect(confirmSpy).toHaveBeenCalledWith(expect.stringMatching(/did not create/)));
+      await waitFor(() => {
+        const overridePosts = window.fetch.mock.calls.filter(([url]) => url.includes('/api/overrides'));
+        expect(overridePosts).toHaveLength(2);
+        expect(JSON.parse(overridePosts[0][1].body).force).toBe(false);
+        expect(JSON.parse(overridePosts[1][1].body).force).toBe(true);
+      });
+    });
+
+    it('does not replace it when the user declines', async () => {
+      const origImpl = window.fetch.getMockImplementation();
+      window.fetch.mockImplementation(withForeignService(origImpl, [
+        { ok: false, status: 409, json: () => Promise.resolve({ error: 'not created by ATC' }) }
+      ]));
+      vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+      render(<App />);
+      fireEvent.click((await screen.findAllByRole('button', { name: /Apply Manual Override/i }))[0]);
+      fireEvent.click(screen.getByRole('button', { name: /Apply Override/i }));
+
+      await waitFor(() => expect(window.confirm).toHaveBeenCalled());
+      expect(window.fetch.mock.calls.filter(([url]) => url.includes('/api/overrides'))).toHaveLength(1);
+    });
+  });
+
   describe('outages', () => {
     const consulDownStatus = {
       ok: true,

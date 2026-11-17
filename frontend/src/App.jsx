@@ -278,7 +278,7 @@ function App() {
   };
 
 
-  const handleApplyOverride = async (serviceName) => {
+  const handleApplyOverride = async (serviceName, force = false) => {
     if (!overrideTargetDc) {
       alert('Please specify a target datacenter.');
       return;
@@ -297,10 +297,25 @@ function App() {
           target_dc: overrideTargetDc,
           namespace: overrideNamespace,
           duration: overrideDuration,
+          force,
         }),
       });
       if (res.status === 401 || res.status === 403) {
         throw new Error('Authentication failed. Check your API token.');
+      }
+      if (res.status === 409 && !force) {
+        // The service has a resolver ATC did not create; replacing it is the operator's call.
+        let message = 'This service already has a service-resolver that ATC did not create.';
+        try {
+          const body = await res.json();
+          if (body && body.error) message = body.error;
+        } catch {
+          // keep the default message
+        }
+        if (window.confirm(`${message}\n\nReplace the existing service-resolver anyway?`)) {
+          await handleApplyOverride(serviceName, true);
+        }
+        return;
       }
       if (!res.ok) {
         const text = await res.text();
@@ -629,6 +644,22 @@ Lock Key: ${lockKey}`;
                             </span>
                           )}
                         </div>
+                        {svc.managed_by === 'foreign' && (
+                          <span
+                            className="ownership-badge foreign"
+                            title="This service already has a service-resolver that ATC did not create. ATC leaves it untouched, so automatic failover and redirects are not applied. Tag the service atc.adopt=true to let ATC manage it (ATC then replaces the existing entry)."
+                          >
+                            Not managed by ATC
+                          </span>
+                        )}
+                        {svc.managed_by === 'adopting' && (
+                          <span
+                            className="ownership-badge adopting"
+                            title="Tagged atc.adopt=true: ATC is replacing the existing service-resolver with its own on the next reconciliation."
+                          >
+                            Adopting
+                          </span>
+                        )}
                         {svc.meta && svc.meta['created-by'] === 'atc-override' && (
                           <>
                             <span className="override-badge active" title={`Expires: ${svc.meta['atc-override-expires-at'] || 'Never'}`}>
