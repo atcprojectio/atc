@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/time/rate"
 
 	"github.com/atcprojectio/atc/pkg/atc/forwarder"
 	"github.com/atcprojectio/atc/pkg/atc/redirector"
@@ -105,8 +106,12 @@ type Atc struct {
 	requestHTTPClient     *http.Client
 	requestHTTPClientErr  error
 
-	tokenCacheMu sync.RWMutex
-	tokenCache   map[string]time.Time
+	tokenCacheMu   sync.RWMutex
+	tokenCache     map[string]time.Time // accepted delegated tokens, keyed by SHA-256
+	rejectedTokens map[string]time.Time // tokens Consul rejected, keyed by SHA-256
+
+	tokenLimiterOnce sync.Once
+	tokenLimiter     *rate.Limiter
 
 	shutdownRequested atomic.Bool
 

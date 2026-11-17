@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
 )
 
 const delegatedTokenCacheTTL = 30 * time.Second
@@ -88,6 +89,14 @@ func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 		if !authorized && tokenDelegation {
 			var verifyErr error
 			authorized, verifyErr = t.verifyDelegatedConsulToken(consulAddr, consulDC, token)
+			if errors.Is(verifyErr, errTokenCheckRateLimited) {
+				span.SetStatus(codes.Error, "token check rate limited")
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "too_many_token_checks", "message": "Too many requests with unknown tokens; retry shortly."})
+				return
+			}
 			if verifyErr != nil {
 				// Consul is down: we cannot tell whether the token is valid. Saying "invalid
 				// token" here would send operators hunting for a credentials problem.
@@ -129,20 +138,45 @@ func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// verifyDelegatedConsulToken reports whether Consul accepts token. A non-nil error means
-// Consul could not be asked (unreachable, no leader, 5xx), as opposed to a rejected token.
+// Limits on token verification against Consul. Each uncached check is a Consul request, and
+// unauthenticated callers choose the token, so these bound the load they can cause.
+const (
+	rejectedTokenCacheTTL   = 10 * time.Second
+	maxCachedTokens         = 10000
+	tokenVerificationsPerS  = 20
+	tokenVerificationsBurst = 40
+)
+
+// errTokenCheckRateLimited means too many uncached token checks were attempted; the caller
+// should retry shortly.
+var errTokenCheckRateLimited = errors.New("too many token checks; retry shortly")
+
+func tokenCacheKey(consulAddr, consulDC, token string) string {
+	sum := sha256.Sum256([]byte(consulAddr + "|" + consulDC + "|" + token))
+	return hex.EncodeToString(sum[:])
+}
+
+// verifyDelegatedConsulToken reports whether Consul accepts token. A non-nil error means the
+// token could not be checked: Consul could not be asked (unreachable, no leader, 5xx) or too
+// many uncached checks were attempted (errTokenCheckRateLimited).
 func (t *Atc) verifyDelegatedConsulToken(consulAddr, consulDC, token string) (bool, error) {
-	cacheKey := consulAddr + "|" + consulDC + "|" + token
+	key := tokenCacheKey(consulAddr, consulDC, token)
 	now := time.Now()
 
 	t.tokenCacheMu.RLock()
-	if t.tokenCache != nil {
-		if exp, ok := t.tokenCache[cacheKey]; ok && now.Before(exp) {
-			t.tokenCacheMu.RUnlock()
-			return true, nil
-		}
+	if exp, ok := t.tokenCache[key]; ok && now.Before(exp) {
+		t.tokenCacheMu.RUnlock()
+		return true, nil
+	}
+	if exp, ok := t.rejectedTokens[key]; ok && now.Before(exp) {
+		t.tokenCacheMu.RUnlock()
+		return false, nil
 	}
 	t.tokenCacheMu.RUnlock()
+
+	if !t.tokenCheckLimiter().Allow() {
+		return false, errTokenCheckRateLimited
+	}
 
 	// Use an uncached client: caching per token here would let unauthenticated callers grow
 	// the client cache without bound by sending random tokens.
@@ -153,23 +187,38 @@ func (t *Atc) verifyDelegatedConsulToken(consulAddr, consulDC, token string) (bo
 	if _, err := client.Agent().Self(); err != nil {
 		var se api.StatusError
 		if errors.As(err, &se) && (se.Code == http.StatusForbidden || se.Code == http.StatusUnauthorized) {
+			t.rememberToken(&t.rejectedTokens, key, now.Add(rejectedTokenCacheTTL), now)
 			return false, nil // Consul answered: the token is not valid.
 		}
 		return false, err
 	}
+	t.rememberToken(&t.tokenCache, key, now.Add(delegatedTokenCacheTTL), now)
+	return true, nil
+}
 
+// rememberToken stores a verification result, dropping expired entries. Once the cache is full
+// new results are not stored, so random tokens cannot grow it without bound.
+func (t *Atc) rememberToken(cache *map[string]time.Time, key string, exp, now time.Time) {
 	t.tokenCacheMu.Lock()
-	if t.tokenCache == nil {
-		t.tokenCache = make(map[string]time.Time)
+	defer t.tokenCacheMu.Unlock()
+	if *cache == nil {
+		*cache = make(map[string]time.Time)
 	}
-	for k, exp := range t.tokenCache {
-		if now.After(exp) {
-			delete(t.tokenCache, k)
+	for k, e := range *cache {
+		if now.After(e) {
+			delete(*cache, k)
 		}
 	}
-	t.tokenCache[cacheKey] = now.Add(delegatedTokenCacheTTL)
-	t.tokenCacheMu.Unlock()
-	return true, nil
+	if len(*cache) < maxCachedTokens {
+		(*cache)[key] = exp
+	}
+}
+
+func (t *Atc) tokenCheckLimiter() *rate.Limiter {
+	t.tokenLimiterOnce.Do(func() {
+		t.tokenLimiter = rate.NewLimiter(tokenVerificationsPerS, tokenVerificationsBurst)
+	})
+	return t.tokenLimiter
 }
 
 // isStaticKey reports, in constant time per key, whether token is one of the static API keys.
