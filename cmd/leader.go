@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 
 	"github.com/atcprojectio/atc/pkg/atc"
 )
@@ -22,10 +21,13 @@ var leaderStatusCmd = &cobra.Command{
 	Short: "Display cluster leadership status",
 	Long:  "Display cluster leadership status",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := loadConfig()
+		cfg, err := loadCLIConfig()
 		if err != nil {
 			return err
 		}
+		// Leader commands inspect the HA locks in Consul. Without this, a missing or
+		// non-HA config made "leader status" report STANDBY/<none> without asking Consul.
+		cfg.HA.Enabled = true
 
 		t := atc.NewCLI(cfg)
 
@@ -73,10 +75,13 @@ var forceUnlockCmd = &cobra.Command{
 			return fmt.Errorf("invalid module %q (must be 'forwarder' or 'redirector')", forceModule)
 		}
 
-		cfg, err := loadConfig()
+		cfg, err := loadCLIConfig()
 		if err != nil {
 			return err
 		}
+		// Leader commands inspect the HA locks in Consul. Without this, a missing or
+		// non-HA config made "leader status" report STANDBY/<none> without asking Consul.
+		cfg.HA.Enabled = true
 
 		t := atc.NewCLI(cfg)
 
@@ -89,39 +94,6 @@ var forceUnlockCmd = &cobra.Command{
 		fmt.Printf("Lock for '%s' has been successfully forced unlocked.\n", forceModule)
 		return nil
 	},
-}
-
-func loadConfig() (atc.Config, error) {
-	var cfg atc.Config
-	configFile := viper.GetString("config")
-	if configFile != "" {
-		viper.SetConfigFile(configFile)
-		if err := viper.ReadInConfig(); err != nil {
-			return cfg, fmt.Errorf("failed to read config file %s: %w", configFile, err)
-		}
-	}
-
-	if err := viper.Unmarshal(&cfg); err != nil {
-		return cfg, fmt.Errorf("failed to unmarshal configuration: %w", err)
-	}
-
-	if cfg.ConsulAddr == "" {
-		cfg.ConsulAddr = viper.GetString("consul_addr")
-	}
-	if cfg.ConsulToken == "" {
-		cfg.ConsulToken = viper.GetString("consul_token")
-	}
-	if cfg.ConsulDC == "" {
-		cfg.ConsulDC = viper.GetString("consul_dc")
-	}
-	if cfg.ConsulNamespace == "" {
-		cfg.ConsulNamespace = viper.GetString("consul_namespace")
-	}
-	if cfg.Name == "" {
-		cfg.Name = viper.GetString("name")
-	}
-
-	return cfg, nil
 }
 
 func init() {

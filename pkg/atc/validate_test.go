@@ -245,3 +245,22 @@ func stringContains(s, substr string) bool {
 	}
 	return false
 }
+
+func TestValidateWriteRateLimit(t *testing.T) {
+	base := Config{Target: []string{"all"}, Auth: AuthConfig{AllowUnauthenticated: true}}
+
+	for _, ok := range []string{"", "1s", "500ms", "0s"} {
+		c := base
+		c.WriteRateLimit = ok
+		if errs := ValidateConfig(c); len(errs) != 0 {
+			t.Errorf("write_rate_limit %q should be valid, got %v", ok, errs)
+		}
+	}
+	for _, bad := range []string{"10/s", "fast", "-1s"} {
+		c := base
+		c.WriteRateLimit = bad
+		if errs := ValidateConfig(c); len(errs) != 1 {
+			t.Errorf("write_rate_limit %q should be rejected, got %v", bad, errs)
+		}
+	}
+}

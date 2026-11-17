@@ -57,11 +57,14 @@ type Redirector struct {
 	hasDefaultFailover bool
 	dryRun             bool
 
-	mu              sync.RWMutex
-	consulClient    *api.Client
-	resyncInterval  time.Duration
-	foreign         *forwarder.ForeignTracker
-	strategiesCache map[string]cachedStrategies
+	mu             sync.RWMutex
+	consulClient   *api.Client
+	resyncInterval time.Duration
+	foreign        *forwarder.ForeignTracker
+
+	unknownStrategyWarn *forwarder.WarnTracker
+	noTargetWarn        *forwarder.WarnTracker
+	strategiesCache     map[string]cachedStrategies
 
 	// Hysteresis scheduling state
 	schedMu       sync.Mutex
@@ -183,6 +186,8 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 	}
 
 	r.foreign = forwarder.NewForeignTracker(meter, "redirector", logger)
+	r.unknownStrategyWarn = forwarder.NewWarnTracker(logger, "Service tag names a redirect strategy that is not configured; the default target will be used if the service disappears")
+	r.noTargetWarn = forwarder.NewWarnTracker(logger, "Not writing a redirect resolver: only one datacenter is known")
 	return r, nil
 }
 
@@ -433,6 +438,8 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 	// next periodic resync retries them, instead of being logged and forgotten.
 	var writeErrs []error
 	foreign := map[string]struct{}{}
+	unknownStrategy := map[string]string{}
+	noTarget := map[string]string{}
 	defer span.End()
 
 	startTime := time.Now()
@@ -461,8 +468,14 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 		return fmt.Errorf("failed to fetch consul services: %w", err)
 	}
 
-	localDC := getLocalDatacenter(client, r.consulDC)
-	targetDC, err := findTargetDatacenter(client, localDC)
+	r.mu.RLock()
+	configDC := r.consulDC
+	r.mu.RUnlock()
+	localDC, err := forwarder.LocalDatacenter(client, configDC)
+	if err != nil {
+		return err
+	}
+	remoteDCs, err := forwarder.RemoteDatacenters(client, localDC)
 	if err != nil {
 		return err
 	}
@@ -495,6 +508,12 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 				foStrat = "default"
 			}
 			rdStrat := getStrategyFromTags(tags, "atc.redirect=")
+			if rdStrat != "" {
+				if _, ok := r.redirectStrategies[rdStrat]; !ok {
+					// Warn while the service is still running, not when the redirect is needed.
+					unknownStrategy[svcName] = rdStrat
+				}
+			}
 			if rdStrat == "" {
 				if _, ok := r.redirectStrategies["default"]; ok {
 					rdStrat = "default"
@@ -661,9 +680,14 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 					dampeningTag = existing.Meta[forwarder.MetaDampeningOnRemoval]
 				}
 
-				// Default values
+				// Default values. A DC chosen automatically before is kept while it is still
+				// available, so round-trip-time changes do not flip the redirect.
+				previousDC := ""
+				if existing.Redirect != nil {
+					previousDC = existing.Redirect.Datacenter
+				}
 				targetSvc := name
-				targetDCVal := targetDC
+				targetDCVal := forwarder.PickDatacenter(remoteDCs, previousDC)
 				var targetNamespace string
 				var targetServiceSubset string
 
@@ -673,13 +697,17 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 						if targetSvc == "" {
 							targetSvc = name
 						}
-						targetDCVal = strategy.Datacenter
-						if targetDCVal == "" {
-							targetDCVal = targetDC
+						if strategy.Datacenter != "" {
+							targetDCVal = strategy.Datacenter
 						}
 						targetNamespace = strategy.Namespace
 						targetServiceSubset = strategy.ServiceSubset
 					}
+				}
+
+				if targetDCVal == "" {
+					noTarget[name] = "no other datacenter to redirect to"
+					continue
 				}
 
 				needsUpdate := existing.Redirect == nil ||
@@ -734,35 +762,9 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 	}
 
 	r.foreign.Update(ctx, foreign)
+	r.unknownStrategyWarn.Update(ctx, unknownStrategy)
+	r.noTargetWarn.Update(ctx, noTarget)
 	return errors.Join(writeErrs...)
-}
-
-func getLocalDatacenter(client *api.Client, configDC string) string {
-	if configDC != "" {
-		return configDC
-	}
-	self, err := client.Agent().Self()
-	if err == nil {
-		if config, ok := self["Config"]; ok {
-			if dc, ok := config["Datacenter"].(string); ok {
-				return dc
-			}
-		}
-	}
-	return "dc1"
-}
-
-func findTargetDatacenter(client *api.Client, localDC string) (string, error) {
-	dcs, err := client.Catalog().Datacenters()
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch datacenters: %w", err)
-	}
-	for _, dc := range dcs {
-		if dc != localDC {
-			return dc, nil
-		}
-	}
-	return "dc2", nil
 }
 
 func getStrategyFromTags(tags []string, prefix string) string {

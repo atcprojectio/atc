@@ -154,6 +154,11 @@ func (t *Atc) ForceUnlock(ctx context.Context, moduleName string) error {
 		}
 	}
 
+	t.LogAudit(ctx, "force_unlock", moduleName, map[string]any{
+		"lock_key":   lockKey,
+		"session_id": pair.Session,
+		"held_by":    string(pair.Value),
+	})
 	return nil
 }
 

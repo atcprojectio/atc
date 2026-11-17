@@ -29,6 +29,18 @@ var GlobalPrometheusHandler http.Handler
 
 // Init initializes the OpenTelemetry SDK (traces, metrics, and logs).
 // It returns a shutdown function that should be called when the application exits.
+// OTLPEnabled reports whether OTLP export is configured for a signal ("TRACES", "METRICS" or
+// "LOGS"): OTEL_EXPORTER_OTLP_ENDPOINT or OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT must be set and
+// OTEL_SDK_DISABLED must not be "true". Without an endpoint, the exporters used to default to
+// localhost:4318 and log an error every export interval when no collector was running.
+// Prometheus metrics on the metrics port are always available.
+func OTLPEnabled(signal string) bool {
+	if os.Getenv("OTEL_SDK_DISABLED") == "true" {
+		return false
+	}
+	return os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" || os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_ENDPOINT") != ""
+}
+
 func Init(ctx context.Context, serviceName string) (func(context.Context) error, error) {
 	var shutdownFuncs []func(context.Context) error
 
@@ -59,7 +71,7 @@ func Init(ctx context.Context, serviceName string) (func(context.Context) error,
 	))
 
 	// 3. Tracing setup (OTLP HTTP)
-	if os.Getenv("OTEL_SDK_DISABLED") != "true" {
+	if OTLPEnabled("TRACES") {
 		traceExporter, err := otlptracehttp.New(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create OTLP trace exporter: %w", err)
@@ -74,7 +86,7 @@ func Init(ctx context.Context, serviceName string) (func(context.Context) error,
 
 	// 4. Metrics setup
 	var metricReaders []sdkmetric.Reader
-	if os.Getenv("OTEL_SDK_DISABLED") != "true" {
+	if OTLPEnabled("METRICS") {
 		metricExporter, err := otlpmetrichttp.New(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create OTLP metric exporter: %w", err)
@@ -104,7 +116,7 @@ func Init(ctx context.Context, serviceName string) (func(context.Context) error,
 	shutdownFuncs = append(shutdownFuncs, mp.Shutdown)
 
 	// 5. Logging setup (OTLP HTTP)
-	if os.Getenv("OTEL_SDK_DISABLED") != "true" {
+	if OTLPEnabled("LOGS") {
 		logExporter, err := otlploghttp.New(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create OTLP log exporter: %w", err)

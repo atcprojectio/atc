@@ -19,17 +19,13 @@ var serverCmd = &cobra.Command{
 		configFile := viper.GetString("config")
 		if configFile != "" {
 			viper.SetConfigFile(configFile)
-			if err := viper.ReadInConfig(); err != nil {
-				return fmt.Errorf("failed to read config file %s: %w", configFile, err)
-			}
 		}
+		load := func() (atc.Config, error) { return loadServerConfig(cmd) }
 
-		cfg, err := atc.LoadConfigFromViper(viper.GetViper())
+		cfg, err := load()
 		if err != nil {
 			return err
 		}
-		applyChangedServerFlags(cmd, &cfg)
-
 		if errs := atc.ValidateConfig(cfg); len(errs) > 0 {
 			return fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
 		}
@@ -38,25 +34,36 @@ var serverCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// Reloads (file watcher, API, MCP) use the same loader, so flags keep precedence.
+		t.SetConfigLoader(load)
 
 		if configFile != "" {
 			viper.OnConfigChange(func(e fsnotify.Event) {
-				newCfg, err := atc.LoadConfigFromViper(viper.GetViper())
-				if err != nil {
-					return
-				}
-				applyChangedServerFlags(cmd, &newCfg)
-				if errs := atc.ValidateConfig(newCfg); len(errs) > 0 {
-					return
-				}
-
-				t.ReloadConfig(newCfg)
+				// Errors are logged and counted by TriggerConfigReload.
+				_ = t.TriggerConfigReload()
 			})
 			viper.WatchConfig()
 		}
 
 		return t.Run(cmd.Context())
 	},
+}
+
+// loadServerConfig resolves the server configuration: flags, then ATC_* environment
+// variables, then the config file.
+func loadServerConfig(cmd *cobra.Command) (atc.Config, error) {
+	if configFile := viper.GetString("config"); configFile != "" {
+		viper.SetConfigFile(configFile)
+		if err := viper.ReadInConfig(); err != nil {
+			return atc.Config{}, fmt.Errorf("failed to read config file %s: %w", configFile, err)
+		}
+	}
+	cfg, err := atc.LoadConfigFromViper(viper.GetViper())
+	if err != nil {
+		return cfg, err
+	}
+	applyChangedServerFlags(cmd, &cfg)
+	return cfg, nil
 }
 
 func applyChangedServerFlags(cmd *cobra.Command, cfg *atc.Config) {
@@ -113,18 +120,6 @@ func init() {
 	serverCmd.PersistentFlags().String("log_level", "info", "Only log messages with the given severity or above.")
 	_ = viper.BindPFlag("log_level", serverCmd.PersistentFlags().Lookup("log_level"))
 
-	serverCmd.PersistentFlags().String("consul_addr", "", "Consul HTTP address.")
-	_ = viper.BindPFlag("consul_addr", serverCmd.PersistentFlags().Lookup("consul_addr"))
-
-	serverCmd.PersistentFlags().String("consul_token", "", "Consul ACL token.")
-	_ = viper.BindPFlag("consul_token", serverCmd.PersistentFlags().Lookup("consul_token"))
-
-	serverCmd.PersistentFlags().String("consul_dc", "", "Consul datacenter.")
-	_ = viper.BindPFlag("consul_dc", serverCmd.PersistentFlags().Lookup("consul_dc"))
-
-	serverCmd.PersistentFlags().String("node-name", "", "Unique node identity for HA leader election (defaults to hostname-based identity).")
-	_ = viper.BindPFlag("node_name", serverCmd.PersistentFlags().Lookup("node-name"))
-
 	serverCmd.PersistentFlags().Bool("ui-enabled", true, "Enable serving the embedded web UI dashboard.")
 	_ = viper.BindPFlag("ui_enabled", serverCmd.PersistentFlags().Lookup("ui-enabled"))
 
@@ -142,9 +137,6 @@ func init() {
 
 	serverCmd.PersistentFlags().Bool("dry-run", false, "Disable writing to Consul, log actions instead.")
 	_ = viper.BindPFlag("dry_run", serverCmd.PersistentFlags().Lookup("dry-run"))
-
-	serverCmd.PersistentFlags().String("consul-namespace", "", "Consul Enterprise Namespace.")
-	_ = viper.BindPFlag("consul_namespace", serverCmd.PersistentFlags().Lookup("consul-namespace"))
 
 	serverCmd.PersistentFlags().String("write-rate-limit", "1s", "Coalesce write events within this duration window (e.g. 1s, 500ms).")
 	_ = viper.BindPFlag("write_rate_limit", serverCmd.PersistentFlags().Lookup("write-rate-limit"))

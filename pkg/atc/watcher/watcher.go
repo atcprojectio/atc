@@ -204,46 +204,21 @@ func (w *ConsulWatcher) runWatchPlansOnce(ctx context.Context) (restart bool, er
 		w.Events.Broadcast("services_update")
 	}
 
-	checksParams := map[string]any{"type": "checks"}
-	if dc != "" {
-		checksParams["datacenter"] = dc
-	}
-	if token != "" {
-		checksParams["token"] = token
-	}
-	checksWatcher, err := watch.Parse(checksParams)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return false, fmt.Errorf("failed to create checks watcher plan: %w", err)
-	}
-	checksWatcher.HybridHandler = func(_ watch.BlockingParamVal, _ any) {
-		w.logger.DebugContext(ctx, "Watcher received checks update from Consul")
-		span.AddEvent("checks_update_received")
-		if w.eventsCounter != nil {
-			w.eventsCounter.Add(ctx, 1, metric.WithAttributes(
-				attribute.String("event_type", "checks_update"),
-			))
-		}
-		w.Events.Broadcast("checks_update")
-	}
+	// Only the service catalog is watched. Reconciliation reads the catalog's service list,
+	// which health-check changes do not affect, so watching every check in the datacenter
+	// only caused full reconciles on each check flap.
 
-	errChan := make(chan error, 2)
+	errChan := make(chan error, 1)
 
 	defer func() {
 		servicesWatcher.Stop()
-		checksWatcher.Stop()
 	}()
 
-	w.logger.InfoContext(ctx, "Starting services and checks watcher routines")
+	w.logger.InfoContext(ctx, "Starting services watcher")
 	span.AddEvent("watcher_routines_started")
 
 	go func() {
 		errChan <- servicesWatcher.RunWithClientAndHclog(client, servicesWatcher.Logger)
-	}()
-
-	go func() {
-		errChan <- checksWatcher.RunWithClientAndHclog(client, checksWatcher.Logger)
 	}()
 
 	select {
@@ -261,7 +236,7 @@ func (w *ConsulWatcher) runWatchPlansOnce(ctx context.Context) (restart bool, er
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		w.logger.ErrorContext(ctx, "Consul watcher routine terminated", slog.Any("error", err))
-		return false, fmt.Errorf("services or checks watcher terminated: %w", err)
+		return false, fmt.Errorf("services watcher terminated: %w", err)
 	}
 }
 

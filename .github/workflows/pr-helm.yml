@@ -3,6 +3,8 @@ on:
   pull_request:
     paths:
       - 'deploy/helm/atc/**'
+      - 'deploy/helm/tests/**'
+      - '.github/workflows/publish.yml'
       - '.github/workflows/pr-helm.yml'
 permissions:
   contents: read
@@ -15,3 +17,5 @@ jobs:
       - uses: actions/checkout@v7
       - name: Lint Helm Chart
         run: helm lint deploy/helm/atc
+      - name: Chart render tests
+        run: deploy/helm/tests/render_test.sh

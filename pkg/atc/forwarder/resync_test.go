@@ -26,6 +26,8 @@ type fakeConsul struct {
 	failPuts      atomic.Bool
 	tags          atomic.Value // []string for the "payments" service
 	resolvers     atomic.Value // JSON list returned for service-resolver entries
+	datacenters   atomic.Value // JSON list, nearest first
+	lastPut       atomic.Value // body of the last config write
 }
 
 func newFakeConsul(t *testing.T) *fakeConsul {
@@ -33,6 +35,8 @@ func newFakeConsul(t *testing.T) *fakeConsul {
 	fc := &fakeConsul{}
 	fc.tags.Store([]string{"atc.enabled=true"})
 	fc.resolvers.Store(`[]`)
+	fc.datacenters.Store(`["dc1","dc2"]`)
+	fc.lastPut.Store("")
 	fc.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Blocking watch queries carry an index: hang like a real Consul until the client gives up.
 		if r.URL.Query().Get("index") != "" {
@@ -47,12 +51,14 @@ func newFakeConsul(t *testing.T) *fakeConsul {
 		case r.URL.Path == "/v1/health/state/any":
 			_, _ = w.Write([]byte(`[]`))
 		case r.URL.Path == "/v1/catalog/datacenters":
-			_, _ = w.Write([]byte(`["dc1","dc2"]`))
+			_, _ = w.Write([]byte(fc.datacenters.Load().(string)))
 		case r.URL.Path == "/v1/config/service-resolver" && r.Method == http.MethodGet:
 			fc.resolverLists.Add(1)
 			_, _ = w.Write([]byte(fc.resolvers.Load().(string)))
 		case r.URL.Path == "/v1/config" && r.Method == http.MethodPut:
 			fc.resolverPuts.Add(1)
+			body, _ := io.ReadAll(r.Body)
+			fc.lastPut.Store(string(body))
 			if fc.failPuts.Load() {
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte("rpc error"))

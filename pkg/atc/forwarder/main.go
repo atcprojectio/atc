@@ -64,6 +64,9 @@ type Forwarder struct {
 	resyncInterval  time.Duration
 	foreign         *ForeignTracker
 
+	unknownStrategyWarn *WarnTracker
+	noTargetWarn        *WarnTracker
+
 	// Hysteresis scheduling state
 	schedMu       sync.Mutex
 	pendingWrites map[string]*api.ServiceResolverConfigEntry
@@ -182,6 +185,8 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 	}
 
 	f.foreign = NewForeignTracker(meter, "forwarder", logger)
+	f.unknownStrategyWarn = NewWarnTracker(logger, "Service tag names a failover strategy that is not configured; using the default target")
+	f.noTargetWarn = NewWarnTracker(logger, "Not writing a failover resolver: only one datacenter is known")
 	return f, nil
 }
 
@@ -414,6 +419,8 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 	// next periodic resync retries them, instead of being logged and forgotten.
 	var writeErrs []error
 	foreign := map[string]struct{}{}
+	unknownStrategy := map[string]string{}
+	noTarget := map[string]string{}
 	defer span.End()
 
 	startTime := time.Now()
@@ -442,8 +449,14 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 		return fmt.Errorf("failed to fetch consul services: %w", err)
 	}
 
-	localDC := getLocalDatacenter(client, f.consulDC)
-	targetDC, err := findTargetDatacenter(client, localDC)
+	f.mu.RLock()
+	configDC := f.consulDC
+	f.mu.RUnlock()
+	localDC, err := LocalDatacenter(client, configDC)
+	if err != nil {
+		return err
+	}
+	remoteDCs, err := RemoteDatacenters(client, localDC)
 	if err != nil {
 		return err
 	}
@@ -514,21 +527,45 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 			var targets []api.ServiceResolverFailoverTarget
 			connectTimeout := 15 * time.Second
 
+			// Datacenters chosen automatically for this service before, by target position,
+			// so the choice stays stable while those DCs remain available.
+			var previousDCs []string
+			if prev, ok := existingResolverEntries[svcName]; ok && IsATCOwned(prev) {
+				if fo, ok := prev.Failover["*"]; ok {
+					for _, t := range fo.Targets {
+						previousDCs = append(previousDCs, t.Datacenter)
+					}
+				}
+			}
+			autoDC := func(i int) string {
+				preferred := ""
+				if i < len(previousDCs) {
+					preferred = previousDCs[i]
+				}
+				return PickDatacenter(remoteDCs, preferred)
+			}
+
 			if failoverStrategyName != "" {
+				if _, ok := failoverStrategies[failoverStrategyName]; !ok {
+					unknownStrategy[svcName] = failoverStrategyName
+				}
 				if strategy, ok := failoverStrategies[failoverStrategyName]; ok {
 					if strategy.ConnectTimeout != "" {
 						if d, err := time.ParseDuration(strategy.ConnectTimeout); err == nil {
 							connectTimeout = d
 						}
 					}
-					for _, target := range strategy.Targets {
+					for i, target := range strategy.Targets {
 						tSvc := target.Service
 						if tSvc == "" {
 							tSvc = svcName
 						}
 						tDC := target.Datacenter
 						if tDC == "" {
-							tDC = targetDC
+							tDC = autoDC(i)
+						}
+						if tDC == "" {
+							continue // no other datacenter to fail over to
 						}
 						targets = append(targets, api.ServiceResolverFailoverTarget{
 							Service:       tSvc,
@@ -541,12 +578,15 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 			}
 
 			if len(targets) == 0 {
-				targets = []api.ServiceResolverFailoverTarget{
-					{
-						Service:    svcName,
-						Datacenter: targetDC,
-					},
+				if dc := autoDC(0); dc != "" {
+					targets = []api.ServiceResolverFailoverTarget{{Service: svcName, Datacenter: dc}}
 				}
+			}
+			if len(targets) == 0 {
+				// Only one datacenter is known: writing a failover to a made-up DC (as before)
+				// would be wrong, so leave the service alone.
+				noTarget[svcName] = "no other datacenter to fail over to"
+				continue
 			}
 
 			// Record what should happen if the service later disappears from the catalog, so any
@@ -653,35 +693,9 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 	}
 
 	f.foreign.Update(ctx, foreign)
+	f.unknownStrategyWarn.Update(ctx, unknownStrategy)
+	f.noTargetWarn.Update(ctx, noTarget)
 	return errors.Join(writeErrs...)
-}
-
-func getLocalDatacenter(client *api.Client, configDC string) string {
-	if configDC != "" {
-		return configDC
-	}
-	self, err := client.Agent().Self()
-	if err == nil {
-		if config, ok := self["Config"]; ok {
-			if dc, ok := config["Datacenter"].(string); ok {
-				return dc
-			}
-		}
-	}
-	return "dc1"
-}
-
-func findTargetDatacenter(client *api.Client, localDC string) (string, error) {
-	dcs, err := client.Catalog().Datacenters()
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch datacenters: %w", err)
-	}
-	for _, dc := range dcs {
-		if dc != localDC {
-			return dc, nil
-		}
-	}
-	return "dc2", nil
 }
 
 func getStrategyFromTags(tags []string, prefix string) string {

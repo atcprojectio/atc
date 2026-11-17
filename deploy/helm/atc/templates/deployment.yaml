@@ -64,8 +64,19 @@ spec:
               value: "8089"
             - name: ATC_MCP_PORT
               value: "8092"
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
             - name: ATC_CONSUL_ADDR
-              value: {{ .Values.config.consulAddr | quote }}
+              value: {{ .Values.config.consulAddr | default "http://$(HOST_IP):8500" | quote }}
+            {{- with .Values.consulToken.existingSecret }}
+            - name: ATC_CONSUL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ $.Values.consulToken.key }}
+            {{- end }}
             - name: ATC_CONSUL_DC
               value: {{ .Values.config.consulDC | quote }}
             - name: ATC_CONSUL_NAMESPACE
@@ -74,6 +85,9 @@ spec:
               value: {{ .Values.config.writeRateLimit | quote }}
             - name: ATC_LOG_LEVEL
               value: {{ .Values.config.logLevel | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           volumeMounts:
             - name: config-volume
               mountPath: /etc/atc

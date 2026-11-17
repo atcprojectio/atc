@@ -84,17 +84,13 @@ func TestConsulWatcher(t *testing.T) {
 
 	// Wait for events to be broadcasted
 	servicesUpdated := false
-	checksUpdated := false
 
 	timeout := time.After(2 * time.Second)
-	for !servicesUpdated || !checksUpdated {
+	for !servicesUpdated {
 		select {
 		case msg := <-ch:
 			if msg == "services_update" {
 				servicesUpdated = true
-			}
-			if msg == "checks_update" {
-				checksUpdated = true
 			}
 		case <-timeout:
 			t.Fatal("timed out waiting for watcher updates")
@@ -116,7 +112,6 @@ func TestConsulWatcher_WithNamespace(t *testing.T) {
 	// Written by the HTTP handler goroutine, read by the test goroutine.
 	var nsMu sync.Mutex
 	var servicesNamespace string
-	var checksNamespace string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -139,9 +134,6 @@ func TestConsulWatcher_WithNamespace(t *testing.T) {
 		}
 
 		if r.URL.Path == "/v1/health/state/any" {
-			nsMu.Lock()
-			checksNamespace = ns
-			nsMu.Unlock()
 			w.Header().Set("X-Consul-Index", "1")
 			checks := []map[string]any{
 				{
@@ -177,17 +169,13 @@ func TestConsulWatcher_WithNamespace(t *testing.T) {
 
 	// Wait for events to be broadcasted
 	servicesUpdated := false
-	checksUpdated := false
 
 	timeout := time.After(2 * time.Second)
-	for !servicesUpdated || !checksUpdated {
+	for !servicesUpdated {
 		select {
 		case msg := <-ch:
 			if msg == "services_update" {
 				servicesUpdated = true
-			}
-			if msg == "checks_update" {
-				checksUpdated = true
 			}
 		case err := <-errChan:
 			if err != nil {
@@ -208,8 +196,5 @@ func TestConsulWatcher_WithNamespace(t *testing.T) {
 	defer nsMu.Unlock()
 	if servicesNamespace != "custom-ns" {
 		t.Errorf("expected services query to use namespace 'custom-ns', got %q", servicesNamespace)
-	}
-	if checksNamespace != "custom-ns" {
-		t.Errorf("expected checks query to use namespace 'custom-ns', got %q", checksNamespace)
 	}
 }
