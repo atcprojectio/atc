@@ -62,7 +62,9 @@ type Forwarder struct {
 	strategiesCache map[string]cachedStrategies
 	consulClient    *api.Client
 	resyncInterval  time.Duration
-	foreign         *ForeignTracker
+	// resyncChanged wakes a running loop so a reloaded resync_interval applies immediately.
+	resyncChanged chan struct{}
+	foreign       *ForeignTracker
 
 	unknownStrategyWarn *WarnTracker
 	aclFilteredWarn     *WarnTracker
@@ -150,6 +152,7 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 
 	f := &Forwarder{
 		resyncInterval:          DefaultResyncInterval,
+		resyncChanged:           make(chan struct{}, 1),
 		logger:                  logger,
 		consulAddr:              consulAddr,
 		consulToken:             consulToken,
@@ -244,6 +247,26 @@ func (f *Forwarder) CancelPendingWrite(ctx context.Context, svcName string) {
 	delete(f.pendingOwner, svcName)
 }
 
+// cancelPendingExcept cancels queued writes for every service not in wanted. A queued write
+// whose service the latest reconcile no longer wants to change must not fire later.
+func (f *Forwarder) cancelPendingExcept(ctx context.Context, wanted map[string]struct{}) {
+	f.schedMu.Lock()
+	defer f.schedMu.Unlock()
+	for svcName, timer := range f.writeTimers {
+		if _, ok := wanted[svcName]; ok {
+			continue
+		}
+		timer.Stop()
+		delete(f.writeTimers, svcName)
+		delete(f.pendingWrites, svcName)
+		delete(f.pendingOwner, svcName)
+		f.logger.Info("Cancelled pending service-resolver write: no longer wanted", slog.String("service", svcName))
+		if f.dampeningCancelled != nil {
+			f.dampeningCancelled.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "superseded")))
+		}
+	}
+}
+
 func (f *Forwarder) CancelAllPendingWrites(ctx context.Context) {
 	f.schedMu.Lock()
 	defer f.schedMu.Unlock()
@@ -293,12 +316,19 @@ func (f *Forwarder) reconcileWithCurrentClient(ctx context.Context) error {
 // DefaultResyncInterval is how often a running module reconciles even without catalog events.
 const DefaultResyncInterval = 60 * time.Second
 
-// SetResyncInterval sets the periodic resync interval (0 disables it). It takes effect when
-// Run next starts.
+// SetResyncInterval sets the periodic resync interval (0 disables it). A running loop picks
+// the new interval up immediately.
 func (f *Forwarder) SetResyncInterval(d time.Duration) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
+	changed := f.resyncInterval != d
 	f.resyncInterval = d
+	f.mu.Unlock()
+	if changed {
+		select {
+		case f.resyncChanged <- struct{}{}:
+		default: // a change is already pending
+		}
+	}
 }
 
 // SetConnection updates the Consul connection settings. When they change, the cached client
@@ -326,7 +356,6 @@ func (f *Forwarder) Run(ctx context.Context) error {
 
 	f.mu.RLock()
 	w := f.watcher
-	resyncInterval := f.resyncInterval
 	f.mu.RUnlock()
 
 	events := w.Events.Subscribe()
@@ -352,11 +381,26 @@ func (f *Forwarder) Run(ctx context.Context) error {
 
 		// Periodic full resync: retries failed writes and repairs drift that no catalog
 		// event would reveal (e.g. a resolver deleted out-of-band or an expired override).
-		if resyncInterval > 0 {
-			resyncTicker := time.NewTicker(resyncInterval)
-			defer resyncTicker.Stop()
-			resyncChan = resyncTicker.C
+		var resyncTicker *time.Ticker
+		resetResync := func() {
+			if resyncTicker != nil {
+				resyncTicker.Stop()
+				resyncTicker, resyncChan = nil, nil
+			}
+			f.mu.RLock()
+			d := f.resyncInterval
+			f.mu.RUnlock()
+			if d > 0 {
+				resyncTicker = time.NewTicker(d)
+				resyncChan = resyncTicker.C
+			}
 		}
+		resetResync()
+		defer func() {
+			if resyncTicker != nil {
+				resyncTicker.Stop()
+			}
+		}()
 
 		defer func() {
 			if debounceTimer != nil {
@@ -402,6 +446,10 @@ func (f *Forwarder) Run(ctx context.Context) error {
 					timerChan = debounceTimer.C
 				}
 
+			case <-f.resyncChanged:
+				f.logger.InfoContext(ctx, "Resync interval changed")
+				resetResync()
+
 			case <-resyncChan:
 				f.logger.DebugContext(ctx, "Periodic resync, running reconciliation")
 				if err := f.reconcileWithCurrentClient(ctx); err != nil {
@@ -426,6 +474,10 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 	// Failed writes are collected and returned so the run is counted as failed and the
 	// next periodic resync retries them, instead of being logged and forgotten.
 	var writeErrs []error
+	// Services this run queued a dampened write for. Queued writes for any other service are
+	// no longer wanted (state flapped back, atc.enabled or atc.adopt removed, ...) and are
+	// cancelled at the end of a completed run.
+	wanted := map[string]struct{}{}
 	foreign := map[string]struct{}{}
 	unknownStrategy := map[string]string{}
 	noTarget := map[string]string{}
@@ -580,9 +632,12 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 						if tDC == "" {
 							tDC = autoDC(i)
 						}
-						if tDC == "" {
-							continue // no other datacenter to fail over to
+						if tDC == "" && tSvc == svcName && target.Namespace == "" && target.ServiceSubset == "" {
+							// No other datacenter: this target would point the service at itself.
+							continue
 						}
+						// With no other datacenter, a target naming another service, namespace or
+						// subset stays in the local datacenter (Datacenter "").
 						targets = append(targets, api.ServiceResolverFailoverTarget{
 							Service:       tSvc,
 							Datacenter:    tDC,
@@ -678,6 +733,7 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 				} else {
 					f.logger.InfoContext(ctx, "Scheduling failover service-resolver write", slog.String("service", svcName), slog.Duration("dampening", dampening))
 					f.scheduleWrite(svcName, entry, dampening, OwnerState(existing, exists))
+					wanted[svcName] = struct{}{}
 				}
 			}
 		} else {
@@ -722,6 +778,7 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 	f.mu.Unlock()
 	f.unknownStrategyWarn.Update(ctx, unknownStrategy)
 	f.noTargetWarn.Update(ctx, noTarget)
+	f.cancelPendingExcept(ctx, wanted)
 	return errors.Join(writeErrs...)
 }
 

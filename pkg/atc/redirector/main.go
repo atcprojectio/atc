@@ -60,7 +60,9 @@ type Redirector struct {
 	mu             sync.RWMutex
 	consulClient   *api.Client
 	resyncInterval time.Duration
-	foreign        *forwarder.ForeignTracker
+	// resyncChanged wakes a running loop so a reloaded resync_interval applies immediately.
+	resyncChanged chan struct{}
+	foreign       *forwarder.ForeignTracker
 
 	unknownStrategyWarn *forwarder.WarnTracker
 	aclFilteredWarn     *forwarder.WarnTracker
@@ -149,6 +151,7 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 
 	r := &Redirector{
 		resyncInterval:          DefaultResyncInterval,
+		resyncChanged:           make(chan struct{}, 1),
 		logger:                  logger,
 		consulAddr:              consulAddr,
 		consulToken:             consulToken,
@@ -262,6 +265,26 @@ func (r *Redirector) CancelPendingWrite(ctx context.Context, svcName string) {
 	delete(r.pendingOwner, svcName)
 }
 
+// cancelPendingExcept cancels queued writes for every service not in wanted. A queued write
+// whose service the latest reconcile no longer wants to change must not fire later.
+func (r *Redirector) cancelPendingExcept(ctx context.Context, wanted map[string]struct{}) {
+	r.schedMu.Lock()
+	defer r.schedMu.Unlock()
+	for svcName, timer := range r.writeTimers {
+		if _, ok := wanted[svcName]; ok {
+			continue
+		}
+		timer.Stop()
+		delete(r.writeTimers, svcName)
+		delete(r.pendingWrites, svcName)
+		delete(r.pendingOwner, svcName)
+		r.logger.Info("Cancelled pending service-resolver write: no longer wanted", slog.String("service", svcName))
+		if r.dampeningCancelled != nil {
+			r.dampeningCancelled.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "superseded")))
+		}
+	}
+}
+
 func (r *Redirector) CancelAllPendingWrites(ctx context.Context) {
 	r.schedMu.Lock()
 	defer r.schedMu.Unlock()
@@ -313,12 +336,19 @@ func (r *Redirector) reconcileWithCurrentClient(ctx context.Context) error {
 // DefaultResyncInterval is how often a running module reconciles even without catalog events.
 const DefaultResyncInterval = 60 * time.Second
 
-// SetResyncInterval sets the periodic resync interval (0 disables it). It takes effect when
-// Run next starts.
+// SetResyncInterval sets the periodic resync interval (0 disables it). A running loop picks
+// the new interval up immediately.
 func (r *Redirector) SetResyncInterval(d time.Duration) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	changed := r.resyncInterval != d
 	r.resyncInterval = d
+	r.mu.Unlock()
+	if changed {
+		select {
+		case r.resyncChanged <- struct{}{}:
+		default: // a change is already pending
+		}
+	}
 }
 
 // SetConnection updates the Consul connection settings. When they change, the cached client
@@ -346,7 +376,6 @@ func (r *Redirector) Run(ctx context.Context) error {
 
 	r.mu.RLock()
 	w := r.watcher
-	resyncInterval := r.resyncInterval
 	r.mu.RUnlock()
 
 	events := w.Events.Subscribe()
@@ -372,11 +401,26 @@ func (r *Redirector) Run(ctx context.Context) error {
 
 		// Periodic full resync: retries failed writes and repairs drift that no catalog
 		// event would reveal (e.g. a resolver deleted out-of-band or an expired override).
-		if resyncInterval > 0 {
-			resyncTicker := time.NewTicker(resyncInterval)
-			defer resyncTicker.Stop()
-			resyncChan = resyncTicker.C
+		var resyncTicker *time.Ticker
+		resetResync := func() {
+			if resyncTicker != nil {
+				resyncTicker.Stop()
+				resyncTicker, resyncChan = nil, nil
+			}
+			r.mu.RLock()
+			d := r.resyncInterval
+			r.mu.RUnlock()
+			if d > 0 {
+				resyncTicker = time.NewTicker(d)
+				resyncChan = resyncTicker.C
+			}
 		}
+		resetResync()
+		defer func() {
+			if resyncTicker != nil {
+				resyncTicker.Stop()
+			}
+		}()
 
 		defer func() {
 			if debounceTimer != nil {
@@ -422,6 +466,10 @@ func (r *Redirector) Run(ctx context.Context) error {
 					timerChan = debounceTimer.C
 				}
 
+			case <-r.resyncChanged:
+				r.logger.InfoContext(ctx, "Resync interval changed")
+				resetResync()
+
 			case <-resyncChan:
 				r.logger.DebugContext(ctx, "Periodic resync, running reconciliation")
 				if err := r.reconcileWithCurrentClient(ctx); err != nil {
@@ -446,6 +494,10 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 	// Failed writes are collected and returned so the run is counted as failed and the
 	// next periodic resync retries them, instead of being logged and forgotten.
 	var writeErrs []error
+	// Services this run queued a dampened write for. Queued writes for any other service are
+	// no longer wanted (state flapped back, atc.enabled or atc.adopt removed, ...) and are
+	// cancelled at the end of a completed run.
+	wanted := map[string]struct{}{}
 	foreign := map[string]struct{}{}
 	unknownStrategy := map[string]string{}
 	noTarget := map[string]string{}
@@ -626,6 +678,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 				} else {
 					r.logger.InfoContext(ctx, "Scheduling base service-resolver write", slog.String("service", svcName), slog.Duration("dampening", dampening))
 					r.scheduleWrite(svcName, entry, dampening, forwarder.OwnerState(existing, exists))
+					wanted[svcName] = struct{}{}
 				}
 			}
 		} else {
@@ -722,10 +775,13 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 					}
 				}
 
-				if targetDCVal == "" {
+				if targetDCVal == "" && targetSvc == name && targetNamespace == "" && targetServiceSubset == "" {
+					// No other datacenter: the redirect would point the service at itself.
 					noTarget[name] = "no other datacenter to redirect to"
 					continue
 				}
+				// A redirect to another service, namespace or subset with no other datacenter stays
+				// in the local datacenter (Datacenter "").
 
 				needsUpdate := existing.Redirect == nil ||
 					existing.Redirect.Service != targetSvc ||
@@ -772,6 +828,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 					} else {
 						r.logger.InfoContext(ctx, "Scheduling redirect service-resolver write", slog.String("service", name), slog.Duration("dampening", dampening))
 						r.scheduleWrite(name, entry, dampening, forwarder.OwnerState(existing, true))
+						wanted[name] = struct{}{}
 					}
 				}
 			}
@@ -792,6 +849,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 	r.mu.Unlock()
 	r.unknownStrategyWarn.Update(ctx, unknownStrategy)
 	r.noTargetWarn.Update(ctx, noTarget)
+	r.cancelPendingExcept(ctx, wanted)
 	return errors.Join(writeErrs...)
 }
 

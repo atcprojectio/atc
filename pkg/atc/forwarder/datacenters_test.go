@@ -2,6 +2,7 @@ package forwarder
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -136,4 +137,29 @@ func TestStrategyCacheForgetsGoneServices(t *testing.T) {
 	_, kept := f.strategiesCache["payments"]
 	assert.False(t, gone, "a service with no catalog entry and no resolver is forgotten")
 	assert.True(t, kept)
+}
+
+// TestSingleDatacenterKeepsLocalTargets: with no other datacenter, a target that names another
+// service in the local datacenter is still valid and must be written.
+func TestSingleDatacenterKeepsLocalTargets(t *testing.T) {
+	fc := newFakeConsul(t)
+	fc.datacenters.Store(`["dc1"]`)
+	fc.tags.Store([]string{"atc.enabled=true", "atc.failover=local"})
+	strategies := map[string]FailoverStrategy{"local": {Targets: []FailoverTarget{
+		{Service: "payments-fallback"}, // another service, same datacenter
+		{},                             // would be the service itself: skipped
+	}}}
+	f, err := New(slog.New(slog.NewTextHandler(io.Discard, nil)), fc.addr(), "", "dc1", "", "", strategies, "", "", false)
+	require.NoError(t, err)
+	client, err := api.NewClient(&api.Config{Address: fc.addr()})
+	require.NoError(t, err)
+
+	require.NoError(t, f.reconcile(context.Background(), client))
+	require.Equal(t, int32(1), fc.resolverPuts.Load())
+	var written api.ServiceResolverConfigEntry
+	require.NoError(t, json.Unmarshal([]byte(fc.lastPut.Load().(string)), &written))
+	targets := written.Failover["*"].Targets
+	require.Len(t, targets, 1)
+	assert.Equal(t, "payments-fallback", targets[0].Service)
+	assert.Empty(t, targets[0].Datacenter, "local datacenter")
 }

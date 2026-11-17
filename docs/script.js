@@ -70,6 +70,15 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
+  // Follow URL changes (in-page links to #section, back/forward) to the matching section.
+  // Fragments that are not a section (e.g. table-of-contents anchors) are left alone.
+  window.addEventListener('hashchange', () => {
+    const id = window.location.hash.replace('#', '');
+    if (id && Array.from(sections).some(sec => sec.id === id)) {
+      showSection(id);
+    }
+  });
+
   // Handle initial load with hash
   if (window.location.hash) {
     showSection(window.location.hash);

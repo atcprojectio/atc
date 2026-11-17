@@ -171,3 +171,71 @@ func TestChangelogGroupsBreakingChanges(t *testing.T) {
 	assert.Equal(t, "Fixes", groupOf("fix(deploy): published chart image tag"))
 	assert.Equal(t, "Other changes", groupOf("chore(deps): Bump grpc"))
 }
+
+func docsSection(t *testing.T, startMarker string) string {
+	t.Helper()
+	raw, err := os.ReadFile("docs/index.html")
+	require.NoError(t, err)
+	docs := string(raw)
+	i := strings.Index(docs, startMarker)
+	require.NotEqual(t, -1, i, "docs section %q not found", startMarker)
+	end := strings.Index(docs[i:], "</table>")
+	require.NotEqual(t, -1, end)
+	return docs[i : i+end]
+}
+
+// TestEveryMetricIsDocumented keeps the docs' metrics table in step with the code.
+func TestEveryMetricIsDocumented(t *testing.T) {
+	table := docsSection(t, "<h2>Metrics Exposed</h2>")
+	names := map[string]bool{"atc_build_info": true} // from the Prometheus version collector
+	files, err := filepath.Glob("pkg/atc/*.go")
+	require.NoError(t, err)
+	more, err := filepath.Glob("pkg/atc/*/*.go")
+	require.NoError(t, err)
+	re := regexp.MustCompile(`"(atc_[a-z0-9_]+)"`)
+	for _, f := range append(files, more...) {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f) //nolint:gosec // f comes from a glob over this repository's sources
+		require.NoError(t, err)
+		for _, m := range re.FindAllStringSubmatch(string(src), -1) {
+			names[m[1]] = true
+		}
+	}
+	require.Greater(t, len(names), 15, "sanity: metric names found in the code")
+	for name := range names {
+		assert.Contains(t, table, "<code>"+name+"</code>", "metric %s must be in the docs metrics table", name)
+	}
+}
+
+// TestEveryMCPToolIsDocumented checks each MCP tool and the JSON names of its arguments.
+func TestEveryMCPToolIsDocumented(t *testing.T) {
+	src, err := os.ReadFile("pkg/atc/mcp/server.go")
+	require.NoError(t, err)
+	docs, err := os.ReadFile("docs/index.html")
+	require.NoError(t, err)
+	rows := regexp.MustCompile(`(?s)<tr>\s*<td><code>(\w+)</code></td>(.*?)</tr>`).FindAllStringSubmatch(string(docs), -1)
+	rowOf := map[string]string{}
+	for _, r := range rows {
+		rowOf[r[1]] = r[2]
+	}
+
+	blocks := strings.Split(string(src), "mcp.AddTool(")[1:]
+	require.NotEmpty(t, blocks)
+	for _, b := range blocks {
+		name := regexp.MustCompile(`Name:\s+"(\w+)"`).FindStringSubmatch(b)
+		require.NotNil(t, name)
+		row, ok := rowOf[name[1]]
+		if !assert.True(t, ok, "MCP tool %s must be in the docs tools table", name[1]) {
+			continue
+		}
+		input := b
+		if i := strings.Index(b, ") (*mcp.CallToolResult"); i >= 0 {
+			input = b[:i]
+		}
+		for _, arg := range regexp.MustCompile(`json:"(\w+)`).FindAllStringSubmatch(input, -1) {
+			assert.Contains(t, row, "<code>"+arg[1]+"</code>", "MCP tool %s: argument %q must be documented", name[1], arg[1])
+		}
+	}
+}
