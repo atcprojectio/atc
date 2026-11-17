@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 const getLocalStorageItem = (key) => {
@@ -42,6 +42,7 @@ function App() {
   const [overrideNamespace, setOverrideNamespace] = useState('');
   const [overrideType, setOverrideType] = useState('failover');
   const [overrideDuration, setOverrideDuration] = useState('');
+  const tokenDebounceRef = useRef(null);
 
   const getHeaders = (t) => {
     const h = {};
@@ -51,14 +52,40 @@ function App() {
     return h;
   };
 
+  useEffect(() => {
+    return () => {
+      if (tokenDebounceRef.current) {
+        clearTimeout(tokenDebounceRef.current);
+      }
+    };
+  }, []);
+
   const handleTokenChange = (val) => {
     setToken(val);
     setLocalStorageItem('atc-api-token', val);
     setError(null);
-    fetchServices(true, val);
+    if (tokenDebounceRef.current) {
+      clearTimeout(tokenDebounceRef.current);
+    }
+    tokenDebounceRef.current = setTimeout(() => {
+      tokenDebounceRef.current = null;
+      fetchServices(true, val);
+    }, 400);
+  };
+
+  const flushTokenSync = (val = token) => {
+    if (tokenDebounceRef.current) {
+      clearTimeout(tokenDebounceRef.current);
+      tokenDebounceRef.current = null;
+      fetchServices(true, val);
+    }
   };
 
   const handleClearToken = () => {
+    if (tokenDebounceRef.current) {
+      clearTimeout(tokenDebounceRef.current);
+      tokenDebounceRef.current = null;
+    }
     setToken('');
     removeLocalStorageItem('atc-api-token');
     setError(null);
@@ -70,94 +97,97 @@ function App() {
       if (showLoading) {
         setLoading(true);
       }
-      
+
       const headers = getHeaders(currentToken);
- 
-      try {
-        const leaderRes = await fetch('/api/leader', { headers });
-        if (leaderRes.status === 401 || leaderRes.status === 403) {
+
+      const [
+        leaderOutcome,
+        fedOutcome,
+        stratOutcome,
+        modulesOutcome,
+        servicesOutcome,
+      ] = await Promise.allSettled([
+        fetch('/api/leader', { headers }),
+        fetch('/api/federation', { headers }),
+        fetch('/api/strategies', { headers }),
+        fetch('/api/modules', { headers }),
+        fetch('/api/services', { headers }),
+      ]);
+
+      const outcomes = [
+        leaderOutcome,
+        fedOutcome,
+        stratOutcome,
+        modulesOutcome,
+        servicesOutcome,
+      ];
+
+      for (const outcome of outcomes) {
+        if (outcome.status === 'fulfilled' && outcome.value && (outcome.value.status === 401 || outcome.value.status === 403)) {
           setAuthEnabled(true);
           setError('Authentication failed. Please check your API token.');
           setAutoRefresh(false);
-          setLoading(false);
           return;
         }
-        if (leaderRes.ok) {
-          const leaderData = await leaderRes.json();
+      }
+
+      if (leaderOutcome.status === 'fulfilled' && leaderOutcome.value.ok) {
+        try {
+          const leaderData = await leaderOutcome.value.json();
           setAuthEnabled(!!leaderData.auth_enabled);
           setLeaderComponents(leaderData.components || { forwarder: false, redirector: false });
           setLeaderInfo(leaderData);
+        } catch (err) {
+          console.error("Failed to parse leader status:", err);
         }
-      } catch (err) {
-        console.error("Failed to fetch leader status:", err);
+      } else if (leaderOutcome.status === 'rejected') {
+        console.error("Failed to fetch leader status:", leaderOutcome.reason);
       }
- 
-      // Fetch federation status
-      try {
-        const fedRes = await fetch('/api/federation', { headers });
-        if (fedRes.status === 401 || fedRes.status === 403) {
-          setAuthEnabled(true);
-          setError('Authentication failed. Please check your API token.');
-          setAutoRefresh(false);
-          setLoading(false);
-          return;
-        }
-        if (fedRes.ok) {
-          const fedData = await fedRes.json();
+
+      if (fedOutcome.status === 'fulfilled' && fedOutcome.value.ok) {
+        try {
+          const fedData = await fedOutcome.value.json();
           const fedMap = {};
-          fedData.forEach(item => {
-            fedMap[item.datacenter] = item.status;
-          });
+          if (Array.isArray(fedData)) {
+            fedData.forEach(item => {
+              fedMap[item.datacenter] = item.status;
+            });
+          }
           setFederation(fedMap);
+        } catch (err) {
+          console.error("Failed to parse federation status:", err);
         }
-      } catch (err) {
-        console.error("Failed to fetch federation status:", err);
+      } else if (fedOutcome.status === 'rejected') {
+        console.error("Failed to fetch federation status:", fedOutcome.reason);
       }
- 
-      // Fetch predefined strategies
-      try {
-        const stratRes = await fetch('/api/strategies', { headers });
-        if (stratRes.status === 401 || stratRes.status === 403) {
-          setAuthEnabled(true);
-          setError('Authentication failed. Please check your API token.');
-          setAutoRefresh(false);
-          setLoading(false);
-          return;
-        }
-        if (stratRes.ok) {
-          const stratData = await stratRes.json();
+
+      if (stratOutcome.status === 'fulfilled' && stratOutcome.value.ok) {
+        try {
+          const stratData = await stratOutcome.value.json();
           setStrategies(stratData || { failover: {}, redirect: {} });
+        } catch (err) {
+          console.error("Failed to parse predefined strategies:", err);
         }
-      } catch (err) {
-        console.error("Failed to fetch predefined strategies:", err);
+      } else if (stratOutcome.status === 'rejected') {
+        console.error("Failed to fetch predefined strategies:", stratOutcome.reason);
       }
- 
-      // Fetch enabled modules
-      try {
-        const modulesRes = await fetch('/api/modules', { headers });
-        if (modulesRes.status === 401 || modulesRes.status === 403) {
-          setAuthEnabled(true);
-          setError('Authentication failed. Please check your API token.');
-          setAutoRefresh(false);
-          setLoading(false);
-          return;
-        }
-        if (modulesRes.ok) {
-          const modulesData = await modulesRes.json();
+
+      if (modulesOutcome.status === 'fulfilled' && modulesOutcome.value.ok) {
+        try {
+          const modulesData = await modulesOutcome.value.json();
           setModules(modulesData || []);
+        } catch (err) {
+          console.error("Failed to parse active modules:", err);
         }
-      } catch (err) {
-        console.error("Failed to fetch active modules:", err);
+      } else if (modulesOutcome.status === 'rejected') {
+        console.error("Failed to fetch active modules:", modulesOutcome.reason);
       }
- 
-      const res = await fetch('/api/services', { headers });
-      if (res.status === 401 || res.status === 403) {
-        setAuthEnabled(true);
-        setError('Authentication failed. Please check your API token.');
-        setAutoRefresh(false);
-        setLoading(false);
-        return;
+
+      if (servicesOutcome.status === 'rejected') {
+        throw servicesOutcome.reason;
       }
+
+      const res = servicesOutcome.value;
       if (!res.ok) {
         throw new Error(`Failed to fetch services: ${res.statusText}`);
       }
@@ -367,7 +397,14 @@ Lock Key: ${lockKey}`;
               placeholder="Enter API Token..."
               value={token}
               onChange={(e) => handleTokenChange(e.target.value)}
+              onBlur={(e) => flushTokenSync(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  flushTokenSync(e.target.value);
+                }
+              }}
               className="auth-input"
+              aria-label="API Token"
             />
             <button 
               type="button" 
@@ -607,8 +644,9 @@ Lock Key: ${lockKey}`;
                             <div className="override-form glass-panel">
                               <h4>Manual Override Controls</h4>
                               <div className="form-group">
-                                <label>Override Type</label>
+                                <label htmlFor="override-type-select">Override Type</label>
                                 <select 
+                                  id="override-type-select"
                                   value={overrideType} 
                                   onChange={(e) => setOverrideType(e.target.value)}
                                   className="form-select"
@@ -618,9 +656,10 @@ Lock Key: ${lockKey}`;
                                 </select>
                               </div>
                               <div className="form-group">
-                                <label>Target Datacenter</label>
+                                <label htmlFor="override-target-dc-input">Target Datacenter</label>
                                 {Object.keys(federation).length > 0 ? (
                                   <select
+                                    id="override-target-dc-input"
                                     value={overrideTargetDc}
                                     onChange={(e) => setOverrideTargetDc(e.target.value)}
                                     className="form-select"
@@ -632,6 +671,7 @@ Lock Key: ${lockKey}`;
                                   </select>
                                 ) : (
                                   <input
+                                    id="override-target-dc-input"
                                     type="text"
                                     placeholder="e.g. dc2"
                                     value={overrideTargetDc}
@@ -641,7 +681,7 @@ Lock Key: ${lockKey}`;
                                 )}
                               </div>
                               <div className="form-group">
-                                <label>Target Namespace (Optional)</label>
+                                <label htmlFor="override-namespace-input">Target Namespace (Optional)</label>
                                 <input
                                   type="text"
                                   placeholder="e.g. default"
@@ -652,8 +692,9 @@ Lock Key: ${lockKey}`;
                                 />
                               </div>
                               <div className="form-group">
-                                <label>Duration (TTL)</label>
+                                <label htmlFor="override-duration-select">Duration (TTL)</label>
                                 <select
+                                  id="override-duration-select"
                                   value={overrideDuration}
                                   onChange={(e) => setOverrideDuration(e.target.value)}
                                   className="form-select"

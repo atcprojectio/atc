@@ -200,7 +200,7 @@ describe('ATC Dashboard App', () => {
     expect(screen.getByText(/Bypassed \(Expires in 15m\)/)).toBeInTheDocument();
   });
 
-  it('submits manual override with TTL duration', async () => {
+  it('submits manual override with TTL duration and associates form labels with inputs', async () => {
     render(<App />);
 
     await waitFor(() => {
@@ -212,6 +212,12 @@ describe('ATC Dashboard App', () => {
 
     expect(screen.getByText('Manual Override Controls')).toBeInTheDocument();
 
+    // Verify all form labels are associated via htmlFor / id
+    expect(screen.getByLabelText('Override Type')).toBeInTheDocument();
+    expect(screen.getByLabelText('Target Datacenter')).toBeInTheDocument();
+    expect(screen.getByLabelText('Target Namespace (Optional)')).toBeInTheDocument();
+    expect(screen.getByLabelText('Duration (TTL)')).toBeInTheDocument();
+
     const applyBtn = screen.getByRole('button', { name: /Apply Override/i });
     fireEvent.click(applyBtn);
 
@@ -222,6 +228,46 @@ describe('ATC Dashboard App', () => {
           method: 'POST'
         })
       );
+    });
+  });
+
+  it('debounces API token input changes before firing parallel API requests', async () => {
+    const origImpl = window.fetch.getMockImplementation();
+    window.fetch.mockImplementation((url, options) => {
+      if (url.includes('/api/leader')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            leader: true,
+            auth_enabled: true,
+            components: { forwarder: true, redirector: true }
+          })
+        });
+      }
+      return origImpl(url, options);
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText('Enter API Token...')).toBeInTheDocument();
+    });
+
+    const tokenInput = screen.getByPlaceholderText('Enter API Token...');
+    window.fetch.mockClear();
+
+    fireEvent.change(tokenInput, { target: { value: 'a' } });
+    fireEvent.change(tokenInput, { target: { value: 'ab' } });
+    fireEvent.change(tokenInput, { target: { value: 'abc' } });
+
+    // Should not fire requests immediately on each keystroke
+    expect(window.fetch).not.toHaveBeenCalled();
+
+    // Flushing on blur triggers a single batch of 5 parallel requests
+    fireEvent.blur(tokenInput);
+
+    await waitFor(() => {
+      expect(window.fetch).toHaveBeenCalledTimes(5);
     });
   });
 });
