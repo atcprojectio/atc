@@ -540,4 +540,3 @@ func TestApiReloadHandler(t *testing.T) {
 		t.Errorf("expected status OK, got %d. Body: %s", rrPost.Code, rrPost.Body.String())
 	}
 }
-

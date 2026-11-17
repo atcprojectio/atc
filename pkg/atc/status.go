@@ -166,7 +166,7 @@ type LeaderStatusResponse struct {
 
 func (t *Atc) apiLeaderHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	leader := t.IsLeader()
 
 	t.cfgMu.RLock()
@@ -343,5 +343,3 @@ func (t *Atc) apiReloadHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"success","message":"Configuration reloaded successfully"}`))
 }
-
-

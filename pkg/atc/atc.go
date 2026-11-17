@@ -109,7 +109,7 @@ type Atc struct {
 	redirectorLeader atomic.Bool
 
 	leaderTransitionsCounter metric.Int64Counter
-	overridesPurgedCounter    metric.Int64Counter
+	overridesPurgedCounter   metric.Int64Counter
 	configReloadsCounter     metric.Int64Counter
 	configLastReloadTime     int64
 }
@@ -179,7 +179,7 @@ func New(cfg Config) (*Atc, error) {
 		consulClients:            make(map[string]*api.Client),
 		tokenCache:               make(map[string]time.Time),
 		leaderTransitionsCounter: leaderTransitionsCounter,
-		overridesPurgedCounter:    overridesPurgedCounter,
+		overridesPurgedCounter:   overridesPurgedCounter,
 		configReloadsCounter:     configReloadsCounter,
 		configLastReloadTime:     time.Now().Unix(),
 	}

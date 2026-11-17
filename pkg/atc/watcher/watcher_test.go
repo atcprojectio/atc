@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"sync/atomic"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )

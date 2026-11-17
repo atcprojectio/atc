@@ -89,4 +89,3 @@ func hasEnv(key string) bool {
 	_, ok := os.LookupEnv(key)
 	return ok
 }
-

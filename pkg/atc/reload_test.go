@@ -106,4 +106,3 @@ func TestResolveNodeName(t *testing.T) {
 		t.Errorf("expected test-node to be preserved, got %q", got)
 	}
 }
-

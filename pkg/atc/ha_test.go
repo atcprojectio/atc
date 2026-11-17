@@ -510,7 +510,6 @@ func TestLeaderElectionGracefulShutdown(t *testing.T) {
 	}
 }
 
-
 // TestLeaderElection_ReleasesLockWhenWorkloadExits verifies that a leader whose workload
 // returns (e.g. the watcher failed) gives up the lock and re-enters the election instead of
 // holding leadership while doing nothing.

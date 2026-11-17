@@ -55,9 +55,9 @@ type Redirector struct {
 	hasDefaultFailover bool
 	dryRun             bool
 
-	mu                 sync.RWMutex
-	consulClient       *api.Client
-	strategiesCache    map[string]cachedStrategies
+	mu              sync.RWMutex
+	consulClient    *api.Client
+	strategiesCache map[string]cachedStrategies
 
 	// Hysteresis scheduling state
 	schedMu       sync.Mutex
@@ -68,7 +68,7 @@ type Redirector struct {
 	runCtx context.Context
 	// inflightWrites tracks scheduled writes that have started, so Run can wait for them.
 	inflightWrites sync.WaitGroup
-	forwarder     writeCanceler
+	forwarder      writeCanceler
 
 	reconcileCounter        metric.Int64Counter
 	reconcileDuration       metric.Float64Histogram
@@ -228,7 +228,7 @@ func (r *Redirector) CancelPendingWrite(ctx context.Context, svcName string) {
 	defer r.schedMu.Unlock()
 	if timer, ok := r.writeTimers[svcName]; ok {
 		r.logger.Info("Cancelled pending service-resolver write", slog.String("service", svcName), slog.String("reason", "reconciliation_canceled"))
-		
+
 		span := trace.SpanFromContext(ctx)
 		span.AddEvent("dampening_cancelled", trace.WithAttributes(
 			attribute.String("service", svcName),

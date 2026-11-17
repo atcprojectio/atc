@@ -67,4 +67,3 @@ func maskToken(token string) string {
 	}
 	return token[:3] + "..." + token[len(token)-3:]
 }
-

@@ -70,7 +70,7 @@ type Forwarder struct {
 	runCtx context.Context
 	// inflightWrites tracks scheduled writes that have started, so Run can wait for them.
 	inflightWrites sync.WaitGroup
-	redirector    writeCanceler
+	redirector     writeCanceler
 
 	reconcileCounter        metric.Int64Counter
 	reconcileDuration       metric.Float64Histogram
@@ -211,7 +211,7 @@ func (f *Forwarder) CancelPendingWrite(ctx context.Context, svcName string) {
 	defer f.schedMu.Unlock()
 	if timer, ok := f.writeTimers[svcName]; ok {
 		f.logger.Info("Cancelled pending service-resolver write", slog.String("service", svcName), slog.String("reason", "reconciliation_canceled"))
-		
+
 		span := trace.SpanFromContext(ctx)
 		span.AddEvent("dampening_cancelled", trace.WithAttributes(
 			attribute.String("service", svcName),

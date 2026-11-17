@@ -86,8 +86,8 @@ func TestAuthAndTokenDelegation(t *testing.T) {
 				MetricsListenPort: metricsPort,
 			},
 			Auth: atc.AuthConfig{
-				Enabled:                true,
-				StaticKeys:             []string{"atc-static-token"},
+				Enabled:               true,
+				StaticKeys:            []string{"atc-static-token"},
 				ConsulTokenDelegation: true,
 			},
 			Strategies: atc.StrategiesConfig{
