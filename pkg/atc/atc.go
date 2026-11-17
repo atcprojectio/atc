@@ -19,6 +19,7 @@ import (
 	"github.com/atcprojectio/atc/pkg/atc/redirector"
 	atc_server "github.com/atcprojectio/atc/pkg/atc/server"
 	"github.com/atcprojectio/atc/pkg/atc/telemetry"
+	"github.com/atcprojectio/atc/pkg/atc/watcher"
 	"github.com/hashicorp/consul/api"
 	"github.com/spf13/viper"
 	"go.opentelemetry.io/otel"
@@ -47,6 +48,7 @@ type AuthConfig struct {
 
 type Config struct {
 	Name               string            `yaml:"service" mapstructure:"service"`
+	NodeName           string            `yaml:"node_name" json:"node_name,omitempty" mapstructure:"node_name"`
 	Server             atc_server.Config `yaml:"server" mapstructure:"server"`
 	Target             []string          `yaml:"target" mapstructure:"target"`
 	ConsulAddr         string            `yaml:"consul_addr" mapstructure:"consul_addr"`
@@ -64,9 +66,16 @@ type Config struct {
 
 type contextKey string
 
-const tokenContextKey contextKey = "atc-token"
+const (
+	tokenContextKey    contextKey = "atc-token"
+	clientIPContextKey contextKey = "atc-client-ip"
+)
 
 var coreTracer = otel.Tracer("atc/core")
+
+// leaderReelectBackoff is how long a node waits before re-entering the election after
+// voluntarily releasing leadership because its workload exited. Var for tests.
+var leaderReelectBackoff = 5 * time.Second
 
 type Atc struct {
 	Cfg            Config
@@ -77,8 +86,15 @@ type Atc struct {
 	enabledModules map[string]bool
 	otelShutdown   func(context.Context) error
 
+	Watcher    *watcher.ConsulWatcher
 	Forwarder  *forwarder.Forwarder
 	Redirector *redirector.Redirector
+
+	consulClientsMu sync.RWMutex
+	consulClients   map[string]*api.Client
+
+	tokenCacheMu sync.RWMutex
+	tokenCache   map[string]time.Time
 
 	isLeader         atomic.Bool
 	forwarderLeader  atomic.Bool
@@ -90,14 +106,40 @@ type Atc struct {
 	configLastReloadTime     int64
 }
 
-func New(cfg Config) (*Atc, error) {
-	if cfg.Name == "" {
-		if hn, err := os.Hostname(); err == nil && hn != "" {
-			cfg.Name = "atc-node-" + hn
-		} else {
-			cfg.Name = "atc-node"
-		}
+func resolveNodeName(cfg Config) string {
+	if cfg.NodeName != "" {
+		return cfg.NodeName
 	}
+	hn, _ := os.Hostname()
+	if cfg.Name == "" {
+		if hn != "" {
+			return "atc-node-" + hn
+		}
+		return "atc-node"
+	}
+	if cfg.Name == "atc-service" && hn != "" {
+		return cfg.Name + "-" + hn
+	}
+	return cfg.Name
+}
+
+// NewCLI initializes a lightweight Atc instance for one-shot CLI operations (such as leader status or force-unlock)
+// without starting OpenTelemetry exporters, HTTP servers, or catalog watchers.
+func NewCLI(cfg Config) *Atc {
+	cfg.Name = resolveNodeName(cfg)
+	logger := initLogger(cfg.Server.LogFormat, cfg.Server.LogLevel)
+	return &Atc{
+		Cfg:            cfg,
+		logger:         logger,
+		coreLogger:     logger.With(slog.String("module", "core")),
+		enabledModules: resolveModules(cfg.Target),
+		consulClients:  make(map[string]*api.Client),
+		tokenCache:     make(map[string]time.Time),
+	}
+}
+
+func New(cfg Config) (*Atc, error) {
+	cfg.Name = resolveNodeName(cfg)
 
 	logger := initLogger(cfg.Server.LogFormat, cfg.Server.LogLevel)
 
@@ -126,10 +168,22 @@ func New(cfg Config) (*Atc, error) {
 		coreLogger:               logger.With(slog.String("module", "core")),
 		enabledModules:           resolveModules(cfg.Target),
 		otelShutdown:             otelShutdown,
+		consulClients:            make(map[string]*api.Client),
+		tokenCache:               make(map[string]time.Time),
 		leaderTransitionsCounter: leaderTransitionsCounter,
 		overridesPurgedCounter:    overridesPurgedCounter,
 		configReloadsCounter:     configReloadsCounter,
 		configLastReloadTime:     time.Now().Unix(),
+	}
+
+	if atc.enabledModules[Forwarder] || atc.enabledModules[Redirector] {
+		atc.Watcher = watcher.New(
+			logger.With(slog.String("module", "watcher")),
+			cfg.ConsulAddr,
+			cfg.ConsulToken,
+			cfg.ConsulDC,
+			cfg.ConsulNamespace,
+		)
 	}
 
 	_, err = meter.Int64ObservableGauge(
@@ -257,6 +311,7 @@ func (t *Atc) Run(ctx context.Context) error {
 
 	if t.Server != nil {
 		t.Server.Mux.HandleFunc("/health", t.healthHandler(&shutdownRequested))
+		t.Server.Mux.HandleFunc("/ready", t.healthHandler(&shutdownRequested))
 		t.Server.Mux.Handle("GET /services", t.authMiddleware(http.HandlerFunc(t.servicesHandler)))
 	}
 
@@ -318,6 +373,27 @@ func (t *Atc) IsLeader() bool {
 
 	return (t.Forwarder == nil || t.forwarderLeader.Load()) &&
 		(t.Redirector == nil || t.redirectorLeader.Load())
+}
+
+// isSweepOwner reports whether this node should purge expired overrides. With target-scoped
+// locks the forwarder and redirector leaders can live on different nodes, so IsLeader()
+// (which requires both) may be false everywhere. Exactly one lock owner sweeps instead:
+// the forwarder leader if a forwarder runs, else the redirector leader, else the core leader.
+func (t *Atc) isSweepOwner() bool {
+	t.cfgMu.RLock()
+	haEnabled := t.Cfg.HA.Enabled
+	t.cfgMu.RUnlock()
+	if !haEnabled {
+		return true
+	}
+	switch {
+	case t.Forwarder != nil:
+		return t.forwarderLeader.Load()
+	case t.Redirector != nil:
+		return t.redirectorLeader.Load()
+	default:
+		return t.isLeader.Load()
+	}
 }
 
 func (t *Atc) runLeaderElection(ctx context.Context) error {
@@ -443,63 +519,65 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 			attribute.String("lock_key", lockKey),
 		))
 
+		// workloadDone is closed when the workload returns. It stays nil (never fires)
+		// when there is no workload to run.
+		var workloadDone chan struct{}
 		if runFunc != nil {
-			var wg sync.WaitGroup
-			wg.Add(1)
+			workloadDone = make(chan struct{})
 			go func() {
-				defer wg.Done()
+				defer close(workloadDone)
 				if err := runFunc(leaderCtx); err != nil {
 					t.coreLogger.ErrorContext(leaderCtx, "workload run failed", slog.Any("error", err), slog.String("lock_key", lockKey))
 					activeSpan.RecordError(err)
 				}
 			}()
+		}
 
-			select {
-			case <-ctx.Done():
-				activeSpan.End()
-				cancelLeader()
-				t.coreLogger.InfoContext(ctx, "Releasing leadership lock in Consul on graceful shutdown...", slog.String("lock_key", lockKey))
-				_ = lock.Unlock()
-				leaderFlag.Store(false)
-				wg.Wait()
-				return nil
-			case <-lostCh:
-				t.coreLogger.WarnContext(ctx, "Leadership lock lost. Stopping workload and reverting to standby...", slog.String("lock_key", lockKey))
-				activeSpan.AddEvent("leadership_lost")
-				activeSpan.End()
-				span.AddEvent("leadership_lost")
-				if t.leaderTransitionsCounter != nil {
-					t.leaderTransitionsCounter.Add(ctx, 1, metric.WithAttributes(
-						attribute.String("module", moduleName),
-						attribute.String("transition", "lost"),
-					))
-				}
-				cancelLeader()
-				leaderFlag.Store(false)
-				wg.Wait()
+		stepDown := func(transition string) {
+			activeSpan.AddEvent("leadership_" + transition)
+			activeSpan.End()
+			span.AddEvent("leadership_" + transition)
+			if t.leaderTransitionsCounter != nil {
+				t.leaderTransitionsCounter.Add(ctx, 1, metric.WithAttributes(
+					attribute.String("module", moduleName),
+					attribute.String("transition", transition),
+				))
 			}
-		} else {
+			// Flip the leader flag before cancelling so in-flight writes observe the step-down.
+			leaderFlag.Store(false)
+			cancelLeader()
+			if workloadDone != nil {
+				<-workloadDone
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			t.coreLogger.InfoContext(ctx, "Releasing leadership lock in Consul on graceful shutdown...", slog.String("lock_key", lockKey))
+			leaderFlag.Store(false)
+			cancelLeader()
+			if workloadDone != nil {
+				<-workloadDone
+			}
+			activeSpan.End()
+			_ = lock.Unlock()
+			return nil
+		case <-lostCh:
+			t.coreLogger.WarnContext(ctx, "Leadership lock lost. Stopping workload and reverting to standby...", slog.String("lock_key", lockKey))
+			stepDown("lost")
+		case <-workloadDone:
+			// The workload exited while we still hold the lock. Holding on would leave the
+			// cluster with a leader that does nothing, so release the lock and let another
+			// node (or this one, after a backoff) take over.
+			t.coreLogger.WarnContext(ctx, "Workload exited while holding leadership. Releasing lock and re-entering election...", slog.String("lock_key", lockKey))
+			stepDown("released")
+			if err := lock.Unlock(); err != nil {
+				t.coreLogger.ErrorContext(ctx, "Failed to release leadership lock after workload exit", slog.Any("error", err), slog.String("lock_key", lockKey))
+			}
 			select {
 			case <-ctx.Done():
-				activeSpan.End()
-				cancelLeader()
-				t.coreLogger.InfoContext(ctx, "Releasing leadership lock in Consul on graceful shutdown...", slog.String("lock_key", lockKey))
-				_ = lock.Unlock()
-				leaderFlag.Store(false)
 				return nil
-			case <-lostCh:
-				t.coreLogger.WarnContext(ctx, "Leadership lock lost. Reverting to standby...", slog.String("lock_key", lockKey))
-				activeSpan.AddEvent("leadership_lost")
-				activeSpan.End()
-				span.AddEvent("leadership_lost")
-				if t.leaderTransitionsCounter != nil {
-					t.leaderTransitionsCounter.Add(ctx, 1, metric.WithAttributes(
-						attribute.String("module", moduleName),
-						attribute.String("transition", "lost"),
-					))
-				}
-				cancelLeader()
-				leaderFlag.Store(false)
+			case <-time.After(leaderReelectBackoff):
 			}
 		}
 	}
@@ -976,6 +1054,32 @@ func getStrategyFromTags(tags []string, prefix string) string {
 	return ""
 }
 
+func (t *Atc) getOrCreateConsulClient(addr, token, dc, ns string) (*api.Client, error) {
+	key := addr + "|" + token + "|" + dc + "|" + ns
+
+	t.consulClientsMu.RLock()
+	if t.consulClients != nil {
+		if client, ok := t.consulClients[key]; ok {
+			t.consulClientsMu.RUnlock()
+			return client, nil
+		}
+	}
+	t.consulClientsMu.RUnlock()
+
+	client, err := api.NewClient(consulCfg(addr, token, dc, ns))
+	if err != nil {
+		return nil, err
+	}
+
+	t.consulClientsMu.Lock()
+	if t.consulClients == nil {
+		t.consulClients = make(map[string]*api.Client)
+	}
+	t.consulClients[key] = client
+	t.consulClientsMu.Unlock()
+	return client, nil
+}
+
 func (t *Atc) getConsulClient(ctx context.Context) (*api.Client, error) {
 	t.cfgMu.RLock()
 	addr := t.Cfg.ConsulAddr
@@ -999,7 +1103,7 @@ func (t *Atc) getConsulClient(ctx context.Context) (*api.Client, error) {
 		}
 	}
 
-	return api.NewClient(consulCfg(addr, token, dc, ns))
+	return t.getOrCreateConsulClient(addr, token, dc, ns)
 }
 
 func (t *Atc) GetPredefinedStrategies(ctx context.Context) (string, error) {
@@ -1065,9 +1169,15 @@ func (t *Atc) GetFederationStatus(ctx context.Context) (map[string]string, error
 }
 
 func (t *Atc) ReloadConfig(cfg Config) {
+	cfg.Name = resolveNodeName(cfg)
+
 	t.cfgMu.Lock()
 	t.Cfg = cfg
 	t.cfgMu.Unlock()
+
+	if t.Watcher != nil {
+		t.Watcher.SetNamespace(cfg.ConsulNamespace)
+	}
 
 	ctx, span := coreTracer.Start(context.Background(), "ReloadConfig")
 	defer span.End()
@@ -1092,6 +1202,8 @@ func (t *Atc) ReloadConfig(cfg Config) {
 		)
 	}
 	if t.Redirector != nil {
+		_, hasDefaultFailover := cfg.Strategies.Failover["default"]
+		t.Redirector.SetHasDefaultFailover(hasDefaultFailover)
 		t.Redirector.UpdateConfig(
 			cfg.Strategies.Redirect,
 			cfg.DampeningPeriod,
@@ -1124,6 +1236,15 @@ func (t *Atc) TriggerConfigReload() error {
 			))
 		}
 		return err
+	}
+
+	if errs := ValidateConfig(newCfg); len(errs) > 0 {
+		if t.configReloadsCounter != nil {
+			t.configReloadsCounter.Add(context.Background(), 1, metric.WithAttributes(
+				attribute.String("status", "failure"),
+			))
+		}
+		return fmt.Errorf("invalid configuration on reload: %v", errs[0])
 	}
 
 	t.ReloadConfig(newCfg)
@@ -1191,7 +1312,7 @@ func (t *Atc) sweepExpiredOverrides(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !t.IsLeader() {
+			if !t.isSweepOwner() {
 				continue
 			}
 			overrides, err := t.ListActiveOverrides(ctx)

@@ -104,7 +104,7 @@ func TestAuthMiddleware(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rr.Code)
 	})
 
-	t.Run("Valid Consul delegated token is accepted", func(t *testing.T) {
+	t.Run("Valid Consul delegated token is accepted and cached", func(t *testing.T) {
 		mockConsulResponseStatus = http.StatusOK
 		mockConsulRequestsCount = 0
 
@@ -116,6 +116,15 @@ func TestAuthMiddleware(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rr.Code)
 		assert.Equal(t, 1, mockConsulRequestsCount)
 		assert.Equal(t, "valid-consul-token", lastReceivedToken)
+
+		// Second request with the same token should hit the TTL cache without calling Consul again
+		req2 := httptest.NewRequest("GET", "/api/services", nil)
+		req2.Header.Set("Authorization", "Bearer valid-consul-token")
+		rr2 := httptest.NewRecorder()
+		authHandler.ServeHTTP(rr2, req2)
+
+		assert.Equal(t, http.StatusOK, rr2.Code)
+		assert.Equal(t, 1, mockConsulRequestsCount)
 	})
 
 	t.Run("Invalid Consul delegated token returns 401", func(t *testing.T) {

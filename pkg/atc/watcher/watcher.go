@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/api/watch"
@@ -13,13 +14,24 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
+type activeWatch struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	err    error
+}
+
 type ConsulWatcher struct {
+	mu              sync.RWMutex
 	logger          *slog.Logger
 	consulAddr      string
 	consulToken     string
 	consulDC        string
 	consulNamespace string
 	Events          *Broadcaster
+
+	runMu         sync.Mutex
+	activeRunners int
+	currentWatch  *activeWatch
 
 	eventsCounter metric.Int64Counter
 	errorsCounter metric.Int64Counter
@@ -48,13 +60,79 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 	}
 }
 
+func (w *ConsulWatcher) SetNamespace(ns string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.consulNamespace = ns
+}
+
 var tracer = otel.Tracer("atc/watcher")
 
 func (w *ConsulWatcher) Run(ctx context.Context) error {
+	w.runMu.Lock()
+	aw := w.currentWatch
+	if aw != nil {
+		select {
+		case <-aw.done:
+			aw = nil
+		default:
+		}
+	}
+	if aw == nil {
+		watchCtx, watchCancel := context.WithCancel(context.Background())
+		aw = &activeWatch{
+			cancel: watchCancel,
+			done:   make(chan struct{}),
+		}
+		w.currentWatch = aw
+		w.activeRunners = 1
+		go func() {
+			aw.err = w.runWatchPlans(watchCtx)
+			close(aw.done)
+		}()
+	} else {
+		w.activeRunners++
+	}
+	w.runMu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		w.runMu.Lock()
+		w.activeRunners--
+		shouldStop := w.activeRunners <= 0 && w.currentWatch == aw
+		if shouldStop {
+			w.currentWatch = nil
+			w.activeRunners = 0
+		}
+		w.runMu.Unlock()
+		if shouldStop {
+			aw.cancel()
+			<-aw.done
+		}
+		return nil
+	case <-aw.done:
+		w.runMu.Lock()
+		if w.currentWatch == aw {
+			w.currentWatch = nil
+			w.activeRunners = 0
+		}
+		w.runMu.Unlock()
+		return aw.err
+	}
+}
+
+func (w *ConsulWatcher) runWatchPlans(ctx context.Context) error {
 	ctx, span := tracer.Start(ctx, "ConsulWatcher.Run")
 	defer span.End()
 
-	client, err := api.NewClient(consulCfg(w.consulAddr, w.consulToken, w.consulDC, w.consulNamespace))
+	w.mu.RLock()
+	addr := w.consulAddr
+	token := w.consulToken
+	dc := w.consulDC
+	ns := w.consulNamespace
+	w.mu.RUnlock()
+
+	client, err := api.NewClient(consulCfg(addr, token, dc, ns))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -62,6 +140,12 @@ func (w *ConsulWatcher) Run(ctx context.Context) error {
 	}
 
 	servicesParams := map[string]any{"type": "services"}
+	if dc != "" {
+		servicesParams["datacenter"] = dc
+	}
+	if token != "" {
+		servicesParams["token"] = token
+	}
 	servicesWatcher, err := watch.Parse(servicesParams)
 	if err != nil {
 		span.RecordError(err)
@@ -80,6 +164,12 @@ func (w *ConsulWatcher) Run(ctx context.Context) error {
 	}
 
 	checksParams := map[string]any{"type": "checks"}
+	if dc != "" {
+		checksParams["datacenter"] = dc
+	}
+	if token != "" {
+		checksParams["token"] = token
+	}
 	checksWatcher, err := watch.Parse(checksParams)
 	if err != nil {
 		span.RecordError(err)

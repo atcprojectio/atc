@@ -2,6 +2,7 @@ package atc
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/viper"
 )
@@ -17,46 +18,65 @@ func LoadConfigFromViper(v *viper.Viper) (Config, error) {
 	return cfg, nil
 }
 
-// ApplyViperDefaults populates configuration fields with default values from Viper flags/env.
+// ApplyViperDefaults populates configuration fields and ensures CLI flags and ATC_* env vars take precedence over YAML config values.
 func ApplyViperDefaults(v *viper.Viper, cfg *Config) {
-	if cfg.Server.HTTPListenPort == 0 {
-		cfg.Server.HTTPListenPort = v.GetInt("port")
+	if cfg.Server.HTTPListenPort == 0 || hasEnv("ATC_PORT") {
+		if port := v.GetInt("port"); port != 0 {
+			cfg.Server.HTTPListenPort = port
+		}
 	}
-	if cfg.Server.MetricsListenPort == 0 {
-		cfg.Server.MetricsListenPort = v.GetInt("metrics_port")
+	if cfg.Server.MetricsListenPort == 0 || hasEnv("ATC_METRICS_PORT") {
+		if port := v.GetInt("metrics_port"); port != 0 {
+			cfg.Server.MetricsListenPort = port
+		}
 	}
-	if cfg.Server.McpListenPort == 0 {
-		cfg.Server.McpListenPort = v.GetInt("mcp_port")
+	if cfg.Server.McpListenPort == 0 || hasEnv("ATC_MCP_PORT") {
+		if port := v.GetInt("mcp_port"); port != 0 {
+			cfg.Server.McpListenPort = port
+		}
 	}
-	if len(cfg.Target) == 0 {
-		cfg.Target = v.GetStringSlice("target")
+	if len(cfg.Target) == 0 || hasEnv("ATC_TARGET") {
+		if targets := v.GetStringSlice("target"); len(targets) > 0 {
+			cfg.Target = targets
+		}
 	}
-	if cfg.Server.LogLevel == "" {
-		cfg.Server.LogLevel = v.GetString("log_level")
+	if cfg.Server.LogLevel == "" || hasEnv("ATC_LOG_LEVEL") {
+		if level := v.GetString("log_level"); level != "" {
+			cfg.Server.LogLevel = level
+		}
 	}
-	if cfg.ConsulAddr == "" {
-		cfg.ConsulAddr = v.GetString("consul_addr")
+	if val := v.GetString("node_name"); val != "" {
+		cfg.NodeName = val
 	}
-	if cfg.ConsulToken == "" {
-		cfg.ConsulToken = v.GetString("consul_token")
+	if val := v.GetString("consul_addr"); val != "" {
+		cfg.ConsulAddr = val
 	}
-	if cfg.ConsulDC == "" {
-		cfg.ConsulDC = v.GetString("consul_dc")
+	if val := v.GetString("consul_token"); val != "" {
+		cfg.ConsulToken = val
 	}
-	if cfg.ConsulNamespace == "" {
-		cfg.ConsulNamespace = v.GetString("consul_namespace")
+	if val := v.GetString("consul_dc"); val != "" {
+		cfg.ConsulDC = val
 	}
-	if cfg.WriteRateLimit == "" {
-		cfg.WriteRateLimit = v.GetString("write_rate_limit")
+	if val := v.GetString("consul_namespace"); val != "" {
+		cfg.ConsulNamespace = val
 	}
-	if !v.IsSet("server.ui_enabled") {
+	if val := v.GetString("write_rate_limit"); val != "" && (cfg.WriteRateLimit == "" || hasEnv("ATC_WRITE_RATE_LIMIT") || v.InConfig("write_rate_limit")) {
+		cfg.WriteRateLimit = val
+	}
+	if !v.IsSet("server.ui_enabled") || hasEnv("ATC_UI_ENABLED") {
 		cfg.Server.UiEnabled = v.GetBool("ui_enabled")
 	}
-	if !v.IsSet("server.mcp_enabled") {
+	if !v.IsSet("server.mcp_enabled") || hasEnv("ATC_MCP_ENABLED") {
 		cfg.Server.McpEnabled = v.GetBool("mcp_enabled")
 	}
 	cfg.Server.MetricsNamespace = "atc"
-	if !cfg.DryRun {
+	if v.GetBool("dry_run") || hasEnv("ATC_DRY_RUN") {
 		cfg.DryRun = v.GetBool("dry_run")
 	}
 }
+
+func hasEnv(key string) bool {
+	_, ok := os.LookupEnv(key)
+	return ok
+}
+

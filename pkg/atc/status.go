@@ -12,12 +12,6 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 )
 
-func OkHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "OK")
-	}
-}
-
 func (t *Atc) servicesHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
@@ -262,6 +256,8 @@ func (t *Atc) apiOverridesHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 	var req overrideRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

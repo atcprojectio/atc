@@ -27,6 +27,7 @@ var serverCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		applyChangedServerFlags(cmd, &cfg)
 
 		t, err := atc.New(cfg)
 		if err != nil {
@@ -39,6 +40,10 @@ var serverCmd = &cobra.Command{
 				if err != nil {
 					return
 				}
+				applyChangedServerFlags(cmd, &newCfg)
+				if errs := atc.ValidateConfig(newCfg); len(errs) > 0 {
+					return
+				}
 
 				t.ReloadConfig(newCfg)
 			})
@@ -47,6 +52,39 @@ var serverCmd = &cobra.Command{
 
 		return t.Run(cmd.Context())
 	},
+}
+
+func applyChangedServerFlags(cmd *cobra.Command, cfg *atc.Config) {
+	if cmd.Flags().Changed("port") {
+		cfg.Server.HTTPListenPort = viper.GetInt("port")
+	}
+	if cmd.Flags().Changed("metrics_port") {
+		cfg.Server.MetricsListenPort = viper.GetInt("metrics_port")
+	}
+	if cmd.Flags().Changed("mcp-port") {
+		cfg.Server.McpListenPort = viper.GetInt("mcp_port")
+	}
+	if cmd.Flags().Changed("target") {
+		cfg.Target = viper.GetStringSlice("target")
+	}
+	if cmd.Flags().Changed("log_level") {
+		cfg.Server.LogLevel = viper.GetString("log_level")
+	}
+	if cmd.Flags().Changed("ui-enabled") {
+		cfg.Server.UiEnabled = viper.GetBool("ui_enabled")
+	}
+	if cmd.Flags().Changed("mcp-enabled") {
+		cfg.Server.McpEnabled = viper.GetBool("mcp_enabled")
+	}
+	if cmd.Flags().Changed("dry-run") {
+		cfg.DryRun = viper.GetBool("dry_run")
+	}
+	if cmd.Flags().Changed("write-rate-limit") {
+		cfg.WriteRateLimit = viper.GetString("write_rate_limit")
+	}
+	if cmd.Flags().Changed("node-name") {
+		cfg.NodeName = viper.GetString("node_name")
+	}
 }
 
 func init() {
@@ -73,6 +111,8 @@ func init() {
 	serverCmd.PersistentFlags().String("consul_dc", "", "Consul datacenter.")
 	_ = viper.BindPFlag("consul_dc", serverCmd.PersistentFlags().Lookup("consul_dc"))
 
+	serverCmd.PersistentFlags().String("node-name", "", "Unique node identity for HA leader election (defaults to hostname-based identity).")
+	_ = viper.BindPFlag("node_name", serverCmd.PersistentFlags().Lookup("node-name"))
 
 	serverCmd.PersistentFlags().Bool("ui-enabled", true, "Enable serving the embedded web UI dashboard.")
 	_ = viper.BindPFlag("ui_enabled", serverCmd.PersistentFlags().Lookup("ui-enabled"))

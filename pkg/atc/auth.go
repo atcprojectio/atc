@@ -2,15 +2,18 @@ package atc
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/hashicorp/consul/api"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
+
+const delegatedTokenCacheTTL = 30 * time.Second
 
 func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -21,6 +24,10 @@ func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 		consulAddr := t.Cfg.ConsulAddr
 		consulDC := t.Cfg.ConsulDC
 		t.cfgMu.RUnlock()
+
+		clientIP := extractClientIP(r)
+		ctx := context.WithValue(r.Context(), clientIPContextKey, clientIP)
+		r = r.WithContext(ctx)
 
 		span := trace.SpanFromContext(r.Context())
 		span.SetAttributes(
@@ -72,30 +79,18 @@ func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Validate static keys
+		// Validate static keys in constant time
 		authorized := false
 		for _, sk := range staticKeys {
-			if sk == token {
+			if subtle.ConstantTimeCompare([]byte(sk), []byte(token)) == 1 {
 				authorized = true
 				break
 			}
 		}
 
-		// Validate Consul token delegation
+		// Validate Consul token delegation (with short TTL cache)
 		if !authorized && tokenDelegation {
-			config := api.DefaultConfig()
-			config.Address = consulAddr
-			config.Token = token
-			if consulDC != "" {
-				config.Datacenter = consulDC
-			}
-			client, err := api.NewClient(config)
-			if err == nil {
-				_, err = client.Agent().Self()
-				if err == nil {
-					authorized = true
-				}
-			}
+			authorized = t.verifyDelegatedConsulToken(consulAddr, consulDC, token)
 		}
 
 		if !authorized {
@@ -115,7 +110,42 @@ func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 		)
 
 		// Propagate token in context
-		ctx := context.WithValue(r.Context(), tokenContextKey, token)
+		ctx = context.WithValue(r.Context(), tokenContextKey, token)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (t *Atc) verifyDelegatedConsulToken(consulAddr, consulDC, token string) bool {
+	cacheKey := consulAddr + "|" + consulDC + "|" + token
+	now := time.Now()
+
+	t.tokenCacheMu.RLock()
+	if t.tokenCache != nil {
+		if exp, ok := t.tokenCache[cacheKey]; ok && now.Before(exp) {
+			t.tokenCacheMu.RUnlock()
+			return true
+		}
+	}
+	t.tokenCacheMu.RUnlock()
+
+	client, err := t.getOrCreateConsulClient(consulAddr, token, consulDC, "")
+	if err != nil {
+		return false
+	}
+	if _, err := client.Agent().Self(); err != nil {
+		return false
+	}
+
+	t.tokenCacheMu.Lock()
+	if t.tokenCache == nil {
+		t.tokenCache = make(map[string]time.Time)
+	}
+	for k, exp := range t.tokenCache {
+		if now.After(exp) {
+			delete(t.tokenCache, k)
+		}
+	}
+	t.tokenCache[cacheKey] = now.Add(delegatedTokenCacheTTL)
+	t.tokenCacheMu.Unlock()
+	return true
 }

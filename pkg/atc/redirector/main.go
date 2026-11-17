@@ -55,13 +55,19 @@ type Redirector struct {
 	hasDefaultFailover bool
 	dryRun             bool
 
-	mu              sync.RWMutex
-	strategiesCache map[string]cachedStrategies
+	mu                 sync.RWMutex
+	consulClient       *api.Client
+	strategiesCache    map[string]cachedStrategies
 
 	// Hysteresis scheduling state
 	schedMu       sync.Mutex
 	pendingWrites map[string]*api.ServiceResolverConfigEntry
 	writeTimers   map[string]*time.Timer
+	// runCtx is the context of the current Run (i.e. the leadership term). Scheduled writes
+	// derive from it so they cannot outlive a step-down. nil means Run was never started.
+	runCtx context.Context
+	// inflightWrites tracks scheduled writes that have started, so Run can wait for them.
+	inflightWrites sync.WaitGroup
 	forwarder     writeCanceler
 
 	reconcileCounter        metric.Int64Counter
@@ -180,6 +186,43 @@ func (r *Redirector) SetForwarder(f writeCanceler) {
 	r.forwarder = f
 }
 
+func (r *Redirector) SetWatcher(w *watcher.ConsulWatcher) {
+	if w == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.watcher = w
+}
+
+func (r *Redirector) SetHasDefaultFailover(has bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hasDefaultFailover = has
+}
+
+func (r *Redirector) getConsulClient() (*api.Client, error) {
+	r.mu.RLock()
+	client := r.consulClient
+	addr, token, dc, ns := r.consulAddr, r.consulToken, r.consulDC, r.consulNamespace
+	r.mu.RUnlock()
+	if client != nil {
+		return client, nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.consulClient != nil {
+		return r.consulClient, nil
+	}
+	c, err := api.NewClient(consulCfg(addr, token, dc, ns))
+	if err != nil {
+		return nil, err
+	}
+	r.consulClient = c
+	return c, nil
+}
+
 func (r *Redirector) CancelPendingWrite(ctx context.Context, svcName string) {
 	r.schedMu.Lock()
 	defer r.schedMu.Unlock()
@@ -201,6 +244,20 @@ func (r *Redirector) CancelPendingWrite(ctx context.Context, svcName string) {
 	delete(r.pendingWrites, svcName)
 }
 
+func (r *Redirector) CancelAllPendingWrites(ctx context.Context) {
+	r.schedMu.Lock()
+	defer r.schedMu.Unlock()
+	for svcName, timer := range r.writeTimers {
+		r.logger.Info("Cancelled pending service-resolver write on shutdown/stepdown", slog.String("service", svcName))
+		if r.dampeningCancelled != nil {
+			r.dampeningCancelled.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "shutdown")))
+		}
+		timer.Stop()
+		delete(r.writeTimers, svcName)
+		delete(r.pendingWrites, svcName)
+	}
+}
+
 func (r *Redirector) GetCachedStrategies(svcName string) (string, string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -210,19 +267,41 @@ func (r *Redirector) GetCachedStrategies(svcName string) (string, string) {
 	return "", ""
 }
 
+// stopScheduledWrites ends the current leadership term: it prevents any timer that has
+// already fired from writing, cancels pending timers, and waits for writes in flight.
+// After it returns this instance will not write to Consul until Run is called again.
+func (r *Redirector) stopScheduledWrites(ctx context.Context) {
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.schedMu.Lock()
+	r.runCtx = stopped
+	r.schedMu.Unlock()
+	r.CancelAllPendingWrites(ctx)
+	r.inflightWrites.Wait()
+}
+
 func (r *Redirector) Run(ctx context.Context) error {
-	client, err := api.NewClient(consulCfg(r.consulAddr, r.consulToken, r.consulDC, r.consulNamespace))
+	r.schedMu.Lock()
+	r.runCtx = ctx
+	r.schedMu.Unlock()
+	defer r.stopScheduledWrites(ctx)
+
+	client, err := r.getConsulClient()
 	if err != nil {
 		return fmt.Errorf("failed to create consul client: %w", err)
 	}
 
-	events := r.watcher.Events.Subscribe()
-	defer r.watcher.Events.Unsubscribe(events)
+	r.mu.RLock()
+	w := r.watcher
+	r.mu.RUnlock()
+
+	events := w.Events.Subscribe()
+	defer w.Events.Unsubscribe(events)
 
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		return r.watcher.Run(ctx)
+		return w.Run(ctx)
 	})
 
 	g.Go(func() error {
@@ -348,10 +427,12 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 	}
 
 	r.mu.Lock()
+	hasDefaultFailover := r.hasDefaultFailover
+	dryRun := r.dryRun
 	for svcName, tags := range services {
 		if slices.Contains(tags, "atc.enabled=true") {
 			foStrat := getStrategyFromTags(tags, "atc.failover=")
-			if foStrat == "" && r.hasDefaultFailover {
+			if foStrat == "" && hasDefaultFailover {
 				foStrat = "default"
 			}
 			rdStrat := getStrategyFromTags(tags, "atc.redirect=")
@@ -389,7 +470,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 
 			// Determine failover strategy name
 			failoverStrategyName := getStrategyFromTags(tags, "atc.failover=")
-			if failoverStrategyName == "" && r.hasDefaultFailover {
+			if failoverStrategyName == "" && hasDefaultFailover {
 				failoverStrategyName = "default"
 			}
 
@@ -419,7 +500,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 				dampening := getDampeningDuration(tags, dampeningPeriod, minDampeningPeriod)
 				if dampening <= 0 {
 					r.CancelPendingWrite(ctx, svcName)
-					if r.dryRun {
+					if dryRun {
 						span.AddEvent("dry_run_set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "redirect-base")))
 						r.logger.InfoContext(ctx, "[DRY RUN] Would create/update base service-resolver immediately", slog.String("service", svcName))
 					} else {
@@ -446,7 +527,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 					continue
 				}
 				if existing.Meta != nil && existing.Meta["created-by"] == "atc" {
-					if r.dryRun {
+					if dryRun {
 						span.AddEvent("dry_run_delete_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "redirect-base")))
 						r.logger.InfoContext(ctx, "[DRY RUN] Would delete service-resolver because atc.enabled tag was removed", slog.String("service", svcName))
 					} else {
@@ -542,7 +623,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 					dampening := getDampeningDuration([]string{"atc.dampening=" + dampeningTag}, dampeningPeriod, minDampeningPeriod)
 					if dampening <= 0 {
 						r.CancelPendingWrite(ctx, name)
-						if r.dryRun {
+						if dryRun {
 							span.AddEvent("dry_run_set_config", trace.WithAttributes(attribute.String("service", name), attribute.String("type", "redirect")))
 							r.logger.InfoContext(ctx, "[DRY RUN] Would create/update redirect service-resolver immediately", slog.String("service", name), slog.String("redirect-strategy", redirectStrategyName))
 						} else {
@@ -720,23 +801,43 @@ func (r *Redirector) executeScheduledWrite(svcName string) {
 	entry, ok := r.pendingWrites[svcName]
 	delete(r.pendingWrites, svcName)
 	delete(r.writeTimers, svcName)
+	parent := r.runCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	if parent.Err() != nil {
+		// The leadership term this write was scheduled in has ended; never write stale state.
+		r.schedMu.Unlock()
+		if ok {
+			r.logger.Info("Dropping scheduled redirect write: no longer running as leader", slog.String("service", svcName))
+		}
+		return
+	}
+	if ok && entry != nil {
+		r.inflightWrites.Add(1)
+		defer r.inflightWrites.Done()
+	}
 	r.schedMu.Unlock()
 
 	if !ok || entry == nil {
 		return
 	}
 
-	ctx, span := tracer.Start(context.Background(), "executeScheduledWrite")
+	ctx, span := tracer.Start(parent, "executeScheduledWrite")
 	defer span.End()
 
-	client, err := api.NewClient(consulCfg(r.consulAddr, r.consulToken, r.consulDC, r.consulNamespace))
+	client, err := r.getConsulClient()
 	if err != nil {
 		r.logger.Error("Failed to create Consul client for scheduled write", slog.String("service", svcName), slog.Any("error", err))
 		span.RecordError(err)
 		return
 	}
 
-	if r.dryRun {
+	r.mu.RLock()
+	dryRun := r.dryRun
+	r.mu.RUnlock()
+
+	if dryRun {
 		span.AddEvent("dry_run_scheduled_set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "redirect")))
 		r.logger.Info("[DRY RUN] Would execute scheduled redirect write for service-resolver", slog.String("service", svcName))
 	} else {
@@ -789,6 +890,12 @@ func (r *Redirector) recordConsulCall(ctx context.Context, op string, start time
 func (r *Redirector) UpdateConfig(redirectStrategies map[string]RedirectStrategy, dampeningPeriod, minDampeningPeriod, consulNamespace, writeRateLimit string, dryRun bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.consulNamespace != consulNamespace {
+		r.consulClient = nil
+		if r.watcher != nil {
+			r.watcher.SetNamespace(consulNamespace)
+		}
+	}
 	r.redirectStrategies = redirectStrategies
 	r.dampeningPeriod = dampeningPeriod
 	r.minDampeningPeriod = minDampeningPeriod

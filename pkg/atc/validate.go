@@ -70,5 +70,15 @@ func ValidateConfig(cfg Config) []error {
 		}
 	}
 
+	// Validate Authentication Configuration
+	if cfg.Auth.Enabled {
+		if len(cfg.Auth.StaticKeys) == 0 && !cfg.Auth.ConsulTokenDelegation {
+			errs = append(errs, fmt.Errorf("auth is enabled, but neither static_keys nor consul_token_delegation is configured"))
+		}
+		if slices.Contains(cfg.Auth.StaticKeys, "atc-super-secret-token") {
+			errs = append(errs, fmt.Errorf("auth.static_keys contains insecure placeholder token %q", "atc-super-secret-token"))
+		}
+	}
+
 	return errs
 }

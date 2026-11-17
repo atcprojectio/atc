@@ -25,6 +25,21 @@ type Service interface {
 	TriggerConfigReload() error
 }
 
+type Auditor interface {
+	LogAudit(ctx context.Context, action, service string, details map[string]any)
+}
+
+func auditMCP(ctx context.Context, svc Service, action, service string, details map[string]any) {
+	if auditor, ok := svc.(Auditor); ok {
+		if details == nil {
+			details = map[string]any{"source": "mcp"}
+		} else {
+			details["source"] = "mcp"
+		}
+		auditor.LogAudit(ctx, action, service, details)
+	}
+}
+
 func NewHandler(svc Service) http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "atc",
@@ -149,6 +164,7 @@ func NewHandler(svc Service) http.Handler {
 		if err != nil {
 			return nil, nil, err
 		}
+		auditMCP(ctx, svc, "purge_resolver", input.Name, nil)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
@@ -172,6 +188,11 @@ func NewHandler(svc Service) http.Handler {
 		if err != nil {
 			return nil, nil, err
 		}
+		auditMCP(ctx, svc, "create_override", input.Service, map[string]any{
+			"type":      "failover",
+			"target_dc": input.TargetDc,
+			"namespace": input.Namespace,
+		})
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
@@ -195,6 +216,11 @@ func NewHandler(svc Service) http.Handler {
 		if err != nil {
 			return nil, nil, err
 		}
+		auditMCP(ctx, svc, "create_override", input.Service, map[string]any{
+			"type":      "redirect",
+			"target_dc": input.RedirectDc,
+			"namespace": input.Namespace,
+		})
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
@@ -240,6 +266,7 @@ func NewHandler(svc Service) http.Handler {
 		if err != nil {
 			return nil, nil, err
 		}
+		auditMCP(ctx, svc, "reload_config", "", nil)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{

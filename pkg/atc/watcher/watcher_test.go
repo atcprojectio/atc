@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 )
@@ -112,6 +113,8 @@ func TestConsulWatcher(t *testing.T) {
 }
 
 func TestConsulWatcher_WithNamespace(t *testing.T) {
+	// Written by the HTTP handler goroutine, read by the test goroutine.
+	var nsMu sync.Mutex
 	var servicesNamespace string
 	var checksNamespace string
 
@@ -124,7 +127,9 @@ func TestConsulWatcher_WithNamespace(t *testing.T) {
 		}
 
 		if r.URL.Path == "/v1/catalog/services" {
+			nsMu.Lock()
 			servicesNamespace = ns
+			nsMu.Unlock()
 			w.Header().Set("X-Consul-Index", "1")
 			services := map[string][]string{
 				"test-service": {"atc.enabled=true"},
@@ -134,7 +139,9 @@ func TestConsulWatcher_WithNamespace(t *testing.T) {
 		}
 
 		if r.URL.Path == "/v1/health/state/any" {
+			nsMu.Lock()
 			checksNamespace = ns
+			nsMu.Unlock()
 			w.Header().Set("X-Consul-Index", "1")
 			checks := []map[string]any{
 				{
@@ -197,6 +204,8 @@ func TestConsulWatcher_WithNamespace(t *testing.T) {
 		}
 	}
 
+	nsMu.Lock()
+	defer nsMu.Unlock()
 	if servicesNamespace != "custom-ns" {
 		t.Errorf("expected services query to use namespace 'custom-ns', got %q", servicesNamespace)
 	}

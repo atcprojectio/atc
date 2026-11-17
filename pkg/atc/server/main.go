@@ -106,8 +106,9 @@ func (s *Server) Run(ctx context.Context) error {
 			Handler:           otelhttp.NewHandler(s.McpMux, "atc-mcp-server"),
 			ReadHeaderTimeout: 3 * time.Second,
 			ReadTimeout:       10 * time.Second,
-			WriteTimeout:      15 * time.Second,
-			IdleTimeout:       60 * time.Second,
+			// WriteTimeout is intentionally disabled (0) because MCP SSE and streamable HTTP connections are long-lived.
+			WriteTimeout: 0,
+			IdleTimeout:  60 * time.Second,
 		}
 	}
 

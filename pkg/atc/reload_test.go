@@ -89,3 +89,21 @@ func TestAtcConfigReloadingRace(t *testing.T) {
 		t.Errorf("expected MinDampeningPeriod to be reloaded to 1s, got %s", minDp)
 	}
 }
+
+func TestResolveNodeName(t *testing.T) {
+	// Explicit NodeName overrides Name
+	if got := resolveNodeName(Config{Name: "atc-service", NodeName: "custom-node-1"}); got != "custom-node-1" {
+		t.Errorf("expected custom-node-1, got %q", got)
+	}
+
+	// Default shared service name "atc-service" gets hostname suffix so HA replicas don't collide
+	if got := resolveNodeName(Config{Name: "atc-service"}); got == "atc-service" {
+		t.Errorf("expected atc-service to include hostname suffix, got %q", got)
+	}
+
+	// Custom service/node names in tests are preserved
+	if got := resolveNodeName(Config{Name: "test-node"}); got != "test-node" {
+		t.Errorf("expected test-node to be preserved, got %q", got)
+	}
+}
+

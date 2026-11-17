@@ -37,7 +37,6 @@ func (t *Atc) initServer() error {
 		serv.MetricsMux.Handle("/metrics", telemetry.GlobalPrometheusHandler)
 	}
 
-	serv.Mux.HandleFunc("/ready", OkHandler())
 	serv.Mux.Handle("GET /api/services", t.authMiddleware(http.HandlerFunc(t.apiServicesHandler)))
 	serv.Mux.Handle("DELETE /api/services", t.authMiddleware(http.HandlerFunc(t.apiServicesDeleteHandler)))
 	serv.Mux.Handle("GET /api/leader", t.authMiddleware(http.HandlerFunc(t.apiLeaderHandler)))
@@ -78,6 +77,9 @@ func (t *Atc) initForwarder() error {
 	if err != nil {
 		return err
 	}
+	if t.Watcher != nil {
+		forward.SetWatcher(t.Watcher)
+	}
 	t.Forwarder = forward
 	return nil
 }
@@ -101,6 +103,9 @@ func (t *Atc) initRedirector() error {
 	)
 	if err != nil {
 		return err
+	}
+	if t.Watcher != nil {
+		redirect.SetWatcher(t.Watcher)
 	}
 	t.Redirector = redirect
 	return nil
