@@ -524,8 +524,8 @@ Operators need visibility into routing decisions, the ability to test modificati
 - **OTel Trace Propagation**: Record trace span events during service resolver writes, deletes, and configuration hot-reloads using package-level `coreTracer`.
 - **Dry-Run Mode**: Introduce a `--dry-run` CLI flag and `dry_run` configuration key to bypass Consul modifications in forwarder, redirector, and purges, logging the bypassed decisions instead.
 - **Manual Override TTL Expiration**: Support optional duration inputs in manual overrides (`ApplyFailoverOverride` / `TriggerManualRedirect`), store expiration timestamps (`atc-override-expires-at`) in config entry metadata, and run a background loop sweeper in ATC that purges expired overrides.
-- **Config Reload API**: Register `POST /api/reload` and MCP tool `reload_config` to dynamically trigger viper reload and config re-unmarshalling.
-- **Frontend Integration**: Display expiration badges on card overrides, expose control form overlays to set TTL when applying manual overrides, and add a reload configuration button in the header.
+- **Config Reload**: Automatically watch configuration files via `fsnotify` (`viper.WatchConfig`), and register `POST /api/reload` and MCP tool `reload_config` to allow programmatic/manual reload triggers when needed.
+- **Frontend Integration**: Display expiration badges on card overrides and expose control form overlays to set TTL when applying manual overrides.
 
 ### Consequences
 - **Benefits**:
@@ -577,7 +577,7 @@ Rejected
 Admins requested a visual, web-based strategy editor in the React UI dashboard to visually draft, edit, and apply failover/redirect strategies.
 
 ### Decision
-Reject building an interactive visual strategy editor inside the Web UI dashboard. Instead, strategies will remain declaratively defined in the central configuration file (`strategies.yaml`) and loaded at startup/reload. Any updates to strategies will be handled by updating the file (which supports hot-reloading via `/api/reload` or SIGHUP), encouraging GitOps workflows.
+Reject building an interactive visual strategy editor inside the Web UI dashboard. Instead, strategies will remain declaratively defined in the central configuration file (`strategies.yaml`) and loaded at startup/reload. Any updates to strategies will be handled by updating the file (which automatically hot-reloads via `fsnotify` or on demand via `/api/reload` and the `reload_config` MCP tool), encouraging GitOps workflows.
 
 ### Consequences
 - **Benefits**:
