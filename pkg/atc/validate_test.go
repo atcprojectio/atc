@@ -1,6 +1,7 @@
 package atc
 
 import (
+	atc_server "github.com/atcprojectio/atc/pkg/atc/server"
 	"testing"
 
 	"github.com/atcprojectio/atc/pkg/atc/forwarder"
@@ -18,6 +19,7 @@ func TestValidateConfig(t *testing.T) {
 			name: "valid default config",
 			cfg: Config{
 				Target:             []string{"all"},
+				Server:             atc_server.Config{ListenAddress: "127.0.0.1"},
 				DampeningPeriod:    "10s",
 				MinDampeningPeriod: "5s",
 				HA: HaConfig{
@@ -143,6 +145,68 @@ func TestValidateConfig(t *testing.T) {
 			},
 			wantErrs:  1,
 			errSubstr: `redirect strategy "bad": must specify at least one target selector field`,
+		},
+		{
+			name: "auth enabled without mechanisms",
+			cfg: Config{
+				Auth: AuthConfig{
+					Enabled:               true,
+					StaticKeys:            nil,
+					ConsulTokenDelegation: false,
+				},
+			},
+			wantErrs:  1,
+			errSubstr: `auth is enabled, but neither static_keys nor consul_token_delegation is configured`,
+		},
+		{
+			name: "auth enabled with insecure placeholder token",
+			cfg: Config{
+				Auth: AuthConfig{
+					Enabled:    true,
+					StaticKeys: []string{"atc-super-secret-token"},
+				},
+			},
+			wantErrs:  1,
+			errSubstr: `auth.static_keys contains insecure placeholder token "atc-super-secret-token"`,
+		},
+		{
+			name:      "auth disabled on all interfaces is rejected",
+			cfg:       Config{Target: []string{"all"}},
+			wantErrs:  1,
+			errSubstr: `exposing write endpoints without authentication`,
+		},
+		{
+			name: "auth disabled on non-loopback address is rejected",
+			cfg: Config{
+				Target: []string{"all"},
+				Server: atc_server.Config{ListenAddress: "10.0.0.5"},
+			},
+			wantErrs:  1,
+			errSubstr: `exposing write endpoints without authentication`,
+		},
+		{
+			name: "auth disabled on loopback is allowed",
+			cfg: Config{
+				Target: []string{"all"},
+				Server: atc_server.Config{ListenAddress: "::1"},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "auth disabled with explicit opt-in is allowed",
+			cfg: Config{
+				Target: []string{"all"},
+				Auth:   AuthConfig{AllowUnauthenticated: true},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "auth enabled on all interfaces is allowed",
+			cfg: Config{
+				Target: []string{"all"},
+				Auth:   AuthConfig{Enabled: true, StaticKeys: []string{"a-real-key"}},
+			},
+			wantErrs: 0,
 		},
 	}
 

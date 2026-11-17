@@ -2,12 +2,15 @@ package atc
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -62,10 +65,8 @@ func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 			token = r.Header.Get("X-ATC-Token")
 		}
 
-		// 3. Extract from query parameter
-		if token == "" {
-			token = r.URL.Query().Get("token")
-		}
+		// Tokens are deliberately NOT accepted from the query string: URLs end up in access
+		// logs, traces (otelhttp records them), browser history and Referer headers.
 
 		if token == "" {
 			span.SetStatus(codes.Error, "unauthorized: missing token")
@@ -79,14 +80,7 @@ func (t *Atc) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Validate static keys in constant time
-		authorized := false
-		for _, sk := range staticKeys {
-			if subtle.ConstantTimeCompare([]byte(sk), []byte(token)) == 1 {
-				authorized = true
-				break
-			}
-		}
+		authorized := isStaticKey(staticKeys, token)
 
 		// Validate Consul token delegation (with short TTL cache)
 		if !authorized && tokenDelegation {
@@ -128,7 +122,9 @@ func (t *Atc) verifyDelegatedConsulToken(consulAddr, consulDC, token string) boo
 	}
 	t.tokenCacheMu.RUnlock()
 
-	client, err := t.getOrCreateConsulClient(consulAddr, token, consulDC, "")
+	// Use an uncached client: caching per token here would let unauthenticated callers grow
+	// the client cache without bound by sending random tokens.
+	client, err := t.newRequestConsulClient(consulAddr, token, consulDC, "")
 	if err != nil {
 		return false
 	}
@@ -148,4 +144,40 @@ func (t *Atc) verifyDelegatedConsulToken(consulAddr, consulDC, token string) boo
 	t.tokenCache[cacheKey] = now.Add(delegatedTokenCacheTTL)
 	t.tokenCacheMu.Unlock()
 	return true
+}
+
+// isStaticKey reports, in constant time per key, whether token is one of the static API keys.
+func isStaticKey(staticKeys []string, token string) bool {
+	found := false
+	for _, sk := range staticKeys {
+		if subtle.ConstantTimeCompare([]byte(sk), []byte(token)) == 1 {
+			found = true
+		}
+	}
+	return found
+}
+
+// bindMCPSession ties each MCP session to the token that created it. MCP tool calls run with
+// the context of the session's initialize request, so without this a different (valid) token
+// holder who learned a session ID would act with the original caller's Consul permissions.
+// The go-sdk enforces the binding when requests carry auth.TokenInfo with a UserID; we derive
+// that ID from a hash of the already-authenticated token.
+func (t *Atc) bindMCPSession(next http.Handler) http.Handler {
+	verifier := func(_ context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
+		sum := sha256.Sum256([]byte(token))
+		return &auth.TokenInfo{UserID: hex.EncodeToString(sum[:])}, nil
+	}
+	bound := auth.RequireBearerToken(verifier, &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})(next)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, _ := r.Context().Value(tokenContextKey).(string)
+		if token == "" {
+			// Auth disabled: nothing to bind to.
+			next.ServeHTTP(w, r)
+			return
+		}
+		r = r.Clone(r.Context())
+		r.Header.Set("Authorization", "Bearer "+token)
+		bound.ServeHTTP(w, r)
+	})
 }

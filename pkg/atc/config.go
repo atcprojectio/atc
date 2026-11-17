@@ -69,6 +69,16 @@ func ApplyViperDefaults(v *viper.Viper, cfg *Config) {
 	if !v.IsSet("server.mcp_enabled") || hasEnv("ATC_MCP_ENABLED") {
 		cfg.Server.McpEnabled = v.GetBool("mcp_enabled")
 	}
+	if !v.IsSet("server.listen_address") || hasEnv("ATC_LISTEN_ADDRESS") {
+		if val := v.GetString("listen_address"); val != "" || hasEnv("ATC_LISTEN_ADDRESS") {
+			cfg.Server.ListenAddress = val
+		}
+	}
+	if v.GetBool("allow_unauthenticated") {
+		cfg.Auth.AllowUnauthenticated = true
+	} else if hasEnv("ATC_ALLOW_UNAUTHENTICATED") {
+		cfg.Auth.AllowUnauthenticated = false
+	}
 	cfg.Server.MetricsNamespace = "atc"
 	if v.GetBool("dry_run") || hasEnv("ATC_DRY_RUN") {
 		cfg.DryRun = v.GetBool("dry_run")

@@ -123,10 +123,12 @@ ha:
   lock_key: "atc/leader/lock"
   session_ttl: "15s"
 
+# Callers must present a Consul ACL token; Consul ACLs decide what they may change.
+# ATC refuses to start with auth disabled on a network-reachable address unless
+# allow_unauthenticated: true is set.
 auth:
-  enabled: false
-  static_keys:
-    - "atc-super-secret-token"
+  enabled: true
+  static_keys: []
   consul_token_delegation: true
 
 dampening_period: "5s"

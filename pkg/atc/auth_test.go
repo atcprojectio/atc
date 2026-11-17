@@ -97,11 +97,12 @@ func TestAuthMiddleware(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rr.Code)
 	})
 
-	t.Run("Valid static token in query parameter is accepted", func(t *testing.T) {
+	t.Run("Token in query parameter is rejected", func(t *testing.T) {
+		// Query-string tokens leak into logs, traces and Referer headers.
 		req := httptest.NewRequest("GET", "/api/services?token=valid-static-token", nil)
 		rr := httptest.NewRecorder()
 		authHandler.ServeHTTP(rr, req)
-		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
 	})
 
 	t.Run("Valid Consul delegated token is accepted and cached", func(t *testing.T) {

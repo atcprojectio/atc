@@ -44,6 +44,10 @@ type AuthConfig struct {
 	Enabled               bool     `yaml:"enabled" json:"enabled" mapstructure:"enabled"`
 	StaticKeys            []string `yaml:"static_keys" json:"static_keys" mapstructure:"static_keys"`
 	ConsulTokenDelegation bool     `yaml:"consul_token_delegation" json:"consul_token_delegation" mapstructure:"consul_token_delegation"`
+	// AllowUnauthenticated explicitly permits running with auth disabled while the API/MCP
+	// listeners are reachable from other hosts. Without it, auth must be enabled or
+	// server.listen_address must be a loopback address.
+	AllowUnauthenticated bool `yaml:"allow_unauthenticated" json:"allow_unauthenticated" mapstructure:"allow_unauthenticated"`
 }
 
 type Config struct {
@@ -92,6 +96,10 @@ type Atc struct {
 
 	consulClientsMu sync.RWMutex
 	consulClients   map[string]*api.Client
+
+	requestHTTPClientOnce sync.Once
+	requestHTTPClient     *http.Client
+	requestHTTPClientErr  error
 
 	tokenCacheMu sync.RWMutex
 	tokenCache   map[string]time.Time
@@ -1080,6 +1088,21 @@ func (t *Atc) getOrCreateConsulClient(addr, token, dc, ns string) (*api.Client, 
 	return client, nil
 }
 
+// newRequestConsulClient builds a Consul client for a per-request token. Clients share one
+// pooled HTTP client so creating them is cheap and does not leak connections or goroutines.
+func (t *Atc) newRequestConsulClient(addr, token, dc, ns string) (*api.Client, error) {
+	t.requestHTTPClientOnce.Do(func() {
+		base := api.DefaultConfig()
+		t.requestHTTPClient, t.requestHTTPClientErr = api.NewHttpClient(base.Transport, base.TLSConfig)
+	})
+	if t.requestHTTPClientErr != nil {
+		return nil, t.requestHTTPClientErr
+	}
+	cfg := consulCfg(addr, token, dc, ns)
+	cfg.HttpClient = t.requestHTTPClient
+	return api.NewClient(cfg)
+}
+
 func (t *Atc) getConsulClient(ctx context.Context) (*api.Client, error) {
 	t.cfgMu.RLock()
 	addr := t.Cfg.ConsulAddr
@@ -1089,17 +1112,13 @@ func (t *Atc) getConsulClient(ctx context.Context) (*api.Client, error) {
 	t.cfgMu.RUnlock()
 
 	if ctxToken, ok := ctx.Value(tokenContextKey).(string); ok && ctxToken != "" {
-		isStaticKey := false
 		t.cfgMu.RLock()
-		for _, sk := range t.Cfg.Auth.StaticKeys {
-			if sk == ctxToken {
-				isStaticKey = true
-				break
-			}
-		}
+		static := isStaticKey(t.Cfg.Auth.StaticKeys, ctxToken)
 		t.cfgMu.RUnlock()
-		if !isStaticKey {
-			token = ctxToken
+		if !static {
+			// Delegated Consul token: act as the caller so Consul's ACLs decide what they may
+			// read or write. Not cached, so the client cache stays bounded by configuration.
+			return t.newRequestConsulClient(addr, ctxToken, dc, ns)
 		}
 	}
 

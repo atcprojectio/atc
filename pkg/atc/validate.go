@@ -80,5 +80,21 @@ func ValidateConfig(cfg Config) []error {
 		}
 	}
 
+	// Refuse to expose unauthenticated write endpoints (overrides, purge, reload, MCP tools)
+	// to the network unless the operator explicitly opts in.
+	if resolveModules(cfg.Target)[Server] && !cfg.Auth.Enabled && !cfg.Auth.AllowUnauthenticated &&
+		!IsLoopbackListenAddress(cfg.Server.ListenAddress) {
+		errs = append(errs, fmt.Errorf("auth is disabled but the API/MCP listeners bind to %q, exposing write endpoints without authentication; "+
+			"enable auth, set server.listen_address to a loopback address (e.g. 127.0.0.1), "+
+			"or set auth.allow_unauthenticated: true (--allow-unauthenticated) to accept the risk", listenAddrForMsg(cfg.Server.ListenAddress)))
+	}
+
 	return errs
+}
+
+func listenAddrForMsg(addr string) string {
+	if addr == "" {
+		return "all interfaces"
+	}
+	return addr
 }

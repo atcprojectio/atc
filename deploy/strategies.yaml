@@ -38,6 +38,11 @@ auth:
 
 # Web server and metrics configuration
 server:
+  # Local development: bind API/UI and MCP to loopback so running without auth is allowed.
+  # Use "" (all interfaces) only together with auth.enabled: true.
+  listen_address: "127.0.0.1"
+  # Browser origins allowed to call the API/MCP cross-origin (same-origin is always allowed).
+  allowed_origins: []
   http_listen_port: 8088
   metrics_listen_port: 8089
   log_format: "text"

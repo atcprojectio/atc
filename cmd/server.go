@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/fsnotify/fsnotify"
@@ -28,6 +29,10 @@ var serverCmd = &cobra.Command{
 			return err
 		}
 		applyChangedServerFlags(cmd, &cfg)
+
+		if errs := atc.ValidateConfig(cfg); len(errs) > 0 {
+			return fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
+		}
 
 		t, err := atc.New(cfg)
 		if err != nil {
@@ -82,6 +87,12 @@ func applyChangedServerFlags(cmd *cobra.Command, cfg *atc.Config) {
 	if cmd.Flags().Changed("write-rate-limit") {
 		cfg.WriteRateLimit = viper.GetString("write_rate_limit")
 	}
+	if cmd.Flags().Changed("listen-address") {
+		cfg.Server.ListenAddress = viper.GetString("listen_address")
+	}
+	if cmd.Flags().Changed("allow-unauthenticated") {
+		cfg.Auth.AllowUnauthenticated = viper.GetBool("allow_unauthenticated")
+	}
 	if cmd.Flags().Changed("node-name") {
 		cfg.NodeName = viper.GetString("node_name")
 	}
@@ -122,6 +133,12 @@ func init() {
 
 	serverCmd.PersistentFlags().Int("mcp-port", 8092, "port to expose MCP server on.")
 	_ = viper.BindPFlag("mcp_port", serverCmd.PersistentFlags().Lookup("mcp-port"))
+
+	serverCmd.PersistentFlags().String("listen-address", "", "Interface for the API/UI and MCP listeners (empty = all interfaces).")
+	_ = viper.BindPFlag("listen_address", serverCmd.PersistentFlags().Lookup("listen-address"))
+
+	serverCmd.PersistentFlags().Bool("allow-unauthenticated", false, "Allow running with auth disabled on a non-loopback listen address.")
+	_ = viper.BindPFlag("allow_unauthenticated", serverCmd.PersistentFlags().Lookup("allow-unauthenticated"))
 
 	serverCmd.PersistentFlags().Bool("dry-run", false, "Disable writing to Consul, log actions instead.")
 	_ = viper.BindPFlag("dry_run", serverCmd.PersistentFlags().Lookup("dry-run"))

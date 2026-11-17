@@ -72,10 +72,14 @@ config:
       enabled: true
       lock_key: "atc/leader/lock"
       session_ttl: "15s"
+    # Callers must present a Consul ACL token (X-Consul-Token or Authorization: Bearer);
+    # ATC uses it for Consul calls, so Consul ACLs decide what each caller may change.
+    # To use static API keys instead, add them under static_keys (never commit real keys).
+    # ATC refuses to start with auth disabled on a network-reachable address unless
+    # allow_unauthenticated: true is set.
     auth:
-      enabled: false
-      static_keys:
-        - "atc-super-secret-token"
+      enabled: true
+      static_keys: []
       consul_token_delegation: true
     dampening_period: "5s"
     min_dampening_period: "1s"
