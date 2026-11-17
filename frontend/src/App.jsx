@@ -1,22 +1,32 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
+// The API token is kept in sessionStorage: it is gone when the tab or browser closes, which
+// limits how long a stolen or forgotten token lingers. Older versions used localStorage, so
+// any copy left there is removed. Storage access can throw (private mode, blocked storage).
 const getLocalStorageItem = (key) => {
-  if (typeof window !== 'undefined' && window.localStorage) {
-    return window.localStorage.getItem(key) || '';
+  try {
+    window.localStorage?.removeItem(key);
+    return window.sessionStorage?.getItem(key) || '';
+  } catch {
+    return '';
   }
-  return '';
 };
 
 const setLocalStorageItem = (key, val) => {
-  if (typeof window !== 'undefined' && window.localStorage) {
-    window.localStorage.setItem(key, val);
+  try {
+    window.sessionStorage?.setItem(key, val);
+  } catch {
+    // storage unavailable: the token lives only in memory for this page
   }
 };
 
 const removeLocalStorageItem = (key) => {
-  if (typeof window !== 'undefined' && window.localStorage) {
-    window.localStorage.removeItem(key);
+  try {
+    window.sessionStorage?.removeItem(key);
+    window.localStorage?.removeItem(key);
+  } catch {
+    // nothing stored
   }
 };
 

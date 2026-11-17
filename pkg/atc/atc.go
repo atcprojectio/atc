@@ -317,6 +317,8 @@ func (t *Atc) Run(ctx context.Context) error {
 	haEnabled := t.Cfg.HA.Enabled
 	t.cfgMu.RUnlock()
 
+	t.warnIfTokensInPlaintext()
+
 	for _, module := range targets {
 		if !slices.Contains(UserVisibleModules, module) {
 			return fmt.Errorf("selected target (%s) is an internal module or invalid target, which is not allowed", module)
@@ -421,6 +423,19 @@ func checkOverrideAllowed(ctx context.Context, client *api.Client, service strin
 		return fmt.Errorf("%w: %q. Applying an override replaces it, and clearing the override later deletes it, so the original configuration would be lost. Retry with force to replace it anyway", ErrForeignResolver, service)
 	}
 	return nil
+}
+
+// warnIfTokensInPlaintext warns when clients send API tokens (static keys or Consul ACL
+// tokens) over plain HTTP from other hosts. That is fine behind a TLS-terminating proxy, which
+// ATC cannot detect, so this is a warning rather than an error.
+func (t *Atc) warnIfTokensInPlaintext() {
+	t.cfgMu.RLock()
+	srv, auth := t.Cfg.Server, t.Cfg.Auth
+	t.cfgMu.RUnlock()
+	if t.Server == nil || !auth.Enabled || srv.TLSEnabled() || IsLoopbackListenAddress(srv.ListenAddress) {
+		return
+	}
+	t.coreLogger.Warn("API tokens are sent over plain HTTP. Terminate TLS in front of ATC, or set server.tls_cert_file and server.tls_key_file.")
 }
 
 // cancelPendingWrites drops writes queued on this node for a service after an operator changed

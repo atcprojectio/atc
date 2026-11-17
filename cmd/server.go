@@ -97,6 +97,12 @@ func applyChangedServerFlags(cmd *cobra.Command, cfg *atc.Config) {
 	if cmd.Flags().Changed("listen-address") {
 		cfg.Server.ListenAddress = viper.GetString("listen_address")
 	}
+	if cmd.Flags().Changed("tls-cert-file") {
+		cfg.Server.TLSCertFile = viper.GetString("tls_cert_file")
+	}
+	if cmd.Flags().Changed("tls-key-file") {
+		cfg.Server.TLSKeyFile = viper.GetString("tls_key_file")
+	}
 	if cmd.Flags().Changed("allow-unauthenticated") {
 		cfg.Auth.AllowUnauthenticated = viper.GetBool("allow_unauthenticated")
 	}
@@ -131,6 +137,12 @@ func init() {
 
 	serverCmd.PersistentFlags().String("listen-address", "", "Interface for the API/UI and MCP listeners (empty = all interfaces).")
 	_ = viper.BindPFlag("listen_address", serverCmd.PersistentFlags().Lookup("listen-address"))
+
+	serverCmd.PersistentFlags().String("tls-cert-file", "", "Serve the API/UI and MCP over HTTPS with this certificate (requires --tls-key-file).")
+	_ = viper.BindPFlag("tls_cert_file", serverCmd.PersistentFlags().Lookup("tls-cert-file"))
+
+	serverCmd.PersistentFlags().String("tls-key-file", "", "Private key for --tls-cert-file.")
+	_ = viper.BindPFlag("tls_key_file", serverCmd.PersistentFlags().Lookup("tls-key-file"))
 
 	serverCmd.PersistentFlags().Bool("allow-unauthenticated", false, "Allow running with auth disabled on a non-loopback listen address.")
 	_ = viper.BindPFlag("allow_unauthenticated", serverCmd.PersistentFlags().Lookup("allow-unauthenticated"))

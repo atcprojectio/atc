@@ -277,6 +277,38 @@ describe('ATC Dashboard App', () => {
     });
   });
 
+  describe('API token storage', () => {
+    beforeEach(() => {
+      window.localStorage.clear();
+      window.sessionStorage.clear();
+    });
+
+    it('keeps the token in session storage, not local storage', async () => {
+      const origImpl = window.fetch.getMockImplementation();
+      window.fetch.mockImplementation((url, options) => {
+        if (url.includes('/api/leader')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ leader: true, auth_enabled: true, components: {} }) });
+        }
+        return origImpl(url, options);
+      });
+
+      render(<App />);
+      const input = await screen.findByPlaceholderText('Enter API Token...');
+      fireEvent.change(input, { target: { value: 'secret-token' } });
+      fireEvent.blur(input);
+
+      await waitFor(() => expect(window.sessionStorage.getItem('atc-api-token')).toBe('secret-token'));
+      expect(window.localStorage.getItem('atc-api-token')).toBeNull();
+    });
+
+    it('removes a token left in local storage by older versions', async () => {
+      window.localStorage.setItem('atc-api-token', 'old-token');
+      render(<App />);
+      await screen.findByText('payment-service');
+      expect(window.localStorage.getItem('atc-api-token')).toBeNull();
+    });
+  });
+
   describe('resolvers not created by ATC', () => {
     const withForeignService = (origImpl, overrideResponses) => (url, options) => {
       if (url.includes('/api/services') && !(options && options.method)) {

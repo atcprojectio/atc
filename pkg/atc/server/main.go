@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"embed"
 	"errors"
 	"fmt"
@@ -33,7 +34,14 @@ type Config struct {
 	// AllowedOrigins lists browser origins (e.g. "https://ops.example.com") allowed to call
 	// the API and MCP endpoints cross-origin. Same-origin requests are always allowed.
 	AllowedOrigins []string `yaml:"allowed_origins" mapstructure:"allowed_origins"`
+	// TLSCertFile and TLSKeyFile enable HTTPS on the API/UI and MCP listeners. Both or neither
+	// must be set. The files are re-read when they change. The metrics listener stays HTTP.
+	TLSCertFile string `yaml:"tls_cert_file" mapstructure:"tls_cert_file"`
+	TLSKeyFile  string `yaml:"tls_key_file" mapstructure:"tls_key_file"`
 }
+
+// TLSEnabled reports whether the API/UI and MCP listeners serve HTTPS.
+func (c Config) TLSEnabled() bool { return c.TLSCertFile != "" && c.TLSKeyFile != "" }
 
 type Server struct {
 	cfg        Config
@@ -94,11 +102,41 @@ func New(cfg Config, logger *slog.Logger) (*Server, error) {
 	}, nil
 }
 
+// withHSTS tells browsers to keep using HTTPS for this host.
+func withHSTS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) Run(ctx context.Context) error {
+	var tlsConfig *tls.Config
+	if s.cfg.TLSEnabled() {
+		reloader, err := newCertReloader(s.cfg.TLSCertFile, s.cfg.TLSKeyFile, s.logger)
+		if err != nil {
+			return err
+		}
+		tlsConfig = reloader.tlsConfig()
+	}
+	mainHandler := wrap(s.Mux, s.MainMiddleware)
+	mcpHandler := wrap(s.McpMux, s.McpMiddleware)
+	if tlsConfig != nil {
+		mainHandler = withHSTS(mainHandler)
+		mcpHandler = withHSTS(mcpHandler)
+	}
+	serve := func(srv *http.Server) error {
+		if tlsConfig != nil {
+			srv.TLSConfig = tlsConfig
+			return srv.ListenAndServeTLS("", "")
+		}
+		return srv.ListenAndServe()
+	}
+
 	mainAddr := net.JoinHostPort(s.cfg.ListenAddress, strconv.Itoa(s.cfg.HTTPListenPort))
 	mainServer := &http.Server{
 		Addr:              mainAddr,
-		Handler:           otelhttp.NewHandler(wrap(s.Mux, s.MainMiddleware), "atc-server"),
+		Handler:           otelhttp.NewHandler(mainHandler, "atc-server"),
 		ReadHeaderTimeout: 3 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -121,7 +159,7 @@ func (s *Server) Run(ctx context.Context) error {
 		mcpAddr := net.JoinHostPort(s.cfg.ListenAddress, strconv.Itoa(s.cfg.McpListenPort))
 		mcpServer = &http.Server{
 			Addr:              mcpAddr,
-			Handler:           otelhttp.NewHandler(wrap(s.McpMux, s.McpMiddleware), "atc-mcp-server"),
+			Handler:           otelhttp.NewHandler(mcpHandler, "atc-mcp-server"),
 			ReadHeaderTimeout: 3 * time.Second,
 			ReadTimeout:       10 * time.Second,
 			// WriteTimeout is intentionally disabled (0) because MCP SSE and streamable HTTP connections are long-lived.
@@ -133,8 +171,8 @@ func (s *Server) Run(ctx context.Context) error {
 	errChan := make(chan error, 3)
 
 	go func() {
-		s.logger.InfoContext(ctx, "HTTP server listening", slog.String("address", mainAddr))
-		if err := mainServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		s.logger.InfoContext(ctx, "HTTP server listening", slog.String("address", mainAddr), slog.Bool("tls", tlsConfig != nil))
+		if err := serve(mainServer); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- fmt.Errorf("main server error: %w", err)
 		}
 	}()
@@ -149,8 +187,8 @@ func (s *Server) Run(ctx context.Context) error {
 	if mcpEnabled {
 		go func() {
 			mcpAddr := mcpServer.Addr
-			s.logger.InfoContext(ctx, "MCP server listening", slog.String("address", mcpAddr))
-			if err := mcpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.logger.InfoContext(ctx, "MCP server listening", slog.String("address", mcpAddr), slog.Bool("tls", tlsConfig != nil))
+			if err := serve(mcpServer); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errChan <- fmt.Errorf("mcp server error: %w", err)
 			}
 		}()
