@@ -49,6 +49,18 @@ mcpService:
   type: ClusterIP
   port: 8092
 
+# ATC's own Consul ACL token, read from an existing Secret (recommended over putting
+# consul_token in strategiesYaml, which is stored in a ConfigMap).
+consulToken:
+  existingSecret: ""
+  key: token
+
+# Extra environment variables for the ATC container, e.g. to enable OpenTelemetry export:
+#   extraEnv:
+#     - name: OTEL_EXPORTER_OTLP_ENDPOINT
+#       value: http://otel-collector.observability.svc:4318
+extraEnv: []
+
 resources:
   limits:
     cpu: 200m
@@ -65,7 +77,10 @@ affinity: {}
 
 config:
   logLevel: info
-  consulAddr: "http://127.0.0.1:8500"
+  # Consul HTTP address. Empty uses the Consul agent on the pod's node
+  # (http://<node IP>:8500), the usual setup with Consul client agents. Set it explicitly
+  # for agentless/dataplane installs, e.g. "http://consul-server.consul.svc:8500".
+  consulAddr: ""
   consulDC: "dc1"
   consulNamespace: ""
   writeRateLimit: "1s"
