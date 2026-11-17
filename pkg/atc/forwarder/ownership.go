@@ -2,7 +2,9 @@ package forwarder
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"slices"
 	"sync"
 
@@ -77,4 +79,31 @@ func (ft *ForeignTracker) Update(ctx context.Context, current map[string]struct{
 		}
 	}
 	ft.services = current
+}
+
+// OwnerState summarises who controls a service-resolver: "" when it does not exist, otherwise
+// "created-by=<value>" (with an empty value for resolvers written without ATC metadata).
+func OwnerState(e *api.ServiceResolverConfigEntry, exists bool) string {
+	if !exists || e == nil {
+		return ""
+	}
+	createdBy := ""
+	if e.Meta != nil {
+		createdBy = e.Meta["created-by"]
+	}
+	return "created-by=" + createdBy
+}
+
+// CurrentOwnerState reads the resolver from Consul and returns its OwnerState.
+func CurrentOwnerState(ctx context.Context, client *api.Client, service string) (string, error) {
+	entry, _, err := client.ConfigEntries().Get(api.ServiceResolver, service, (&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		var se api.StatusError
+		if errors.As(err, &se) && se.Code == http.StatusNotFound {
+			return "", nil
+		}
+		return "", err
+	}
+	res, _ := entry.(*api.ServiceResolverConfigEntry)
+	return OwnerState(res, res != nil), nil
 }

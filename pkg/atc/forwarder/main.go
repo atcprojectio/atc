@@ -70,7 +70,10 @@ type Forwarder struct {
 	// Hysteresis scheduling state
 	schedMu       sync.Mutex
 	pendingWrites map[string]*api.ServiceResolverConfigEntry
-	writeTimers   map[string]*time.Timer
+	// pendingOwner records who controlled each resolver when its write was scheduled; the
+	// write is dropped if that changed before it fires (purged, overridden, taken over).
+	pendingOwner map[string]string
+	writeTimers  map[string]*time.Timer
 	// runCtx is the context of the current Run (i.e. the leadership term). Scheduled writes
 	// derive from it so they cannot outlive a step-down. nil means Run was never started.
 	runCtx context.Context
@@ -159,6 +162,7 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 		dryRun:                  dryRun,
 		strategiesCache:         make(map[string]cachedStrategies),
 		pendingWrites:           make(map[string]*api.ServiceResolverConfigEntry),
+		pendingOwner:            make(map[string]string),
 		writeTimers:             make(map[string]*time.Timer),
 		reconcileCounter:        reconcileCounter,
 		reconcileDuration:       reconcileDuration,
@@ -235,6 +239,7 @@ func (f *Forwarder) CancelPendingWrite(ctx context.Context, svcName string) {
 		delete(f.writeTimers, svcName)
 	}
 	delete(f.pendingWrites, svcName)
+	delete(f.pendingOwner, svcName)
 }
 
 func (f *Forwarder) CancelAllPendingWrites(ctx context.Context) {
@@ -248,6 +253,7 @@ func (f *Forwarder) CancelAllPendingWrites(ctx context.Context) {
 		}
 	}
 	clear(f.pendingWrites)
+	clear(f.pendingOwner)
 }
 
 func (f *Forwarder) GetCachedStrategies(svcName string) (string, string) {
@@ -661,7 +667,7 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 					}
 				} else {
 					f.logger.InfoContext(ctx, "Scheduling failover service-resolver write", slog.String("service", svcName), slog.Duration("dampening", dampening))
-					f.scheduleWrite(svcName, entry, dampening)
+					f.scheduleWrite(svcName, entry, dampening, OwnerState(existing, exists))
 				}
 			}
 		} else {
@@ -752,7 +758,7 @@ func getDampeningDuration(tags []string, globalDefault, minLimit string) time.Du
 	return d
 }
 
-func (f *Forwarder) scheduleWrite(svcName string, entry *api.ServiceResolverConfigEntry, dampening time.Duration) {
+func (f *Forwarder) scheduleWrite(svcName string, entry *api.ServiceResolverConfigEntry, dampening time.Duration, owner string) {
 	f.schedMu.Lock()
 	defer f.schedMu.Unlock()
 
@@ -764,10 +770,12 @@ func (f *Forwarder) scheduleWrite(svcName string, entry *api.ServiceResolverConf
 		if !entriesEqual(f.pendingWrites[svcName], entry) {
 			f.logger.Info("Resetting dampening timer for pending write", slog.String("service", svcName), slog.Duration("dampening", dampening))
 			f.pendingWrites[svcName] = entry
+			f.pendingOwner[svcName] = owner
 			timer.Reset(dampening)
 		}
 	} else {
 		f.pendingWrites[svcName] = entry
+		f.pendingOwner[svcName] = owner
 		f.writeTimers[svcName] = time.AfterFunc(dampening, func() {
 			f.executeScheduledWrite(svcName)
 		})
@@ -777,7 +785,10 @@ func (f *Forwarder) scheduleWrite(svcName string, entry *api.ServiceResolverConf
 func (f *Forwarder) executeScheduledWrite(svcName string) {
 	f.schedMu.Lock()
 	entry, ok := f.pendingWrites[svcName]
+	owner, haveOwner := f.pendingOwner[svcName]
+	delete(f.pendingOwner, svcName)
 	delete(f.pendingWrites, svcName)
+	delete(f.pendingOwner, svcName)
 	delete(f.writeTimers, svcName)
 	parent := f.runCtx
 	if parent == nil {
@@ -809,6 +820,23 @@ func (f *Forwarder) executeScheduledWrite(svcName string) {
 		f.logger.Error("Failed to create Consul client for scheduled write", slog.String("service", svcName), slog.Any("error", err))
 		span.RecordError(err)
 		return
+	}
+
+	// The resolver may have changed during the dampening window: purged (possibly through
+	// another ATC node), replaced by a manual override, or written by someone else. Then this
+	// write is stale; drop it and let the next reconcile decide with current state.
+	if haveOwner {
+		current, err := CurrentOwnerState(ctx, client, svcName)
+		if err != nil {
+			f.logger.Error("Dropping scheduled failover write: could not re-check the resolver; the next resync retries", slog.String("service", svcName), slog.Any("error", err))
+			span.RecordError(err)
+			return
+		}
+		if current != owner {
+			f.logger.Info("Dropping scheduled failover write: the resolver changed while the write was pending", slog.String("service", svcName), slog.String("was", owner), slog.String("now", current))
+			span.AddEvent("scheduled_write_dropped_resolver_changed")
+			return
+		}
 	}
 
 	f.mu.RLock()
