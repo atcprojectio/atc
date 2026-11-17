@@ -511,6 +511,13 @@ button:disabled,
   }
 }
 
+.service-title-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .service-name {
   margin: 0;
   font-size: 1.35rem;
@@ -1193,6 +1200,14 @@ button:disabled,
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: 20px;
+}
+
+.strategies-grid .no-services {
+  grid-column: 1 / -1;
+}
+
+.strategy-targets-item {
+  margin-top: 15px;
 }
 
 /* Strategy card title row: badge + name inline */

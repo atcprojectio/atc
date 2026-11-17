@@ -866,7 +866,6 @@ func (f *Forwarder) executeScheduledWrite(svcName string) {
 	owner, haveOwner := f.pendingOwner[svcName]
 	delete(f.pendingOwner, svcName)
 	delete(f.pendingWrites, svcName)
-	delete(f.pendingOwner, svcName)
 	delete(f.writeTimers, svcName)
 	parent := f.runCtx
 	if parent == nil {

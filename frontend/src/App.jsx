@@ -659,8 +659,8 @@ Lock Key: ${lockKey}`;
                       <div className="card-glow"></div>
                       <div className="service-header">
                         <span className={`status-indicator ${svc.status === 'deleted' ? 'deleted' : 'active'}`}></span>
-                        <div className="service-title-wrapper" style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                          <h3 className="service-name" style={{ margin: 0 }}>{svc.name}</h3>
+                        <div className="service-title-wrapper">
+                          <h3 className="service-name">{svc.name}</h3>
                           {svc.namespace && svc.namespace !== 'default' && (
                             <span className="namespace-badge" title={`Consul Namespace: ${svc.namespace}`}>
                               📁 {svc.namespace}
@@ -909,7 +909,7 @@ Lock Key: ${lockKey}`;
                         <span className="strategy-info-label">Connect Timeout</span>
                         <span className="strategy-info-value">{config.connect_timeout || 'default'}</span>
                       </div>
-                      <div className="detail-item" style={{ marginTop: '15px' }}>
+                      <div className="detail-item strategy-targets-item">
                         <span className="detail-label">Failover Targets</span>
                         <ul className="strategy-target-list">
                           {config.targets && config.targets.map((target, idx) => (
@@ -970,7 +970,7 @@ Lock Key: ${lockKey}`;
 
               {(!strategies.failover || Object.keys(strategies.failover).length === 0) &&
                (!strategies.redirect || Object.keys(strategies.redirect).length === 0) && (
-                <div className="no-services glass-panel" style={{ gridColumn: '1 / -1' }}>
+                <div className="no-services glass-panel">
                   <span className="empty-icon">⚡</span>
                   <h3>No Predefined Strategies</h3>
                   <p>Configure predefined strategies under `strategies.failover` or `strategies.redirect` in the daemon configuration.</p>

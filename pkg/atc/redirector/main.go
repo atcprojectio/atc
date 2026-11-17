@@ -297,7 +297,6 @@ func (r *Redirector) CancelAllPendingWrites(ctx context.Context) {
 		delete(r.writeTimers, svcName)
 		delete(r.pendingWrites, svcName)
 		delete(r.pendingOwner, svcName)
-		delete(r.pendingOwner, svcName)
 	}
 }
 
@@ -980,7 +979,6 @@ func (r *Redirector) executeScheduledWrite(svcName string) {
 	owner, haveOwner := r.pendingOwner[svcName]
 	delete(r.pendingOwner, svcName)
 	delete(r.pendingWrites, svcName)
-	delete(r.pendingOwner, svcName)
 	delete(r.writeTimers, svcName)
 	parent := r.runCtx
 	if parent == nil {

@@ -2,4 +2,6 @@
 dist/
 coverage.out
 .idea/
+.junie/
 .DS_Store
+skills/

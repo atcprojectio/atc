@@ -36,8 +36,13 @@ type DryRunReporter interface {
 	IsDryRun() bool
 }
 
+func isDryRun(svc Service) bool {
+	d, ok := svc.(DryRunReporter)
+	return ok && d.IsDryRun()
+}
+
 func dryRunText(svc Service, text string) string {
-	if d, ok := svc.(DryRunReporter); ok && d.IsDryRun() {
+	if isDryRun(svc) {
 		return "[DRY RUN] Nothing was written to Consul. Would have done: " + text
 	}
 	return text
@@ -196,9 +201,18 @@ func NewHandler(svc Service) http.Handler {
 	}) (*mcp.CallToolResult, any, error) {
 		err := svc.PurgeServiceResolver(ctx, input.Name)
 		if err != nil {
+			if strings.Contains(err.Error(), "not created by ATC") {
+				auditMCP(ctx, svc, "purge_resolver", input.Name, map[string]any{"outcome": "rejected", "error": err.Error()})
+			} else if !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "404") {
+				auditMCP(ctx, svc, "purge_resolver", input.Name, map[string]any{"outcome": "failed", "error": err.Error()})
+			}
 			return nil, nil, err
 		}
-		auditMCP(ctx, svc, "purge_resolver", input.Name, nil)
+		outcome := "purged"
+		if isDryRun(svc) {
+			outcome = "dry_run"
+		}
+		auditMCP(ctx, svc, "purge_resolver", input.Name, map[string]any{"outcome": outcome})
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
@@ -219,15 +233,28 @@ func NewHandler(svc Service) http.Handler {
 		Duration  string `json:"duration,omitempty"`
 		Force     bool   `json:"force,omitempty" jsonschema:"replace a service-resolver that ATC did not create; it is deleted when the override is cleared"`
 	}) (*mcp.CallToolResult, any, error) {
-		err := svc.ApplyFailoverOverride(ctx, input.Service, input.TargetDc, input.Namespace, input.Duration, input.Force)
-		if err != nil {
-			return nil, nil, err
-		}
-		auditMCP(ctx, svc, "create_override", input.Service, map[string]any{
+		details := map[string]any{
 			"type":      "failover",
 			"target_dc": input.TargetDc,
 			"namespace": input.Namespace,
-		})
+			"force":     input.Force,
+		}
+		err := svc.ApplyFailoverOverride(ctx, input.Service, input.TargetDc, input.Namespace, input.Duration, input.Force)
+		if err != nil {
+			outcome := "failed"
+			if strings.Contains(err.Error(), "did not create") || strings.Contains(err.Error(), "invalid override") {
+				outcome = "rejected"
+			}
+			details["outcome"], details["error"] = outcome, err.Error()
+			auditMCP(ctx, svc, "create_override", input.Service, details)
+			return nil, nil, err
+		}
+		if isDryRun(svc) {
+			details["outcome"] = "dry_run"
+		} else {
+			details["outcome"] = "applied"
+		}
+		auditMCP(ctx, svc, "create_override", input.Service, details)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
@@ -248,15 +275,28 @@ func NewHandler(svc Service) http.Handler {
 		Duration   string `json:"duration,omitempty"`
 		Force      bool   `json:"force,omitempty" jsonschema:"replace a service-resolver that ATC did not create; it is deleted when the override is cleared"`
 	}) (*mcp.CallToolResult, any, error) {
-		err := svc.TriggerManualRedirect(ctx, input.Service, input.RedirectDc, input.Namespace, input.Duration, input.Force)
-		if err != nil {
-			return nil, nil, err
-		}
-		auditMCP(ctx, svc, "create_override", input.Service, map[string]any{
+		details := map[string]any{
 			"type":      "redirect",
 			"target_dc": input.RedirectDc,
 			"namespace": input.Namespace,
-		})
+			"force":     input.Force,
+		}
+		err := svc.TriggerManualRedirect(ctx, input.Service, input.RedirectDc, input.Namespace, input.Duration, input.Force)
+		if err != nil {
+			outcome := "failed"
+			if strings.Contains(err.Error(), "did not create") || strings.Contains(err.Error(), "invalid override") {
+				outcome = "rejected"
+			}
+			details["outcome"], details["error"] = outcome, err.Error()
+			auditMCP(ctx, svc, "create_override", input.Service, details)
+			return nil, nil, err
+		}
+		if isDryRun(svc) {
+			details["outcome"] = "dry_run"
+		} else {
+			details["outcome"] = "applied"
+		}
+		auditMCP(ctx, svc, "create_override", input.Service, details)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
