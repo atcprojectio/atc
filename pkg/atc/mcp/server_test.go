@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -329,3 +330,105 @@ func TestWriteToolsReportDryRun(t *testing.T) {
 	assert.True(t, strings.HasPrefix(dryRunText(&dryRunService{}, "Successfully purged x"), "[DRY RUN] Nothing was written"))
 	assert.Equal(t, "Successfully purged x", dryRunText(&mockService{}, "Successfully purged x"))
 }
+
+type auditEntry struct {
+	action  string
+	service string
+	details map[string]any
+}
+
+type auditingService struct {
+	mockService
+	dryRun   bool
+	nextErr  error
+	recorded []auditEntry
+}
+
+func (a *auditingService) IsDryRun() bool { return a.dryRun }
+
+func (a *auditingService) LogAudit(_ context.Context, action, service string, details map[string]any) {
+	copied := make(map[string]any, len(details))
+	for k, v := range details {
+		copied[k] = v
+	}
+	a.recorded = append(a.recorded, auditEntry{action: action, service: service, details: copied})
+}
+
+func (a *auditingService) PurgeServiceResolver(_ context.Context, _ string) error {
+	return a.nextErr
+}
+
+func (a *auditingService) ApplyFailoverOverride(_ context.Context, _, _, _, _ string, _ bool) error {
+	return a.nextErr
+}
+
+func (a *auditingService) TriggerManualRedirect(_ context.Context, _, _, _, _ string, _ bool) error {
+	return a.nextErr
+}
+
+func TestMcpWriteToolsAuditOutcomesAndForce(t *testing.T) {
+	svc := &auditingService{}
+	handler := NewHandler(svc)
+
+	reqInit := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`))
+	reqInit.Header.Set("Content-Type", "application/json")
+	reqInit.Header.Set("Accept", "application/json, text/event-stream")
+	rrInit := httptest.NewRecorder()
+	handler.ServeHTTP(rrInit, reqInit)
+	sessionId := rrInit.Header().Get("Mcp-Session-Id")
+	assert.NotEmpty(t, sessionId)
+
+	reqDone := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/initialized"}`))
+	reqDone.Header.Set("Content-Type", "application/json")
+	reqDone.Header.Set("Accept", "application/json, text/event-stream")
+	reqDone.Header.Set("Mcp-Session-Id", sessionId)
+	handler.ServeHTTP(httptest.NewRecorder(), reqDone)
+
+	// 1. Applied override with force=true records outcome=applied and force=true
+	callToolSync(t, handler, sessionId, "apply_failover_override", map[string]any{
+		"service":   "payments",
+		"target_dc": "dc2",
+		"force":     true,
+	})
+	assert.Len(t, svc.recorded, 1)
+	assert.Equal(t, "create_override", svc.recorded[0].action)
+	assert.Equal(t, "payments", svc.recorded[0].service)
+	assert.Equal(t, "applied", svc.recorded[0].details["outcome"])
+	assert.Equal(t, true, svc.recorded[0].details["force"])
+
+	// 2. Dry-run redirect records outcome=dry_run
+	svc.dryRun = true
+	callToolSync(t, handler, sessionId, "trigger_manual_redirect", map[string]any{
+		"service":     "payments",
+		"redirect_dc": "dc3",
+	})
+	assert.Len(t, svc.recorded, 2)
+	assert.Equal(t, "dry_run", svc.recorded[1].details["outcome"])
+	assert.Equal(t, false, svc.recorded[1].details["force"])
+
+	// 3. Dry-run purge records outcome=dry_run
+	callToolSync(t, handler, sessionId, "purge_redirect_config", map[string]any{"name": "payments"})
+	assert.Len(t, svc.recorded, 3)
+	assert.Equal(t, "purge_resolver", svc.recorded[2].action)
+	assert.Equal(t, "dry_run", svc.recorded[2].details["outcome"])
+
+	// 4. Refused foreign resolver override records outcome=rejected
+	svc.dryRun = false
+	svc.nextErr = errors.New(`refusing to overwrite service-resolver for "payments" that ATC did not create`)
+	callToolSync(t, handler, sessionId, "apply_failover_override", map[string]any{
+		"service":   "payments",
+		"target_dc": "dc2",
+	})
+	assert.Len(t, svc.recorded, 4)
+	assert.Equal(t, "rejected", svc.recorded[3].details["outcome"])
+
+	// 5. Upstream error records outcome=failed
+	svc.nextErr = assert.AnError
+	callToolSync(t, handler, sessionId, "apply_failover_override", map[string]any{
+		"service":   "payments",
+		"target_dc": "dc2",
+	})
+	assert.Len(t, svc.recorded, 5)
+	assert.Equal(t, "failed", svc.recorded[4].details["outcome"])
+}
+
