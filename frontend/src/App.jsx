@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 const getLocalStorageItem = (key) => {
@@ -28,6 +28,10 @@ function App() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [countdown, setCountdown] = useState(10);
   const [lastUpdated, setLastUpdated] = useState(null);
+  // Consul connectivity as reported by GET /api/status (null until the first answer).
+  const [consulStatus, setConsulStatus] = useState(null);
+  // False when the browser cannot reach the ATC server at all.
+  const [atcReachable, setAtcReachable] = useState(true);
   const [leaderComponents, setLeaderComponents] = useState({ forwarder: false, redirector: false });
   const [leaderInfo, setLeaderInfo] = useState(null);
   const [federation, setFederation] = useState({});
@@ -42,6 +46,7 @@ function App() {
   const [overrideNamespace, setOverrideNamespace] = useState('');
   const [overrideType, setOverrideType] = useState('failover');
   const [overrideDuration, setOverrideDuration] = useState('');
+  const tokenDebounceRef = useRef(null);
 
   const getHeaders = (t) => {
     const h = {};
@@ -51,14 +56,40 @@ function App() {
     return h;
   };
 
+  useEffect(() => {
+    return () => {
+      if (tokenDebounceRef.current) {
+        clearTimeout(tokenDebounceRef.current);
+      }
+    };
+  }, []);
+
   const handleTokenChange = (val) => {
     setToken(val);
     setLocalStorageItem('atc-api-token', val);
     setError(null);
-    fetchServices(true, val);
+    if (tokenDebounceRef.current) {
+      clearTimeout(tokenDebounceRef.current);
+    }
+    tokenDebounceRef.current = setTimeout(() => {
+      tokenDebounceRef.current = null;
+      fetchServices(true, val);
+    }, 400);
+  };
+
+  const flushTokenSync = (val = token) => {
+    if (tokenDebounceRef.current) {
+      clearTimeout(tokenDebounceRef.current);
+      tokenDebounceRef.current = null;
+      fetchServices(true, val);
+    }
   };
 
   const handleClearToken = () => {
+    if (tokenDebounceRef.current) {
+      clearTimeout(tokenDebounceRef.current);
+      tokenDebounceRef.current = null;
+    }
     setToken('');
     removeLocalStorageItem('atc-api-token');
     setError(null);
@@ -70,95 +101,124 @@ function App() {
       if (showLoading) {
         setLoading(true);
       }
-      
+
       const headers = getHeaders(currentToken);
- 
-      try {
-        const leaderRes = await fetch('/api/leader', { headers });
-        if (leaderRes.status === 401 || leaderRes.status === 403) {
+
+      const [
+        statusOutcome,
+        leaderOutcome,
+        fedOutcome,
+        stratOutcome,
+        modulesOutcome,
+        servicesOutcome,
+      ] = await Promise.allSettled([
+        fetch('/api/status', { headers }),
+        fetch('/api/leader', { headers }),
+        fetch('/api/federation', { headers }),
+        fetch('/api/strategies', { headers }),
+        fetch('/api/modules', { headers }),
+        fetch('/api/services', { headers }),
+      ]);
+
+      // The status endpoint needs no token; if even it cannot be fetched, ATC itself is down
+      // or unreachable from this browser.
+      let consulDown = false;
+      if (statusOutcome.status === 'rejected') {
+        setAtcReachable(false);
+        return;
+      }
+      setAtcReachable(true);
+      if (statusOutcome.value && statusOutcome.value.ok) {
+        try {
+          const statusData = await statusOutcome.value.json();
+          const consul = statusData && statusData.consul ? statusData.consul : null;
+          setConsulStatus(consul);
+          consulDown = !!consul && consul.reachable === false;
+        } catch (err) {
+          console.error('Failed to parse ATC status:', err);
+        }
+      }
+
+      const outcomes = [
+        leaderOutcome,
+        fedOutcome,
+        stratOutcome,
+        modulesOutcome,
+        servicesOutcome,
+      ];
+
+      for (const outcome of outcomes) {
+        if (outcome.status === 'fulfilled' && outcome.value && (outcome.value.status === 401 || outcome.value.status === 403)) {
           setAuthEnabled(true);
           setError('Authentication failed. Please check your API token.');
           setAutoRefresh(false);
-          setLoading(false);
           return;
         }
-        if (leaderRes.ok) {
-          const leaderData = await leaderRes.json();
+      }
+
+      if (leaderOutcome.status === 'fulfilled' && leaderOutcome.value.ok) {
+        try {
+          const leaderData = await leaderOutcome.value.json();
           setAuthEnabled(!!leaderData.auth_enabled);
           setLeaderComponents(leaderData.components || { forwarder: false, redirector: false });
           setLeaderInfo(leaderData);
+        } catch (err) {
+          console.error("Failed to parse leader status:", err);
         }
-      } catch (err) {
-        console.error("Failed to fetch leader status:", err);
+      } else if (leaderOutcome.status === 'rejected') {
+        console.error("Failed to fetch leader status:", leaderOutcome.reason);
       }
- 
-      // Fetch federation status
-      try {
-        const fedRes = await fetch('/api/federation', { headers });
-        if (fedRes.status === 401 || fedRes.status === 403) {
-          setAuthEnabled(true);
-          setError('Authentication failed. Please check your API token.');
-          setAutoRefresh(false);
-          setLoading(false);
-          return;
-        }
-        if (fedRes.ok) {
-          const fedData = await fedRes.json();
+
+      if (fedOutcome.status === 'fulfilled' && fedOutcome.value.ok) {
+        try {
+          const fedData = await fedOutcome.value.json();
           const fedMap = {};
-          fedData.forEach(item => {
-            fedMap[item.datacenter] = item.status;
-          });
+          if (Array.isArray(fedData)) {
+            fedData.forEach(item => {
+              fedMap[item.datacenter] = item.status;
+            });
+          }
           setFederation(fedMap);
+        } catch (err) {
+          console.error("Failed to parse federation status:", err);
         }
-      } catch (err) {
-        console.error("Failed to fetch federation status:", err);
+      } else if (fedOutcome.status === 'rejected') {
+        console.error("Failed to fetch federation status:", fedOutcome.reason);
       }
- 
-      // Fetch predefined strategies
-      try {
-        const stratRes = await fetch('/api/strategies', { headers });
-        if (stratRes.status === 401 || stratRes.status === 403) {
-          setAuthEnabled(true);
-          setError('Authentication failed. Please check your API token.');
-          setAutoRefresh(false);
-          setLoading(false);
-          return;
-        }
-        if (stratRes.ok) {
-          const stratData = await stratRes.json();
+
+      if (stratOutcome.status === 'fulfilled' && stratOutcome.value.ok) {
+        try {
+          const stratData = await stratOutcome.value.json();
           setStrategies(stratData || { failover: {}, redirect: {} });
+        } catch (err) {
+          console.error("Failed to parse predefined strategies:", err);
         }
-      } catch (err) {
-        console.error("Failed to fetch predefined strategies:", err);
+      } else if (stratOutcome.status === 'rejected') {
+        console.error("Failed to fetch predefined strategies:", stratOutcome.reason);
       }
- 
-      // Fetch enabled modules
-      try {
-        const modulesRes = await fetch('/api/modules', { headers });
-        if (modulesRes.status === 401 || modulesRes.status === 403) {
-          setAuthEnabled(true);
-          setError('Authentication failed. Please check your API token.');
-          setAutoRefresh(false);
-          setLoading(false);
+
+      if (modulesOutcome.status === 'fulfilled' && modulesOutcome.value.ok) {
+        try {
+          const modulesData = await modulesOutcome.value.json();
+          setModules(modulesData || []);
+        } catch (err) {
+          console.error("Failed to parse active modules:", err);
+        }
+      } else if (modulesOutcome.status === 'rejected') {
+        console.error("Failed to fetch active modules:", modulesOutcome.reason);
+      }
+
+      if (servicesOutcome.status === 'rejected') {
+        throw servicesOutcome.reason;
+      }
+
+      const res = servicesOutcome.value;
+      if (!res.ok) {
+        if (consulDown) {
+          // The Consul outage banner explains this; keep showing the last known services.
+          setError(null);
           return;
         }
-        if (modulesRes.ok) {
-          const modulesData = await modulesRes.json();
-          setModules(modulesData || []);
-        }
-      } catch (err) {
-        console.error("Failed to fetch active modules:", err);
-      }
- 
-      const res = await fetch('/api/services', { headers });
-      if (res.status === 401 || res.status === 403) {
-        setAuthEnabled(true);
-        setError('Authentication failed. Please check your API token.');
-        setAutoRefresh(false);
-        setLoading(false);
-        return;
-      }
-      if (!res.ok) {
         throw new Error(`Failed to fetch services: ${res.statusText}`);
       }
       const data = await res.json();
@@ -287,6 +347,21 @@ function App() {
     }
   };
 
+  // Changing routing needs Consul (and ATC); block the buttons rather than let them fail.
+  const writesBlocked = !atcReachable || (!!consulStatus && consulStatus.reachable === false);
+
+  // "How long ago" is measured against the server's latest check, so it needs no clock read
+  // during render and is not skewed by the browser's clock.
+  const formatTimestamp = (iso, asOfIso) => {
+    const then = new Date(iso);
+    if (Number.isNaN(then.getTime())) return iso;
+    const asOf = new Date(asOfIso);
+    if (Number.isNaN(asOf.getTime())) return then.toLocaleTimeString();
+    const minutes = Math.max(0, Math.round((asOf.getTime() - then.getTime()) / 60000));
+    const ago = minutes < 1 ? 'less than a minute ago' : minutes === 1 ? '1 minute ago' : `${minutes} minutes ago`;
+    return `${then.toLocaleTimeString()} (${ago})`;
+  };
+
   const renderDatacenterNode = (service, dc, isRedirect = false) => {
     const status = federation[dc];
     let badgeClass = 'fed-unknown';
@@ -367,7 +442,14 @@ Lock Key: ${lockKey}`;
               placeholder="Enter API Token..."
               value={token}
               onChange={(e) => handleTokenChange(e.target.value)}
+              onBlur={(e) => flushTokenSync(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  flushTokenSync(e.target.value);
+                }
+              }}
               className="auth-input"
+              aria-label="API Token"
             />
             <button 
               type="button" 
@@ -466,8 +548,43 @@ Lock Key: ${lockKey}`;
               </div>
             </section>
 
+            {/* Outage banners: plain-language explanations instead of raw errors */}
+            {!atcReachable && (
+              <div className="outage-banner glass-panel" role="alert">
+                <span className="outage-icon" aria-hidden="true">🔌</span>
+                <div className="outage-message">
+                  <h4>Lost connection to ATC</h4>
+                  <p>This page cannot reach the ATC server. It may be restarting, or your network connection may have dropped.</p>
+                  {lastUpdated && <p className="outage-detail">The information below is from {lastUpdated} and may be out of date.</p>}
+                  {autoRefresh && <p className="outage-detail">Checking again automatically every 10 seconds.</p>}
+                </div>
+                <button onClick={handleManualRefresh} className="btn btn-retry">
+                  Retry now
+                </button>
+              </div>
+            )}
+            {atcReachable && consulStatus && consulStatus.reachable === false && (
+              <div className="outage-banner glass-panel" role="alert">
+                <span className="outage-icon" aria-hidden="true">⚠️</span>
+                <div className="outage-message">
+                  <h4>{consulStatus.problem === 'no_leader' ? 'Consul has no cluster leader' : 'Consul is unreachable'}</h4>
+                  <p>{consulStatus.message} While this lasts, ATC cannot read or change routing: automatic failover and redirects are paused and manual overrides cannot be applied. Routing rules already stored in Consul stay as they are.</p>
+                  <p className="outage-detail">
+                    {consulStatus.last_contact
+                      ? `Last successful contact: ${formatTimestamp(consulStatus.last_contact, consulStatus.checked_at)}.`
+                      : 'ATC has not reached Consul since it started.'}
+                    {lastUpdated ? ` Services below show the last known state (synced ${lastUpdated}).` : ''}
+                  </p>
+                  {autoRefresh && <p className="outage-detail">Checking again automatically every 10 seconds.</p>}
+                </div>
+                <button onClick={handleManualRefresh} className="btn btn-retry">
+                  Retry now
+                </button>
+              </div>
+            )}
+
             {/* Error State */}
-            {error && (
+            {error && atcReachable && !(consulStatus && consulStatus.reachable === false) && (
               <div className="error-banner glass-panel">
                 <span className="error-icon">⚠️</span>
                 <div className="error-message">
@@ -519,6 +636,7 @@ Lock Key: ${lockKey}`;
                             </span>
                             <button
                               onClick={() => handlePurge(svc.name)}
+                              disabled={writesBlocked}
                               className="btn-purge btn-remove-override"
                               title="Remove manual override and resume automatic routing"
                             >
@@ -531,6 +649,7 @@ Lock Key: ${lockKey}`;
                             <span className="deleted-badge">Offline (Redirecting)</span>
                             <button
                               onClick={() => handlePurge(svc.name)}
+                              disabled={writesBlocked}
                               className="btn-purge"
                               title="Purge resolver config entry from Consul"
                             >
@@ -607,8 +726,9 @@ Lock Key: ${lockKey}`;
                             <div className="override-form glass-panel">
                               <h4>Manual Override Controls</h4>
                               <div className="form-group">
-                                <label>Override Type</label>
+                                <label htmlFor="override-type-select">Override Type</label>
                                 <select 
+                                  id="override-type-select"
                                   value={overrideType} 
                                   onChange={(e) => setOverrideType(e.target.value)}
                                   className="form-select"
@@ -618,9 +738,10 @@ Lock Key: ${lockKey}`;
                                 </select>
                               </div>
                               <div className="form-group">
-                                <label>Target Datacenter</label>
+                                <label htmlFor="override-target-dc-input">Target Datacenter</label>
                                 {Object.keys(federation).length > 0 ? (
                                   <select
+                                    id="override-target-dc-input"
                                     value={overrideTargetDc}
                                     onChange={(e) => setOverrideTargetDc(e.target.value)}
                                     className="form-select"
@@ -632,6 +753,7 @@ Lock Key: ${lockKey}`;
                                   </select>
                                 ) : (
                                   <input
+                                    id="override-target-dc-input"
                                     type="text"
                                     placeholder="e.g. dc2"
                                     value={overrideTargetDc}
@@ -641,7 +763,7 @@ Lock Key: ${lockKey}`;
                                 )}
                               </div>
                               <div className="form-group">
-                                <label>Target Namespace (Optional)</label>
+                                <label htmlFor="override-namespace-input">Target Namespace (Optional)</label>
                                 <input
                                   type="text"
                                   placeholder="e.g. default"
@@ -652,8 +774,9 @@ Lock Key: ${lockKey}`;
                                 />
                               </div>
                               <div className="form-group">
-                                <label>Duration (TTL)</label>
+                                <label htmlFor="override-duration-select">Duration (TTL)</label>
                                 <select
+                                  id="override-duration-select"
                                   value={overrideDuration}
                                   onChange={(e) => setOverrideDuration(e.target.value)}
                                   className="form-select"
@@ -668,6 +791,8 @@ Lock Key: ${lockKey}`;
                               <div className="form-buttons">
                                 <button 
                                   onClick={() => handleApplyOverride(svc.name)} 
+                                  disabled={writesBlocked}
+                                  title={writesBlocked ? 'Unavailable while ATC cannot reach Consul' : undefined}
                                   className="btn btn-apply-override"
                                 >
                                   Apply Override
@@ -693,6 +818,8 @@ Lock Key: ${lockKey}`;
                                       : (svc.failover_targets && svc.failover_targets.length > 0 ? svc.failover_targets[0].datacenter : '')
                                   );
                                 }}
+                                disabled={writesBlocked}
+                                title={writesBlocked ? 'Unavailable while ATC cannot reach Consul' : undefined}
                                 className="btn btn-override-trigger"
                               >
                                 ⚡ Apply Manual Override

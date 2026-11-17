@@ -37,7 +37,9 @@ func (t *Atc) initServer() error {
 		serv.MetricsMux.Handle("/metrics", telemetry.GlobalPrometheusHandler)
 	}
 
-	serv.Mux.HandleFunc("/ready", OkHandler())
+	// Unauthenticated on purpose: the dashboard must be able to explain a Consul outage even
+	// when delegated tokens cannot be verified. It only exposes fixed status messages.
+	serv.Mux.HandleFunc("GET /api/status", t.apiStatusHandler)
 	serv.Mux.Handle("GET /api/services", t.authMiddleware(http.HandlerFunc(t.apiServicesHandler)))
 	serv.Mux.Handle("DELETE /api/services", t.authMiddleware(http.HandlerFunc(t.apiServicesDeleteHandler)))
 	serv.Mux.Handle("GET /api/leader", t.authMiddleware(http.HandlerFunc(t.apiLeaderHandler)))
@@ -47,7 +49,8 @@ func (t *Atc) initServer() error {
 	serv.Mux.Handle("GET /api/modules", t.authMiddleware(http.HandlerFunc(t.apiModulesHandler)))
 	serv.Mux.Handle("POST /api/reload", t.authMiddleware(http.HandlerFunc(t.apiReloadHandler)))
 	if t.Cfg.Server.McpEnabled {
-		mcpHandler := t.authMiddleware(mcp_server.NewHandler(t))
+		// Order: authenticate, then bind the MCP session to that token (see bindMCPSession).
+		mcpHandler := t.authMiddleware(t.bindMCPSession(mcp_server.NewHandler(t)))
 		serv.McpMux.Handle("/mcp", mcpHandler)
 		serv.McpMux.Handle("/", mcpHandler)
 	} else {
@@ -57,6 +60,11 @@ func (t *Atc) initServer() error {
 		serv.McpMux.Handle("/mcp", disabledHandler)
 		serv.McpMux.Handle("/", disabledHandler)
 	}
+
+	// Origin/Host checks run before auth so CORS preflights (which carry no credentials)
+	// are answered, and so cross-site or DNS-rebinding requests never reach a handler.
+	serv.MainMiddleware = t.requestGuard(false)
+	serv.McpMiddleware = t.requestGuard(true)
 
 	t.Server = serv
 	return nil
@@ -77,6 +85,9 @@ func (t *Atc) initForwarder() error {
 	)
 	if err != nil {
 		return err
+	}
+	if t.Watcher != nil {
+		forward.SetWatcher(t.Watcher)
 	}
 	t.Forwarder = forward
 	return nil
@@ -101,6 +112,9 @@ func (t *Atc) initRedirector() error {
 	)
 	if err != nil {
 		return err
+	}
+	if t.Watcher != nil {
+		redirect.SetWatcher(t.Watcher)
 	}
 	t.Redirector = redirect
 	return nil

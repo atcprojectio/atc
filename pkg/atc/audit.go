@@ -8,21 +8,34 @@ import (
 	"strings"
 )
 
-func (t *Atc) logAudit(ctx context.Context, r *http.Request, action, service string, details map[string]any) {
-	clientIP := ""
-	if r != nil {
-		xff := r.Header.Get("X-Forwarded-For")
-		if xff != "" {
-			clientIP = strings.Split(xff, ",")[0]
-			clientIP = strings.TrimSpace(clientIP)
+func extractClientIP(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff != "" {
+		clientIP := strings.Split(xff, ",")[0]
+		clientIP = strings.TrimSpace(clientIP)
+		if clientIP != "" {
+			return clientIP
 		}
-		if clientIP == "" {
-			host, _, err := net.SplitHostPort(r.RemoteAddr)
-			if err == nil {
-				clientIP = host
-			} else {
-				clientIP = r.RemoteAddr
-			}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func (t *Atc) LogAudit(ctx context.Context, action, service string, details map[string]any) {
+	t.logAudit(ctx, nil, action, service, details)
+}
+
+func (t *Atc) logAudit(ctx context.Context, r *http.Request, action, service string, details map[string]any) {
+	clientIP := extractClientIP(r)
+	if clientIP == "" {
+		if ctxIP, ok := ctx.Value(clientIPContextKey).(string); ok {
+			clientIP = ctxIP
 		}
 	}
 

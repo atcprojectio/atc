@@ -27,13 +27,10 @@ var leaderStatusCmd = &cobra.Command{
 			return err
 		}
 
-		t, err := atc.New(cfg)
-		if err != nil {
-			return fmt.Errorf("failed to initialize ATC: %w", err)
-		}
+		t := atc.NewCLI(cfg)
 
 		ctx := context.Background()
-		fmt.Printf("LOCAL NODE: %s\n\n", cfg.Name)
+		fmt.Printf("LOCAL NODE: %s\n\n", t.Cfg.Name)
 		fmt.Printf("%-12s %-10s %-30s %-15s %s\n", "MODULE", "STATUS", "LOCK KEY", "LEADER NODE", "SESSION ID")
 
 		for _, module := range []string{"forwarder", "redirector"} {
@@ -81,10 +78,7 @@ var forceUnlockCmd = &cobra.Command{
 			return err
 		}
 
-		t, err := atc.New(cfg)
-		if err != nil {
-			return fmt.Errorf("failed to initialize ATC: %w", err)
-		}
+		t := atc.NewCLI(cfg)
 
 		ctx := context.Background()
 		err = t.ForceUnlock(ctx, forceModule)

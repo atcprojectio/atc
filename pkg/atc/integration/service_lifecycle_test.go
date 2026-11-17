@@ -21,8 +21,6 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
-
-
 func TestServiceResolverLifecycle(t *testing.T) {
 	t.Setenv("OTEL_SDK_DISABLED", "true")
 
@@ -199,5 +197,3 @@ func TestServiceResolverLifecycle(t *testing.T) {
 		})
 	})
 }
-
-

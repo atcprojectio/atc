@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,11 +23,16 @@ type Config struct {
 	HTTPListenPort    int    `yaml:"http_listen_port" mapstructure:"http_listen_port"`
 	MetricsListenPort int    `yaml:"metrics_listen_port" mapstructure:"metrics_listen_port"`
 	McpListenPort     int    `yaml:"mcp_port" mapstructure:"mcp_port"`
-	MetricsNamespace  string `yaml:"metrics_namespace" mapstructure:"metrics_namespace"`
 	LogFormat         string `yaml:"log_format" mapstructure:"log_format"`
 	LogLevel          string `yaml:"log_level" mapstructure:"log_level"`
 	UiEnabled         bool   `yaml:"ui_enabled" mapstructure:"ui_enabled"`
 	McpEnabled        bool   `yaml:"mcp_enabled" mapstructure:"mcp_enabled"`
+	// ListenAddress is the interface the HTTP API/UI and MCP listeners bind to.
+	// Empty means all interfaces. The metrics listener always binds to all interfaces.
+	ListenAddress string `yaml:"listen_address" mapstructure:"listen_address"`
+	// AllowedOrigins lists browser origins (e.g. "https://ops.example.com") allowed to call
+	// the API and MCP endpoints cross-origin. Same-origin requests are always allowed.
+	AllowedOrigins []string `yaml:"allowed_origins" mapstructure:"allowed_origins"`
 }
 
 type Server struct {
@@ -34,6 +41,17 @@ type Server struct {
 	Mux        *http.ServeMux
 	MetricsMux *http.ServeMux
 	McpMux     *http.ServeMux
+
+	// MainMiddleware and McpMiddleware, when set, wrap the main and MCP muxes respectively.
+	MainMiddleware func(http.Handler) http.Handler
+	McpMiddleware  func(http.Handler) http.Handler
+}
+
+func wrap(h http.Handler, mw func(http.Handler) http.Handler) http.Handler {
+	if mw == nil {
+		return h
+	}
+	return mw(h)
 }
 
 func New(cfg Config, logger *slog.Logger) (*Server, error) {
@@ -77,10 +95,10 @@ func New(cfg Config, logger *slog.Logger) (*Server, error) {
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	mainAddr := fmt.Sprintf(":%d", s.cfg.HTTPListenPort)
+	mainAddr := net.JoinHostPort(s.cfg.ListenAddress, strconv.Itoa(s.cfg.HTTPListenPort))
 	mainServer := &http.Server{
 		Addr:              mainAddr,
-		Handler:           otelhttp.NewHandler(s.Mux, "atc-server"),
+		Handler:           otelhttp.NewHandler(wrap(s.Mux, s.MainMiddleware), "atc-server"),
 		ReadHeaderTimeout: 3 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -100,14 +118,15 @@ func (s *Server) Run(ctx context.Context) error {
 	var mcpServer *http.Server
 	mcpEnabled := s.cfg.McpEnabled && s.cfg.McpListenPort > 0
 	if mcpEnabled {
-		mcpAddr := fmt.Sprintf(":%d", s.cfg.McpListenPort)
+		mcpAddr := net.JoinHostPort(s.cfg.ListenAddress, strconv.Itoa(s.cfg.McpListenPort))
 		mcpServer = &http.Server{
 			Addr:              mcpAddr,
-			Handler:           otelhttp.NewHandler(s.McpMux, "atc-mcp-server"),
+			Handler:           otelhttp.NewHandler(wrap(s.McpMux, s.McpMiddleware), "atc-mcp-server"),
 			ReadHeaderTimeout: 3 * time.Second,
 			ReadTimeout:       10 * time.Second,
-			WriteTimeout:      15 * time.Second,
-			IdleTimeout:       60 * time.Second,
+			// WriteTimeout is intentionally disabled (0) because MCP SSE and streamable HTTP connections are long-lived.
+			WriteTimeout: 0,
+			IdleTimeout:  60 * time.Second,
 		}
 	}
 
@@ -129,7 +148,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	if mcpEnabled {
 		go func() {
-			mcpAddr := fmt.Sprintf(":%d", s.cfg.McpListenPort)
+			mcpAddr := mcpServer.Addr
 			s.logger.InfoContext(ctx, "MCP server listening", slog.String("address", mcpAddr))
 			if err := mcpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errChan <- fmt.Errorf("mcp server error: %w", err)

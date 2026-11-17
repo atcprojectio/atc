@@ -59,12 +59,18 @@ type Forwarder struct {
 
 	mu              sync.RWMutex
 	strategiesCache map[string]cachedStrategies
+	consulClient    *api.Client
 
 	// Hysteresis scheduling state
 	schedMu       sync.Mutex
 	pendingWrites map[string]*api.ServiceResolverConfigEntry
 	writeTimers   map[string]*time.Timer
-	redirector    writeCanceler
+	// runCtx is the context of the current Run (i.e. the leadership term). Scheduled writes
+	// derive from it so they cannot outlive a step-down. nil means Run was never started.
+	runCtx context.Context
+	// inflightWrites tracks scheduled writes that have started, so Run can wait for them.
+	inflightWrites sync.WaitGroup
+	redirector     writeCanceler
 
 	reconcileCounter        metric.Int64Counter
 	reconcileDuration       metric.Float64Histogram
@@ -174,6 +180,26 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 	return f, nil
 }
 
+func (f *Forwarder) SetWatcher(w *watcher.ConsulWatcher) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.watcher = w
+}
+
+func (f *Forwarder) getConsulClient() (*api.Client, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.consulClient != nil {
+		return f.consulClient, nil
+	}
+	client, err := api.NewClient(consulCfg(f.consulAddr, f.consulToken, f.consulDC, f.consulNamespace))
+	if err != nil {
+		return nil, err
+	}
+	f.consulClient = client
+	return client, nil
+}
+
 func (f *Forwarder) SetRedirector(r writeCanceler) {
 	f.schedMu.Lock()
 	defer f.schedMu.Unlock()
@@ -185,7 +211,7 @@ func (f *Forwarder) CancelPendingWrite(ctx context.Context, svcName string) {
 	defer f.schedMu.Unlock()
 	if timer, ok := f.writeTimers[svcName]; ok {
 		f.logger.Info("Cancelled pending service-resolver write", slog.String("service", svcName), slog.String("reason", "reconciliation_canceled"))
-		
+
 		span := trace.SpanFromContext(ctx)
 		span.AddEvent("dampening_cancelled", trace.WithAttributes(
 			attribute.String("service", svcName),
@@ -201,6 +227,19 @@ func (f *Forwarder) CancelPendingWrite(ctx context.Context, svcName string) {
 	delete(f.pendingWrites, svcName)
 }
 
+func (f *Forwarder) CancelAllPendingWrites(ctx context.Context) {
+	f.schedMu.Lock()
+	defer f.schedMu.Unlock()
+	for svcName, timer := range f.writeTimers {
+		timer.Stop()
+		delete(f.writeTimers, svcName)
+		if f.dampeningCancelled != nil {
+			f.dampeningCancelled.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "shutdown")))
+		}
+	}
+	clear(f.pendingWrites)
+}
+
 func (f *Forwarder) GetCachedStrategies(svcName string) (string, string) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -210,19 +249,41 @@ func (f *Forwarder) GetCachedStrategies(svcName string) (string, string) {
 	return "", ""
 }
 
+// stopScheduledWrites ends the current leadership term: it prevents any timer that has
+// already fired from writing, cancels pending timers, and waits for writes in flight.
+// After it returns this instance will not write to Consul until Run is called again.
+func (f *Forwarder) stopScheduledWrites(ctx context.Context) {
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.schedMu.Lock()
+	f.runCtx = stopped
+	f.schedMu.Unlock()
+	f.CancelAllPendingWrites(ctx)
+	f.inflightWrites.Wait()
+}
+
 func (f *Forwarder) Run(ctx context.Context) error {
-	client, err := api.NewClient(consulCfg(f.consulAddr, f.consulToken, f.consulDC, f.consulNamespace))
+	f.schedMu.Lock()
+	f.runCtx = ctx
+	f.schedMu.Unlock()
+	defer f.stopScheduledWrites(ctx)
+
+	client, err := f.getConsulClient()
 	if err != nil {
 		return fmt.Errorf("failed to create consul client: %w", err)
 	}
 
-	events := f.watcher.Events.Subscribe()
-	defer f.watcher.Events.Unsubscribe(events)
+	f.mu.RLock()
+	w := f.watcher
+	f.mu.RUnlock()
+
+	events := w.Events.Subscribe()
+	defer w.Events.Unsubscribe(events)
 
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		return f.watcher.Run(ctx)
+		return w.Run(ctx)
 	})
 
 	g.Go(func() error {
@@ -366,6 +427,7 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 	failoverStrategies := f.failoverStrategies
 	dampeningPeriod := f.dampeningPeriod
 	minDampeningPeriod := f.minDampeningPeriod
+	dryRun := f.dryRun
 	f.mu.Unlock()
 
 	// 2. Reconcile active catalog services
@@ -475,7 +537,7 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 				dampening := getDampeningDuration(tags, dampeningPeriod, minDampeningPeriod)
 				if dampening <= 0 {
 					f.CancelPendingWrite(ctx, svcName)
-					if f.dryRun {
+					if dryRun {
 						span.AddEvent("dry_run_set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
 						f.logger.InfoContext(ctx, "[DRY RUN] Would create/update failover service-resolver immediately", slog.String("service", svcName), slog.String("failover-strategy", failoverStrategyName))
 					} else {
@@ -502,7 +564,7 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 					continue
 				}
 				if existing.Meta != nil && existing.Meta["created-by"] == "atc" {
-					if f.dryRun {
+					if dryRun {
 						span.AddEvent("dry_run_delete_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
 						f.logger.InfoContext(ctx, "[DRY RUN] Would delete service-resolver because atc.enabled tag was removed", slog.String("service", svcName))
 					} else {
@@ -633,23 +695,43 @@ func (f *Forwarder) executeScheduledWrite(svcName string) {
 	entry, ok := f.pendingWrites[svcName]
 	delete(f.pendingWrites, svcName)
 	delete(f.writeTimers, svcName)
+	parent := f.runCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	if parent.Err() != nil {
+		// The leadership term this write was scheduled in has ended; never write stale state.
+		f.schedMu.Unlock()
+		if ok {
+			f.logger.Info("Dropping scheduled failover write: no longer running as leader", slog.String("service", svcName))
+		}
+		return
+	}
+	if ok && entry != nil {
+		f.inflightWrites.Add(1)
+		defer f.inflightWrites.Done()
+	}
 	f.schedMu.Unlock()
 
 	if !ok || entry == nil {
 		return
 	}
 
-	ctx, span := tracer.Start(context.Background(), "executeScheduledWrite")
+	ctx, span := tracer.Start(parent, "executeScheduledWrite")
 	defer span.End()
 
-	client, err := api.NewClient(consulCfg(f.consulAddr, f.consulToken, f.consulDC, f.consulNamespace))
+	client, err := f.getConsulClient()
 	if err != nil {
 		f.logger.Error("Failed to create Consul client for scheduled write", slog.String("service", svcName), slog.Any("error", err))
 		span.RecordError(err)
 		return
 	}
 
-	if f.dryRun {
+	f.mu.RLock()
+	dryRun := f.dryRun
+	f.mu.RUnlock()
+
+	if dryRun {
 		span.AddEvent("dry_run_scheduled_set_config", trace.WithAttributes(attribute.String("service", svcName), attribute.String("type", "failover")))
 		f.logger.Info("[DRY RUN] Would execute scheduled failover write for service-resolver", slog.String("service", svcName))
 	} else {
@@ -745,6 +827,12 @@ func entriesEqual(a, b *api.ServiceResolverConfigEntry) bool {
 func (f *Forwarder) UpdateConfig(failoverStrategies map[string]FailoverStrategy, dampeningPeriod, minDampeningPeriod, consulNamespace, writeRateLimit string, dryRun bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.consulNamespace != consulNamespace {
+		f.consulClient = nil
+		if f.watcher != nil {
+			f.watcher.SetNamespace(consulNamespace)
+		}
+	}
 	f.failoverStrategies = failoverStrategies
 	f.dampeningPeriod = dampeningPeriod
 	f.minDampeningPeriod = minDampeningPeriod

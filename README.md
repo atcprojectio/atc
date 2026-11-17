@@ -47,7 +47,7 @@ Start the ATC background watcher daemon:
 - `--target` (strings): Modules to run (`consul`, `forwarder`, `redirector`, `server`, `all`) (default: `all`).
 - `--dry-run` (bool): Run logic and log decisions without modifying Consul.
 
-For the full CLI options list and environment variables, refer to the [Configuration Guide](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/docs/index.html#configuration).
+For the full CLI options list and environment variables, refer to the [Configuration Guide](https://atc-project.io/#installation).
 
 ---
 
@@ -72,7 +72,7 @@ For the full CLI options list and environment variables, refer to the [Configura
 
 ## Model Context Protocol (MCP)
 
-ATC exposes a Model Context Protocol (MCP) server over SSE on a dedicated port (`:8092`). For instructions on how to connect your AI agents or configure Claude Desktop, see the [Claude Desktop MCP Integration Guide](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/docs/index.html#mcp-server) on our documentation site.
+ATC exposes a Model Context Protocol (MCP) server over SSE on a dedicated port (`:8092`). For instructions on how to connect your AI agents or configure Claude Desktop, see the [Claude Desktop MCP Integration Guide](https://atc-project.io/#mcp-server) on our documentation site.
 
 ---
 
@@ -104,6 +104,6 @@ make test-frontend
 ## Documentation & Resources
 
 For detailed technical specifications, architecture records, and integrations, see:
-- **Reference Site & API Docs:** [docs/index.html](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/docs/index.html)
-- **Architecture Decision Records (ADRs):** [ADR.MD](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/ADR.MD)
-- **Project Roadmap & MoSCoW List:** [TODO.md](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/TODO.md)
+- **Reference Site & API Docs:** [docs/index.html](https://atc-project.io/)
+- **Architecture Decision Records (ADRs):** [ADR.MD](ADR.MD)
+- **Project Roadmap & MoSCoW List:** [TODO.md](TODO.md)

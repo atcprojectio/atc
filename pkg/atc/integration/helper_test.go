@@ -19,8 +19,8 @@ type silentTestingTB struct {
 	testing.TB
 }
 
-func (s silentTestingTB) Log(args ...any)                  {}
-func (s silentTestingTB) Logf(format string, args ...any)  {}
+func (s silentTestingTB) Log(args ...any)                 {}
+func (s silentTestingTB) Logf(format string, args ...any) {}
 
 func getFreePort(t testing.TB) int {
 	l, err := net.Listen("tcp", "127.0.0.1:0")

@@ -23,3 +23,10 @@ linters:
       - linters:
           - govet
         text: "reflect.Ptr should be inlined"
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    paths:
+      - ^frontend/.*

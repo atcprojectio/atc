@@ -3,6 +3,7 @@ package atc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/atcprojectio/atc/pkg/atc/redirector"
 	atc_server "github.com/atcprojectio/atc/pkg/atc/server"
 	"github.com/atcprojectio/atc/pkg/atc/telemetry"
+	"github.com/atcprojectio/atc/pkg/atc/watcher"
 	"github.com/hashicorp/consul/api"
 	"github.com/spf13/viper"
 	"go.opentelemetry.io/otel"
@@ -43,10 +45,15 @@ type AuthConfig struct {
 	Enabled               bool     `yaml:"enabled" json:"enabled" mapstructure:"enabled"`
 	StaticKeys            []string `yaml:"static_keys" json:"static_keys" mapstructure:"static_keys"`
 	ConsulTokenDelegation bool     `yaml:"consul_token_delegation" json:"consul_token_delegation" mapstructure:"consul_token_delegation"`
+	// AllowUnauthenticated explicitly permits running with auth disabled while the API/MCP
+	// listeners are reachable from other hosts. Without it, auth must be enabled or
+	// server.listen_address must be a loopback address.
+	AllowUnauthenticated bool `yaml:"allow_unauthenticated" json:"allow_unauthenticated" mapstructure:"allow_unauthenticated"`
 }
 
 type Config struct {
 	Name               string            `yaml:"service" mapstructure:"service"`
+	NodeName           string            `yaml:"node_name" json:"node_name,omitempty" mapstructure:"node_name"`
 	Server             atc_server.Config `yaml:"server" mapstructure:"server"`
 	Target             []string          `yaml:"target" mapstructure:"target"`
 	ConsulAddr         string            `yaml:"consul_addr" mapstructure:"consul_addr"`
@@ -64,9 +71,16 @@ type Config struct {
 
 type contextKey string
 
-const tokenContextKey contextKey = "atc-token"
+const (
+	tokenContextKey    contextKey = "atc-token"
+	clientIPContextKey contextKey = "atc-client-ip"
+)
 
 var coreTracer = otel.Tracer("atc/core")
+
+// leaderReelectBackoff is how long a node waits before re-entering the election after
+// voluntarily releasing leadership because its workload exited. Var for tests.
+var leaderReelectBackoff = 5 * time.Second
 
 type Atc struct {
 	Cfg            Config
@@ -77,27 +91,73 @@ type Atc struct {
 	enabledModules map[string]bool
 	otelShutdown   func(context.Context) error
 
+	Watcher    *watcher.ConsulWatcher
 	Forwarder  *forwarder.Forwarder
 	Redirector *redirector.Redirector
+
+	consulClientsMu sync.RWMutex
+	consulClients   map[string]*api.Client
+
+	requestHTTPClientOnce sync.Once
+	requestHTTPClient     *http.Client
+	requestHTTPClientErr  error
+
+	tokenCacheMu sync.RWMutex
+	tokenCache   map[string]time.Time
+
+	shutdownRequested atomic.Bool
+
+	overridesCountMu sync.Mutex
+	overridesCount   int64
+	overridesCountAt time.Time
+
+	consulStatusMu sync.Mutex
+	consulStatus   ConsulStatus
 
 	isLeader         atomic.Bool
 	forwarderLeader  atomic.Bool
 	redirectorLeader atomic.Bool
 
 	leaderTransitionsCounter metric.Int64Counter
-	overridesPurgedCounter    metric.Int64Counter
+	overridesPurgedCounter   metric.Int64Counter
 	configReloadsCounter     metric.Int64Counter
 	configLastReloadTime     int64
 }
 
-func New(cfg Config) (*Atc, error) {
-	if cfg.Name == "" {
-		if hn, err := os.Hostname(); err == nil && hn != "" {
-			cfg.Name = "atc-node-" + hn
-		} else {
-			cfg.Name = "atc-node"
-		}
+func resolveNodeName(cfg Config) string {
+	if cfg.NodeName != "" {
+		return cfg.NodeName
 	}
+	hn, _ := os.Hostname()
+	if cfg.Name == "" {
+		if hn != "" {
+			return "atc-node-" + hn
+		}
+		return "atc-node"
+	}
+	if cfg.Name == "atc-service" && hn != "" {
+		return cfg.Name + "-" + hn
+	}
+	return cfg.Name
+}
+
+// NewCLI initializes a lightweight Atc instance for one-shot CLI operations (such as leader status or force-unlock)
+// without starting OpenTelemetry exporters, HTTP servers, or catalog watchers.
+func NewCLI(cfg Config) *Atc {
+	cfg.Name = resolveNodeName(cfg)
+	logger := initLogger(cfg.Server.LogFormat, cfg.Server.LogLevel)
+	return &Atc{
+		Cfg:            cfg,
+		logger:         logger,
+		coreLogger:     logger.With(slog.String("module", "core")),
+		enabledModules: resolveModules(cfg.Target),
+		consulClients:  make(map[string]*api.Client),
+		tokenCache:     make(map[string]time.Time),
+	}
+}
+
+func New(cfg Config) (*Atc, error) {
+	cfg.Name = resolveNodeName(cfg)
 
 	logger := initLogger(cfg.Server.LogFormat, cfg.Server.LogLevel)
 
@@ -126,10 +186,22 @@ func New(cfg Config) (*Atc, error) {
 		coreLogger:               logger.With(slog.String("module", "core")),
 		enabledModules:           resolveModules(cfg.Target),
 		otelShutdown:             otelShutdown,
+		consulClients:            make(map[string]*api.Client),
+		tokenCache:               make(map[string]time.Time),
 		leaderTransitionsCounter: leaderTransitionsCounter,
-		overridesPurgedCounter:    overridesPurgedCounter,
+		overridesPurgedCounter:   overridesPurgedCounter,
 		configReloadsCounter:     configReloadsCounter,
 		configLastReloadTime:     time.Now().Unix(),
+	}
+
+	if atc.enabledModules[Forwarder] || atc.enabledModules[Redirector] {
+		atc.Watcher = watcher.New(
+			logger.With(slog.String("module", "watcher")),
+			cfg.ConsulAddr,
+			cfg.ConsulToken,
+			cfg.ConsulDC,
+			cfg.ConsulNamespace,
+		)
 	}
 
 	_, err = meter.Int64ObservableGauge(
@@ -168,9 +240,8 @@ func New(cfg Config) (*Atc, error) {
 		"atc_overrides_active",
 		metric.WithDescription("Number of active manual overrides in Consul"),
 		metric.WithInt64Callback(func(ctx context.Context, obsrv metric.Int64Observer) error {
-			overrides, err := atc.ListActiveOverrides(ctx)
-			if err == nil {
-				obsrv.Observe(int64(len(overrides)))
+			if n, ok := atc.activeOverridesCount(ctx); ok {
+				obsrv.Observe(n)
 			}
 			return nil
 		}),
@@ -253,10 +324,9 @@ func (t *Atc) Run(ctx context.Context) error {
 		}()
 	}
 
-	var shutdownRequested atomic.Bool
-
 	if t.Server != nil {
-		t.Server.Mux.HandleFunc("/health", t.healthHandler(&shutdownRequested))
+		t.Server.Mux.HandleFunc("/health", t.healthHandler)
+		t.Server.Mux.HandleFunc("/ready", t.readyHandler)
 		t.Server.Mux.Handle("GET /services", t.authMiddleware(http.HandlerFunc(t.servicesHandler)))
 	}
 
@@ -292,7 +362,7 @@ func (t *Atc) Run(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		shutdownRequested.Store(true)
+		t.shutdownRequested.Store(true)
 	}()
 
 	err := g.Wait()
@@ -318,6 +388,27 @@ func (t *Atc) IsLeader() bool {
 
 	return (t.Forwarder == nil || t.forwarderLeader.Load()) &&
 		(t.Redirector == nil || t.redirectorLeader.Load())
+}
+
+// isSweepOwner reports whether this node should purge expired overrides. With target-scoped
+// locks the forwarder and redirector leaders can live on different nodes, so IsLeader()
+// (which requires both) may be false everywhere. Exactly one lock owner sweeps instead:
+// the forwarder leader if a forwarder runs, else the redirector leader, else the core leader.
+func (t *Atc) isSweepOwner() bool {
+	t.cfgMu.RLock()
+	haEnabled := t.Cfg.HA.Enabled
+	t.cfgMu.RUnlock()
+	if !haEnabled {
+		return true
+	}
+	switch {
+	case t.Forwarder != nil:
+		return t.forwarderLeader.Load()
+	case t.Redirector != nil:
+		return t.redirectorLeader.Load()
+	default:
+		return t.isLeader.Load()
+	}
 }
 
 func (t *Atc) runLeaderElection(ctx context.Context) error {
@@ -443,77 +534,210 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 			attribute.String("lock_key", lockKey),
 		))
 
+		// workloadDone is closed when the workload returns. It stays nil (never fires)
+		// when there is no workload to run.
+		var workloadDone chan struct{}
 		if runFunc != nil {
-			var wg sync.WaitGroup
-			wg.Add(1)
+			workloadDone = make(chan struct{})
 			go func() {
-				defer wg.Done()
+				defer close(workloadDone)
 				if err := runFunc(leaderCtx); err != nil {
 					t.coreLogger.ErrorContext(leaderCtx, "workload run failed", slog.Any("error", err), slog.String("lock_key", lockKey))
 					activeSpan.RecordError(err)
 				}
 			}()
+		}
 
-			select {
-			case <-ctx.Done():
-				activeSpan.End()
-				cancelLeader()
-				t.coreLogger.InfoContext(ctx, "Releasing leadership lock in Consul on graceful shutdown...", slog.String("lock_key", lockKey))
-				_ = lock.Unlock()
-				leaderFlag.Store(false)
-				wg.Wait()
-				return nil
-			case <-lostCh:
-				t.coreLogger.WarnContext(ctx, "Leadership lock lost. Stopping workload and reverting to standby...", slog.String("lock_key", lockKey))
-				activeSpan.AddEvent("leadership_lost")
-				activeSpan.End()
-				span.AddEvent("leadership_lost")
-				if t.leaderTransitionsCounter != nil {
-					t.leaderTransitionsCounter.Add(ctx, 1, metric.WithAttributes(
-						attribute.String("module", moduleName),
-						attribute.String("transition", "lost"),
-					))
-				}
-				cancelLeader()
-				leaderFlag.Store(false)
-				wg.Wait()
+		stepDown := func(transition string) {
+			activeSpan.AddEvent("leadership_" + transition)
+			activeSpan.End()
+			span.AddEvent("leadership_" + transition)
+			if t.leaderTransitionsCounter != nil {
+				t.leaderTransitionsCounter.Add(ctx, 1, metric.WithAttributes(
+					attribute.String("module", moduleName),
+					attribute.String("transition", transition),
+				))
 			}
-		} else {
+			// Flip the leader flag before cancelling so in-flight writes observe the step-down.
+			leaderFlag.Store(false)
+			cancelLeader()
+			if workloadDone != nil {
+				<-workloadDone
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			t.coreLogger.InfoContext(ctx, "Releasing leadership lock in Consul on graceful shutdown...", slog.String("lock_key", lockKey))
+			leaderFlag.Store(false)
+			cancelLeader()
+			if workloadDone != nil {
+				<-workloadDone
+			}
+			activeSpan.End()
+			_ = lock.Unlock()
+			return nil
+		case <-lostCh:
+			t.coreLogger.WarnContext(ctx, "Leadership lock lost. Stopping workload and reverting to standby...", slog.String("lock_key", lockKey))
+			stepDown("lost")
+		case <-workloadDone:
+			// The workload exited while we still hold the lock. Holding on would leave the
+			// cluster with a leader that does nothing, so release the lock and let another
+			// node (or this one, after a backoff) take over.
+			t.coreLogger.WarnContext(ctx, "Workload exited while holding leadership. Releasing lock and re-entering election...", slog.String("lock_key", lockKey))
+			stepDown("released")
+			if err := lock.Unlock(); err != nil {
+				t.coreLogger.ErrorContext(ctx, "Failed to release leadership lock after workload exit", slog.Any("error", err), slog.String("lock_key", lockKey))
+			}
 			select {
 			case <-ctx.Done():
-				activeSpan.End()
-				cancelLeader()
-				t.coreLogger.InfoContext(ctx, "Releasing leadership lock in Consul on graceful shutdown...", slog.String("lock_key", lockKey))
-				_ = lock.Unlock()
-				leaderFlag.Store(false)
 				return nil
-			case <-lostCh:
-				t.coreLogger.WarnContext(ctx, "Leadership lock lost. Reverting to standby...", slog.String("lock_key", lockKey))
-				activeSpan.AddEvent("leadership_lost")
-				activeSpan.End()
-				span.AddEvent("leadership_lost")
-				if t.leaderTransitionsCounter != nil {
-					t.leaderTransitionsCounter.Add(ctx, 1, metric.WithAttributes(
-						attribute.String("module", moduleName),
-						attribute.String("transition", "lost"),
-					))
-				}
-				cancelLeader()
-				leaderFlag.Store(false)
+			case <-time.After(leaderReelectBackoff):
 			}
 		}
 	}
 }
 
-func (t *Atc) healthHandler(shutdownRequested *atomic.Bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if shutdownRequested.Load() {
-			t.coreLogger.Debug("application is stopping")
-			http.Error(w, "Application is stopping", http.StatusServiceUnavailable)
-			return
-		}
-		fmt.Fprintf(w, "OK")
+// healthHandler is the liveness probe. It deliberately does not depend on Consul: a Consul
+// outage must not make the orchestrator restart every ATC replica.
+func (t *Atc) healthHandler(w http.ResponseWriter, _ *http.Request) {
+	if t.shutdownRequested.Load() {
+		t.coreLogger.Debug("application is stopping")
+		http.Error(w, "Application is stopping", http.StatusServiceUnavailable)
+		return
 	}
+	fmt.Fprintf(w, "OK")
+}
+
+// readyHandler is the readiness probe. It only fails while shutting down. It deliberately
+// does NOT depend on Consul: Consul is shared by all replicas, so failing readiness on a
+// Consul outage would pull every replica out of the Service at once and leave operators
+// with a bare load-balancer error instead of a dashboard that explains the outage.
+// Consul health is reported by GET /api/status and shown in the dashboard instead.
+func (t *Atc) readyHandler(w http.ResponseWriter, r *http.Request) {
+	if err := t.CheckReadiness(r.Context()); err != nil {
+		http.Error(w, "Not ready: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	fmt.Fprintf(w, "OK")
+}
+
+// CheckReadiness reports why this instance cannot serve requests, or nil if it can.
+func (t *Atc) CheckReadiness(_ context.Context) error {
+	if t.shutdownRequested.Load() {
+		return errors.New("application is stopping")
+	}
+	return nil
+}
+
+// overridesGaugeTTL bounds how often the atc_overrides_active gauge queries Consul. Without it
+// every metrics scrape (and OTLP export) on every replica listed all service-resolvers.
+var overridesGaugeTTL = 30 * time.Second
+
+// activeOverridesCount returns the number of active manual overrides, cached for
+// overridesGaugeTTL. ok is false when no value is available yet and Consul cannot be queried.
+func (t *Atc) activeOverridesCount(ctx context.Context) (n int64, ok bool) {
+	t.overridesCountMu.Lock()
+	defer t.overridesCountMu.Unlock()
+	if !t.overridesCountAt.IsZero() && time.Since(t.overridesCountAt) < overridesGaugeTTL {
+		return t.overridesCount, true
+	}
+	overrides, err := t.ListActiveOverrides(ctx)
+	if err != nil {
+		// Keep reporting the last known value rather than dropping the series.
+		return t.overridesCount, !t.overridesCountAt.IsZero()
+	}
+	t.overridesCount = int64(len(overrides))
+	t.overridesCountAt = time.Now()
+	return t.overridesCount, true
+}
+
+// consulStatusCacheTTL bounds how often status checks hit Consul. Var for tests.
+var consulStatusCacheTTL = 5 * time.Second
+
+// ConsulStatus is what the dashboard shows about ATC's connection to Consul. It is served
+// without authentication, so it carries fixed, human-readable messages only; raw errors
+// (which may contain internal addresses) are logged instead.
+type ConsulStatus struct {
+	Reachable   bool       `json:"reachable"`
+	Problem     string     `json:"problem,omitempty"` // "unreachable" or "no_leader"
+	Message     string     `json:"message"`
+	LastContact *time.Time `json:"last_contact,omitempty"`
+	CheckedAt   time.Time  `json:"checked_at"`
+}
+
+const (
+	consulProblemUnreachable = "unreachable"
+	consulProblemNoLeader    = "no_leader"
+)
+
+// GetConsulStatus checks Consul with ATC's own token, cached for consulStatusCacheTTL.
+// Changes in reachability are logged once, with the underlying error.
+func (t *Atc) GetConsulStatus(ctx context.Context) ConsulStatus {
+	t.consulStatusMu.Lock()
+	defer t.consulStatusMu.Unlock()
+	if !t.consulStatus.CheckedAt.IsZero() && time.Since(t.consulStatus.CheckedAt) < consulStatusCacheTTL {
+		return t.consulStatus
+	}
+
+	prev := t.consulStatus
+	st := ConsulStatus{CheckedAt: time.Now(), LastContact: prev.LastContact}
+	err := t.probeConsul(ctx)
+	switch {
+	case err == nil:
+		now := st.CheckedAt
+		st.Reachable, st.LastContact, st.Message = true, &now, "Connected to Consul."
+	case errors.Is(err, errConsulNoLeader):
+		st.Problem, st.Message = consulProblemNoLeader, "Consul is reachable but has no cluster leader, so it cannot serve or store routing configuration."
+	default:
+		st.Problem, st.Message = consulProblemUnreachable, "ATC cannot reach Consul."
+	}
+
+	firstCheck := prev.CheckedAt.IsZero()
+	if st.Reachable && !firstCheck && !prev.Reachable {
+		t.coreLogger.InfoContext(ctx, "Consul connection restored")
+	} else if !st.Reachable && (firstCheck || prev.Reachable || prev.Problem != st.Problem) {
+		t.coreLogger.WarnContext(ctx, "Consul is not usable", slog.String("problem", st.Problem), slog.Any("error", err))
+	}
+
+	t.consulStatus = st
+	return st
+}
+
+var errConsulNoLeader = errors.New("consul cluster has no leader")
+
+func (t *Atc) apiStatusHandler(w http.ResponseWriter, r *http.Request) {
+	st := t.GetConsulStatus(r.Context())
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{"consul": st})
+}
+
+// ConsulStatusMessage lets the MCP check_readiness tool describe Consul connectivity.
+func (t *Atc) ConsulStatusMessage(ctx context.Context) (bool, string) {
+	st := t.GetConsulStatus(ctx)
+	return st.Reachable, st.Message
+}
+
+func (t *Atc) probeConsul(ctx context.Context) error {
+	t.cfgMu.RLock()
+	addr, token, dc, ns := t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC, t.Cfg.ConsulNamespace
+	t.cfgMu.RUnlock()
+
+	client, err := t.getOrCreateConsulClient(addr, token, dc, ns)
+	if err != nil {
+		return fmt.Errorf("consul client: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	leader, err := client.Status().LeaderWithQueryOptions((&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return fmt.Errorf("consul unreachable: %w", err)
+	}
+	if leader == "" {
+		return errConsulNoLeader
+	}
+	return nil
 }
 
 func (t *Atc) GetEnabledModulesTable() string {
@@ -976,6 +1200,47 @@ func getStrategyFromTags(tags []string, prefix string) string {
 	return ""
 }
 
+func (t *Atc) getOrCreateConsulClient(addr, token, dc, ns string) (*api.Client, error) {
+	key := addr + "|" + token + "|" + dc + "|" + ns
+
+	t.consulClientsMu.RLock()
+	if t.consulClients != nil {
+		if client, ok := t.consulClients[key]; ok {
+			t.consulClientsMu.RUnlock()
+			return client, nil
+		}
+	}
+	t.consulClientsMu.RUnlock()
+
+	client, err := api.NewClient(consulCfg(addr, token, dc, ns))
+	if err != nil {
+		return nil, err
+	}
+
+	t.consulClientsMu.Lock()
+	if t.consulClients == nil {
+		t.consulClients = make(map[string]*api.Client)
+	}
+	t.consulClients[key] = client
+	t.consulClientsMu.Unlock()
+	return client, nil
+}
+
+// newRequestConsulClient builds a Consul client for a per-request token. Clients share one
+// pooled HTTP client so creating them is cheap and does not leak connections or goroutines.
+func (t *Atc) newRequestConsulClient(addr, token, dc, ns string) (*api.Client, error) {
+	t.requestHTTPClientOnce.Do(func() {
+		base := api.DefaultConfig()
+		t.requestHTTPClient, t.requestHTTPClientErr = api.NewHttpClient(base.Transport, base.TLSConfig)
+	})
+	if t.requestHTTPClientErr != nil {
+		return nil, t.requestHTTPClientErr
+	}
+	cfg := consulCfg(addr, token, dc, ns)
+	cfg.HttpClient = t.requestHTTPClient
+	return api.NewClient(cfg)
+}
+
 func (t *Atc) getConsulClient(ctx context.Context) (*api.Client, error) {
 	t.cfgMu.RLock()
 	addr := t.Cfg.ConsulAddr
@@ -985,21 +1250,17 @@ func (t *Atc) getConsulClient(ctx context.Context) (*api.Client, error) {
 	t.cfgMu.RUnlock()
 
 	if ctxToken, ok := ctx.Value(tokenContextKey).(string); ok && ctxToken != "" {
-		isStaticKey := false
 		t.cfgMu.RLock()
-		for _, sk := range t.Cfg.Auth.StaticKeys {
-			if sk == ctxToken {
-				isStaticKey = true
-				break
-			}
-		}
+		static := isStaticKey(t.Cfg.Auth.StaticKeys, ctxToken)
 		t.cfgMu.RUnlock()
-		if !isStaticKey {
-			token = ctxToken
+		if !static {
+			// Delegated Consul token: act as the caller so Consul's ACLs decide what they may
+			// read or write. Not cached, so the client cache stays bounded by configuration.
+			return t.newRequestConsulClient(addr, ctxToken, dc, ns)
 		}
 	}
 
-	return api.NewClient(consulCfg(addr, token, dc, ns))
+	return t.getOrCreateConsulClient(addr, token, dc, ns)
 }
 
 func (t *Atc) GetPredefinedStrategies(ctx context.Context) (string, error) {
@@ -1065,9 +1326,15 @@ func (t *Atc) GetFederationStatus(ctx context.Context) (map[string]string, error
 }
 
 func (t *Atc) ReloadConfig(cfg Config) {
+	cfg.Name = resolveNodeName(cfg)
+
 	t.cfgMu.Lock()
 	t.Cfg = cfg
 	t.cfgMu.Unlock()
+
+	if t.Watcher != nil {
+		t.Watcher.SetNamespace(cfg.ConsulNamespace)
+	}
 
 	ctx, span := coreTracer.Start(context.Background(), "ReloadConfig")
 	defer span.End()
@@ -1092,6 +1359,8 @@ func (t *Atc) ReloadConfig(cfg Config) {
 		)
 	}
 	if t.Redirector != nil {
+		_, hasDefaultFailover := cfg.Strategies.Failover["default"]
+		t.Redirector.SetHasDefaultFailover(hasDefaultFailover)
 		t.Redirector.UpdateConfig(
 			cfg.Strategies.Redirect,
 			cfg.DampeningPeriod,
@@ -1124,6 +1393,15 @@ func (t *Atc) TriggerConfigReload() error {
 			))
 		}
 		return err
+	}
+
+	if errs := ValidateConfig(newCfg); len(errs) > 0 {
+		if t.configReloadsCounter != nil {
+			t.configReloadsCounter.Add(context.Background(), 1, metric.WithAttributes(
+				attribute.String("status", "failure"),
+			))
+		}
+		return fmt.Errorf("invalid configuration on reload: %v", errs[0])
 	}
 
 	t.ReloadConfig(newCfg)
@@ -1191,7 +1469,7 @@ func (t *Atc) sweepExpiredOverrides(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !t.IsLeader() {
+			if !t.isSweepOwner() {
 				continue
 			}
 			overrides, err := t.ListActiveOverrides(ctx)

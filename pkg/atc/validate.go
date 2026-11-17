@@ -70,5 +70,31 @@ func ValidateConfig(cfg Config) []error {
 		}
 	}
 
+	// Validate Authentication Configuration
+	if cfg.Auth.Enabled {
+		if len(cfg.Auth.StaticKeys) == 0 && !cfg.Auth.ConsulTokenDelegation {
+			errs = append(errs, fmt.Errorf("auth is enabled, but neither static_keys nor consul_token_delegation is configured"))
+		}
+		if slices.Contains(cfg.Auth.StaticKeys, "atc-super-secret-token") {
+			errs = append(errs, fmt.Errorf("auth.static_keys contains insecure placeholder token %q", "atc-super-secret-token"))
+		}
+	}
+
+	// Refuse to expose unauthenticated write endpoints (overrides, purge, reload, MCP tools)
+	// to the network unless the operator explicitly opts in.
+	if resolveModules(cfg.Target)[Server] && !cfg.Auth.Enabled && !cfg.Auth.AllowUnauthenticated &&
+		!IsLoopbackListenAddress(cfg.Server.ListenAddress) {
+		errs = append(errs, fmt.Errorf("auth is disabled but the API/MCP listeners bind to %q, exposing write endpoints without authentication; "+
+			"enable auth, set server.listen_address to a loopback address (e.g. 127.0.0.1), "+
+			"or set auth.allow_unauthenticated: true (--allow-unauthenticated) to accept the risk", listenAddrForMsg(cfg.Server.ListenAddress)))
+	}
+
 	return errs
+}
+
+func listenAddrForMsg(addr string) string {
+	if addr == "" {
+		return "all interfaces"
+	}
+	return addr
 }

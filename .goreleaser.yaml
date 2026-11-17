@@ -23,6 +23,8 @@ homebrew_casks:
       - darwin
     binaries:
       - "{{.ProjectName}}"
+    homepage: "https://github.com/atcprojectio/atc"
+    description: "Active Traffic Control (ATC) automatic Consul traffic control and failover agent."
     repository:
       owner: atcprojectio
       name: homebrew-tap
@@ -77,16 +79,18 @@ dockers_v2:
       - "v{{ .Major }}"
       - "{{ if not .IsNightly }}latest{{ end }}"
     labels:
-      "org.opencontainers.image.description": "Foo bar"
+      "org.opencontainers.image.description": "Active Traffic Control (ATC) automatic Consul traffic control and failover agent."
       "org.opencontainers.image.name": "{{.ProjectName}}"
       "org.opencontainers.image.source": "{{.GitURL}}"
       "org.opencontainers.image.created": "{{.Date}}"
-      "org.opencontainers.image.title=": "{{.ProjectName}}"
+      "org.opencontainers.image.title": "{{.ProjectName}}"
       "org.opencontainers.image.revision": "{{.ShortCommit}}"
       "org.opencontainers.image.version": "{{.Version}}"
 nfpms:
   - id: linux
     maintainer: 'bram vogelaar <bram@attachmentgenie.com>'
+    homepage: "https://github.com/atcprojectio/atc"
+    description: "Active Traffic Control (ATC) automatic Consul traffic control and failover agent."
     package_name: "{{.ProjectName}}"
     ids:
       - linux

@@ -12,6 +12,7 @@
   --color-secondary: #06b6d4;
   --color-success: #10b981;
   --color-error: #ef4444;
+  --color-warning: #f59e0b;
   --grad-logo: linear-gradient(135deg, #a855f7, #6366f1);
   --grad-card-hover: linear-gradient(135deg, rgba(139, 92, 246, 0.08), rgba(6, 182, 212, 0.08));
 }
@@ -320,6 +321,54 @@ body {
 }
 
 /* Error Banner */
+.outage-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 20px 24px;
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.08);
+  margin-bottom: 30px;
+}
+
+.outage-icon {
+  font-size: 2rem;
+  line-height: 1;
+}
+
+.outage-message {
+  flex: 1;
+}
+
+.outage-message h4 {
+  margin: 0 0 6px;
+  font-size: 1.1rem;
+  color: var(--color-warning);
+}
+
+.outage-message p {
+  margin: 0 0 6px;
+  line-height: 1.5;
+}
+
+.outage-detail {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 640px) {
+  .outage-banner {
+    flex-direction: column;
+    gap: 12px;
+  }
+}
+
+button:disabled,
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .error-banner {
   display: flex;
   align-items: center;

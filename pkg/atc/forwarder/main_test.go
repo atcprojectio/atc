@@ -863,4 +863,3 @@ func TestForwarderReconcile_DryRun(t *testing.T) {
 		t.Errorf("Expected dryRun = true to bypass all writes to Consul, but write/delete was attempted")
 	}
 }
-

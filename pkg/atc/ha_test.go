@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -387,7 +388,9 @@ func TestLeaderElection_TeardownOnLockLoss(t *testing.T) {
 	}
 
 	cancel()
-	<-electionErrChan
+	if err := <-electionErrChan; err != nil {
+		t.Errorf("unexpected leader election error: %v", err)
+	}
 }
 
 func TestLeaderElectionGracefulShutdown(t *testing.T) {
@@ -494,7 +497,9 @@ func TestLeaderElectionGracefulShutdown(t *testing.T) {
 
 	// Trigger graceful shutdown
 	cancel()
-	<-electionErrChan
+	if err := <-electionErrChan; err != nil {
+		t.Errorf("unexpected leader election error: %v", err)
+	}
 
 	mu.Lock()
 	lr := lockReleased
@@ -505,3 +510,104 @@ func TestLeaderElectionGracefulShutdown(t *testing.T) {
 	}
 }
 
+// TestLeaderElection_ReleasesLockWhenWorkloadExits verifies that a leader whose workload
+// returns (e.g. the watcher failed) gives up the lock and re-enters the election instead of
+// holding leadership while doing nothing.
+func TestLeaderElection_ReleasesLockWhenWorkloadExits(t *testing.T) {
+	origBackoff := leaderReelectBackoff
+	leaderReelectBackoff = 10 * time.Millisecond
+	defer func() { leaderReelectBackoff = origBackoff }()
+
+	var mu sync.Mutex
+	acquires, releases := 0, 0
+	lockSession := ""
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch {
+		case r.Method == "PUT" && r.URL.Path == "/v1/session/create":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ID":"mock-session-id"}`))
+		case r.Method == "PUT" && r.URL.Path == "/v1/kv/atc/leader/lock" && r.URL.Query().Get("acquire") != "":
+			acquires++
+			lockSession = "mock-session-id"
+			_, _ = w.Write([]byte("true"))
+		case r.Method == "PUT" && r.URL.Path == "/v1/kv/atc/leader/lock" && r.URL.Query().Get("release") != "":
+			releases++
+			lockSession = ""
+			_, _ = w.Write([]byte("true"))
+		case r.Method == "GET" && r.URL.Path == "/v1/kv/atc/leader/lock":
+			if lockSession == "" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"Key":"atc/leader/lock","Value":"dGVzdC1ub2Rl","Session":"mock-session-id","CreateIndex":100,"ModifyIndex":100}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	atcInstance := &Atc{
+		Cfg: Config{
+			Name:       "test-node",
+			ConsulAddr: server.Listener.Addr().String(),
+			HA:         HaConfig{Enabled: true, LockKey: "atc/leader/lock", SessionTTL: "15s"},
+		},
+		logger:     logger,
+		coreLogger: logger,
+	}
+
+	var runs sync.WaitGroup
+	runs.Add(2)
+	var runCount int
+	var runMu sync.Mutex
+	runFunc := func(ctx context.Context) error {
+		runMu.Lock()
+		runCount++
+		n := runCount
+		runMu.Unlock()
+		if n <= 2 {
+			runs.Done()
+		}
+		if n == 1 {
+			return fmt.Errorf("simulated watcher failure")
+		}
+		<-ctx.Done()
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var leaderFlag atomic.Bool
+	done := make(chan error, 1)
+	go func() {
+		done <- atcInstance.runModuleLeaderElection(ctx, "", runFunc, &leaderFlag)
+	}()
+
+	waitCh := make(chan struct{})
+	go func() { runs.Wait(); close(waitCh) }()
+	select {
+	case <-waitCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("workload was not restarted after it exited; leader kept the lock without running")
+	}
+
+	mu.Lock()
+	a, r := acquires, releases
+	mu.Unlock()
+	if a < 2 {
+		t.Errorf("expected lock to be re-acquired after workload exit, got %d acquires", a)
+	}
+	if r < 1 {
+		t.Errorf("expected lock to be released after workload exit, got %d releases", r)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("unexpected election error: %v", err)
+	}
+}

@@ -25,6 +25,31 @@ type Service interface {
 	TriggerConfigReload() error
 }
 
+// ReadinessChecker is optionally implemented by a Service to report readiness.
+type ReadinessChecker interface {
+	CheckReadiness(ctx context.Context) error
+}
+
+// ConsulStatusReporter is optionally implemented by a Service to report Consul connectivity.
+type ConsulStatusReporter interface {
+	ConsulStatusMessage(ctx context.Context) (reachable bool, message string)
+}
+
+type Auditor interface {
+	LogAudit(ctx context.Context, action, service string, details map[string]any)
+}
+
+func auditMCP(ctx context.Context, svc Service, action, service string, details map[string]any) {
+	if auditor, ok := svc.(Auditor); ok {
+		if details == nil {
+			details = map[string]any{"source": "mcp"}
+		} else {
+			details["source"] = "mcp"
+		}
+		auditor.LogAudit(ctx, action, service, details)
+	}
+}
+
 func NewHandler(svc Service) http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "atc",
@@ -36,10 +61,21 @@ func NewHandler(svc Service) http.Handler {
 		Name:        "check_readiness",
 		Description: "Checks the readiness state of the ATC service (corresponds to /ready endpoint)",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		text := "OK"
+		if rc, ok := svc.(ReadinessChecker); ok {
+			if err := rc.CheckReadiness(ctx); err != nil {
+				text = "NOT READY: " + err.Error()
+			}
+		}
+		if cs, ok := svc.(ConsulStatusReporter); ok && text == "OK" {
+			if reachable, msg := cs.ConsulStatusMessage(ctx); !reachable {
+				text = "DEGRADED: " + msg + " Routing cannot be read or changed until Consul is back."
+			}
+		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
-					Text: "OK",
+					Text: text,
 				},
 			},
 		}, nil, nil
@@ -149,6 +185,7 @@ func NewHandler(svc Service) http.Handler {
 		if err != nil {
 			return nil, nil, err
 		}
+		auditMCP(ctx, svc, "purge_resolver", input.Name, nil)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
@@ -172,6 +209,11 @@ func NewHandler(svc Service) http.Handler {
 		if err != nil {
 			return nil, nil, err
 		}
+		auditMCP(ctx, svc, "create_override", input.Service, map[string]any{
+			"type":      "failover",
+			"target_dc": input.TargetDc,
+			"namespace": input.Namespace,
+		})
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
@@ -195,6 +237,11 @@ func NewHandler(svc Service) http.Handler {
 		if err != nil {
 			return nil, nil, err
 		}
+		auditMCP(ctx, svc, "create_override", input.Service, map[string]any{
+			"type":      "redirect",
+			"target_dc": input.RedirectDc,
+			"namespace": input.Namespace,
+		})
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
@@ -240,6 +287,7 @@ func NewHandler(svc Service) http.Handler {
 		if err != nil {
 			return nil, nil, err
 		}
+		auditMCP(ctx, svc, "reload_config", "", nil)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
@@ -253,20 +301,5 @@ func NewHandler(svc Service) http.Handler {
 		return server
 	}, nil)
 
-	return corsMiddleware(handler)
-}
-
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Mcp-Session-Id, Authorization, X-Consul-Token, X-ATC-Token")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	return handler
 }

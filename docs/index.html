@@ -305,6 +305,18 @@ brew install atc</code></pre>
               <td>Enable serving the Model Context Protocol (MCP) server. If disabled, the <code>/mcp</code> endpoint returns 404.</td>
             </tr>
             <tr>
+              <td><code>--listen-address</code></td>
+              <td><code>ATC_LISTEN_ADDRESS</code></td>
+              <td>""</td>
+              <td>Interface the API/UI and MCP listeners bind to (<code>server.listen_address</code>). Empty means all interfaces. The metrics listener always binds to all interfaces.</td>
+            </tr>
+            <tr>
+              <td><code>--allow-unauthenticated</code></td>
+              <td><code>ATC_ALLOW_UNAUTHENTICATED</code></td>
+              <td>false</td>
+              <td>Explicitly allow auth to be disabled while listening on a non-loopback address (<code>auth.allow_unauthenticated</code>). Without it, ATC refuses to start in that configuration.</td>
+            </tr>
+            <tr>
               <td><code>--dry-run</code></td>
               <td>-</td>
               <td>false</td>
@@ -565,7 +577,6 @@ jobs:
         This is governed by the <code>fsnotify</code> watch loops. Alternatively, operators can trigger hot-reloading by:
         </p>
         <ul>
-          <li>Sending a <code>SIGHUP</code> signal to the running daemon process.</li>
           <li>Sending an authenticated <code>POST</code> request to the <code>/api/reload</code> endpoint.</li>
           <li>Calling the <code>reload_config</code> Model Context Protocol (MCP) tool.</li>
         </ul>
@@ -914,15 +925,24 @@ make up-atc</code></pre>
   }
 }</code></pre>
 
-        <h2>9. GET /ready</h2>
-        <p>A simple health check endpoint returning HTTP <code>200 OK</code> if the daemon is running normally and accepting traffic, or HTTP <code>503 Service Unavailable</code> when a shutdown is in progress.</p>
+        <h2>9. GET /ready and GET /health</h2>
+        <p>Both probes return <code>200 OK</code> with the plain-text body <code>OK</code>, or <code>503 Service Unavailable</code> while a shutdown is in progress. They skip authentication and Host/Origin checks so orchestrator probes keep working.</p>
+        <p>Neither probe checks Consul, on purpose. Consul is shared by every replica, so failing readiness during a Consul outage would remove all replicas from the load balancer at once and replace the dashboard with a bare error page. Instead, the dashboard explains the outage (see <code>GET /api/status</code>).</p>
 
-        <h3>Response Schema</h3>
+        <h2>10. GET /api/status</h2>
+        <p>Reports whether ATC can use Consul. It needs no token, so the dashboard can explain an outage even when delegated tokens cannot be verified. It returns fixed messages only; the underlying error is logged by ATC (<code>Consul is not usable</code> / <code>Consul connection restored</code>). The check uses ATC's own token and is cached for 5 seconds.</p>
         <pre><code class="language-json">{
-  "status": "ok"
+  "consul": {
+    "reachable": false,
+    "problem": "unreachable",
+    "message": "ATC cannot reach Consul.",
+    "last_contact": "2026-11-17T12:44:49+01:00",
+    "checked_at": "2026-11-17T12:45:08+01:00"
+  }
 }</code></pre>
+        <p><code>problem</code> is <code>unreachable</code> or <code>no_leader</code>, and is omitted when Consul is reachable. While Consul is unusable, the dashboard shows an outage banner and disables override and purge actions, and requests authenticated with a delegated Consul token get <code>503</code> with <code>{"error": "consul_unavailable"}</code> instead of <code>401</code>.</p>
 
-        <h2>10. GET /services</h2>
+        <h2>11. GET /services</h2>
         <p>Returns an ASCII representation of the active services catalog and their routing configurations (intended for quick terminal debugging).</p>
 
         <h3>Response Headers</h3>
@@ -1049,16 +1069,17 @@ curl -N -H "Accept: application/json, text/event-stream" \
         <pre><code class="language-yaml">auth:
   enabled: true
   static_keys:
-    - "atc-super-secret-token"
+    - "&lt;a long random key&gt;"   # the placeholder atc-super-secret-token is rejected
   consul_token_delegation: true</code></pre>
+        <p><strong>Secure by default:</strong> ATC refuses to start when <code>auth.enabled</code> is <code>false</code> and the API/MCP listeners are reachable from other hosts. Either enable auth, bind to loopback with <code>server.listen_address: "127.0.0.1"</code>, or accept the risk explicitly with <code>auth.allow_unauthenticated: true</code> / <code>--allow-unauthenticated</code>. Configuration is validated at startup and on every reload.</p>
 
         <h2>2. Token Passing Methods</h2>
         <p>Clients can authenticate by passing a token using one of the following methods:</p>
         <ul>
           <li><strong>Authorization Header:</strong> <code>Authorization: Bearer &lt;token&gt;</code></li>
           <li><strong>Custom Headers:</strong> <code>X-ATC-Token: &lt;token&gt;</code> or <code>X-Consul-Token: &lt;token&gt;</code></li>
-          <li><strong>Query Parameter:</strong> <code>?token=&lt;token&gt;</code></li>
         </ul>
+        <p>Tokens in the query string (<code>?token=</code>) are <strong>not</strong> accepted: URLs are recorded in access logs, traces, browser history and <code>Referer</code> headers.</p>
 
         <h2>3. Validation & Consul RBAC Delegation</h2>
         <p>When a request is received, ATC validates the token:</p>
@@ -1067,7 +1088,16 @@ curl -N -H "Accept: application/json, text/event-stream" \
           <li>If <code>consul_token_delegation</code> is enabled, ATC forwards the token to the local Consul agent via the <code>/v1/agent/self</code> API. If Consul accepts the token as valid, authorization succeeds. Furthermore, for Consul read/write queries, ATC dynamically propagates this delegated token in the Consul context, enforcing user-level Consul ACLs natively.</li>
         </ol>
 
-        <h2>4. High-Priority JSON Audit Logging</h2>
+        <p>MCP sessions are bound to the token that created them: a request that reuses an MCP session ID with a different token is rejected, so one caller cannot run tools with another caller's Consul permissions.</p>
+
+        <h2>4. Browser Origins & DNS Rebinding</h2>
+        <p>Requests carrying an <code>Origin</code> header are only accepted when they are same-origin (e.g. the embedded dashboard), listed in <code>server.allowed_origins</code>, or come from a <code>localhost</code> page to a locally bound ATC. The MCP listener echoes allowed origins in its CORS headers instead of <code>*</code>. When auth is disabled on loopback, requests whose <code>Host</code> header is not a loopback name are rejected to block DNS-rebinding attacks.</p>
+        <pre><code class="language-yaml">server:
+  listen_address: "127.0.0.1"
+  allowed_origins:
+    - "https://ops.example.com"</code></pre>
+
+        <h2>5. High-Priority JSON Audit Logging</h2>
         <p>All state-changing actions (manual overrides and purges) write structured JSON logs directly to the process's standard output or error stream:</p>
         <pre><code class="language-json">{"time":"2026-06-23T15:02:53+02:00","level":"INFO","msg":"audit event","module":"audit","audit":true,"client_ip":"127.0.0.1","actor":"atc-super...","action":"create_override","target_service":"payment-service","params":{"target_dc":"dc2","type":"failover"}}</code></pre>
         <p>Sensitive tokens are automatically masked in the <code>actor</code> attribute to prevent secret exposure in logs.</p>

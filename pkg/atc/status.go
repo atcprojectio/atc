@@ -12,12 +12,6 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 )
 
-func OkHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "OK")
-	}
-}
-
 func (t *Atc) servicesHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
@@ -172,7 +166,7 @@ type LeaderStatusResponse struct {
 
 func (t *Atc) apiLeaderHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	leader := t.IsLeader()
 
 	t.cfgMu.RLock()
@@ -263,6 +257,8 @@ func (t *Atc) apiOverridesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 	var req overrideRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid request payload: %v", err))
@@ -347,5 +343,3 @@ func (t *Atc) apiReloadHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"success","message":"Configuration reloaded successfully"}`))
 }
-
-
