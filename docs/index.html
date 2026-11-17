@@ -508,7 +508,7 @@ strategies:
         <h3>Failover Strategy</h3>
         <ul>
           <li><code>connect_timeout</code>: The connect timeout duration (e.g. <code>5s</code>, <code>10s</code>) applied to the resolver.</li>
-          <li><code>targets</code>: A list of targets to failover to. If <code>service</code> is omitted, it defaults to the active service's name. If <code>datacenter</code> is omitted, it defaults to the primary fallback datacenter. If <code>namespace</code> is specified, it scopes the target resolver to that namespace.</li>
+          <li><code>targets</code>: A list of targets to failover to. If <code>service</code> is omitted, it defaults to the active service's name. If <code>datacenter</code> is omitted, ATC picks the nearest other datacenter and keeps that choice while it stays available. When no other datacenter exists, a target that names a different <code>service</code>, <code>namespace</code> or <code>service_subset</code> uses the local datacenter, and a target that would point the service at itself is skipped. If <code>namespace</code> is specified, it scopes the target resolver to that namespace.</li>
         </ul>
         
         <h3>Redirect Strategy</h3>
@@ -776,47 +776,113 @@ write_rate_limit: "1s"</code></pre>
           </thead>
           <tbody>
             <tr>
-              <td><code>atc_forwarder_reconcile_runs_total</code></td>
-              <td>Counter</td>
-              <td>Total number of forwarder reconciliation runs, labeled by status (<code>success</code>, <code>failure</code>).</td>
-            </tr>
-            <tr>
-              <td><code>atc_forwarder_reconcile_duration_seconds</code></td>
-              <td>Histogram</td>
-              <td>Duration of forwarder reconciliation loops.</td>
-            </tr>
-            <tr>
-              <td><code>atc_redirector_reconcile_runs_total</code></td>
-              <td>Counter</td>
-              <td>Total number of redirector reconciliation runs, labeled by status.</td>
-            </tr>
-            <tr>
-              <td><code>atc_redirector_reconcile_duration_seconds</code></td>
-              <td>Histogram</td>
-              <td>Duration of redirector reconciliation loops.</td>
-            </tr>
-            <tr>
-              <td><code>atc_ha_leader_transitions_total</code></td>
-              <td>Counter</td>
-              <td>Total number of leadership transitions on this node, labeled by module (<code>forwarder</code>, <code>redirector</code>) and transition type (<code>acquired</code>, <code>lost</code>).</td>
-            </tr>
-            <tr>
-              <td><code>atc_overrides_purged_total</code></td>
-              <td>Counter</td>
-              <td>Total number of expired manual overrides purged automatically.</td>
+              <td><code>atc_build_info</code></td>
+              <td>Gauge</td>
+              <td>Build information (version, revision, Go version) from the Prometheus version collector; always 1.</td>
             </tr>
             <tr>
               <td><code>atc_config_reloads_total</code></td>
               <td>Counter</td>
-              <td>Total number of configuration reloads triggered by changes in YAML configuration.</td>
+              <td>Configuration reloads, labeled <code>status</code> (<code>success</code>, <code>failure</code>).</td>
+            </tr>
+            <tr>
+              <td><code>atc_config_last_reload_timestamp_seconds</code></td>
+              <td>Gauge</td>
+              <td>Unix time of the last successful configuration reload.</td>
+            </tr>
+            <tr>
+              <td><code>atc_consul_requests_total</code></td>
+              <td>Counter</td>
+              <td>Consul API requests made by the forwarder and redirector, labeled <code>operation</code> and <code>status</code>.</td>
+            </tr>
+            <tr>
+              <td><code>atc_consul_request_duration_seconds</code></td>
+              <td>Histogram</td>
+              <td>Duration of those Consul API requests, labeled <code>operation</code> and <code>status</code>.</td>
+            </tr>
+            <tr>
+              <td><code>atc_dampening_pending_writes</code></td>
+              <td>Gauge</td>
+              <td>Resolver writes currently waiting out their dampening period.</td>
+            </tr>
+            <tr>
+              <td><code>atc_dampening_writes_triggered_total</code></td>
+              <td>Counter</td>
+              <td>Resolver writes scheduled with dampening.</td>
+            </tr>
+            <tr>
+              <td><code>atc_dampening_writes_cancelled_total</code></td>
+              <td>Counter</td>
+              <td>Dampened writes cancelled before firing, labeled <code>reason</code> (<code>cancelled</code>, <code>superseded</code>, <code>shutdown</code>).</td>
+            </tr>
+            <tr>
+              <td><code>atc_foreign_resolvers</code></td>
+              <td>Gauge</td>
+              <td><code>atc.enabled</code> services whose existing <code>service-resolver</code> was not created by ATC and is left untouched (tag <code>atc.adopt=true</code> to manage it).</td>
+            </tr>
+            <tr>
+              <td><code>atc_forwarder_reconcile_runs_total</code></td>
+              <td>Counter</td>
+              <td>Forwarder reconciliation runs, labeled <code>status</code> (<code>success</code>, <code>failure</code>). A run with failed writes counts as a failure.</td>
+            </tr>
+            <tr>
+              <td><code>atc_forwarder_reconcile_duration_seconds</code></td>
+              <td>Histogram</td>
+              <td>Duration of forwarder reconciliation runs, labeled <code>status</code>.</td>
+            </tr>
+            <tr>
+              <td><code>atc_redirector_reconcile_runs_total</code></td>
+              <td>Counter</td>
+              <td>Redirector reconciliation runs, labeled <code>status</code>.</td>
+            </tr>
+            <tr>
+              <td><code>atc_redirector_reconcile_duration_seconds</code></td>
+              <td>Histogram</td>
+              <td>Duration of redirector reconciliation runs, labeled <code>status</code>.</td>
+            </tr>
+            <tr>
+              <td><code>atc_reconcile_coalesced_events_total</code></td>
+              <td>Counter</td>
+              <td>Catalog events combined into a single reconciliation by the <code>write_rate_limit</code> window.</td>
             </tr>
             <tr>
               <td><code>atc_ha_is_leader</code></td>
               <td>Gauge</td>
-              <td>Leadership status on this node (1 = Leader, 0 = Standby), labeled by module.</td>
+              <td>1 if this node holds the leader lock, else 0, labeled <code>module</code> (<code>forwarder</code>, <code>redirector</code>, or <code>core</code> when neither runs).</td>
+            </tr>
+            <tr>
+              <td><code>atc_ha_leader_transitions_total</code></td>
+              <td>Counter</td>
+              <td>Leadership changes on this node, labeled <code>module</code> and <code>transition</code> (<code>acquired</code>, <code>lost</code>, <code>released</code>).</td>
+            </tr>
+            <tr>
+              <td><code>atc_overrides_active</code></td>
+              <td>Gauge</td>
+              <td>Active manual overrides in Consul (cached for 30 seconds).</td>
+            </tr>
+            <tr>
+              <td><code>atc_overrides_purged_total</code></td>
+              <td>Counter</td>
+              <td>Expired manual overrides purged by the sweeper.</td>
+            </tr>
+            <tr>
+              <td><code>atc_strategies_configured</code></td>
+              <td>Gauge</td>
+              <td>Configured strategies, labeled <code>strategy_type</code> (<code>failover</code>, <code>redirect</code>).</td>
+            </tr>
+            <tr>
+              <td><code>atc_watcher_events_total</code></td>
+              <td>Counter</td>
+              <td>Catalog change events received from Consul, labeled <code>event_type</code>.</td>
+            </tr>
+            <tr>
+              <td><code>atc_watcher_errors_total</code></td>
+              <td>Counter</td>
+              <td>Errors or terminations of the Consul catalog watch.</td>
             </tr>
           </tbody>
         </table>
+        <p>Metrics emitted by both the forwarder and the redirector (Consul requests, dampening, coalescing) carry the <code>otel_scope_name</code> label (<code>atc/forwarder</code> or <code>atc/redirector</code>) on the Prometheus endpoint.</p>
       </section>
 
       <!-- Docker Observability Stack Section -->
@@ -1154,7 +1220,7 @@ curl -N -H "Accept: application/json, text/event-stream" \
             </tr>
             <tr>
               <td><code>purge_redirect_config</code></td>
-              <td><code>service</code> (string, required)</td>
+              <td><code>name</code> (string, required)</td>
               <td>Purge all ATC-created resolver configs for a service.</td>
             </tr>
             <tr>
