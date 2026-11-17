@@ -7,7 +7,7 @@ This document reviews the revised product roadmap for Active Traffic Control (AT
 ## Must Have
 
 ### 1. Unified Consul Watcher & Namespace Watch Scoping (ADR 0004 & ADR 0023) [DONE]
-- [x] Share a single [`ConsulWatcher`](file:///Users/attachmentgenie/DevShed/Projects/atcprojectio/atc/pkg/atc/watcher/watcher.go) instance across `Forwarder` and `Redirector` via `Broadcaster` (with reference-counted `Run(ctx)` lifecycle) to eliminate duplicate Consul blocking queries.
+- [x] Share a single [`ConsulWatcher`](pkg/atc/watcher/watcher.go) instance across `Forwarder` and `Redirector` via `Broadcaster` (with reference-counted `Run(ctx)` lifecycle) to eliminate duplicate Consul blocking queries.
 - [x] Propagate `datacenter`, `token`, and dynamic `namespace` configuration updates (`SetNamespace`) into `ConsulWatcher` so catalog and health check watches are properly scoped in Consul Enterprise environments.
 
 ### 2. Unique HA Node Identity Resolution [DONE]
