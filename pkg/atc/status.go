@@ -3,6 +3,7 @@ package atc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -249,6 +250,8 @@ type overrideRequest struct {
 	TargetDc  string `json:"target_dc"`
 	Namespace string `json:"namespace,omitempty"`
 	Duration  string `json:"duration,omitempty"`
+	// Force replaces a service-resolver that ATC did not create.
+	Force bool `json:"force,omitempty"`
 }
 
 func (t *Atc) apiOverridesHandler(w http.ResponseWriter, r *http.Request) {
@@ -277,20 +280,24 @@ func (t *Atc) apiOverridesHandler(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch req.Type {
 	case "failover":
-		err = t.ApplyFailoverOverride(r.Context(), req.Service, req.TargetDc, req.Namespace, req.Duration)
+		err = t.ApplyFailoverOverride(r.Context(), req.Service, req.TargetDc, req.Namespace, req.Duration, req.Force)
 	case "redirect":
-		err = t.TriggerManualRedirect(r.Context(), req.Service, req.TargetDc, req.Namespace, req.Duration)
+		err = t.TriggerManualRedirect(r.Context(), req.Service, req.TargetDc, req.Namespace, req.Duration, req.Force)
 	default:
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid override type %q, must be 'failover' or 'redirect'", req.Type))
 		return
 	}
 
+	if errors.Is(err, ErrForeignResolver) {
+		writeJSONError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to apply override: %v", err))
 		return
 	}
 
-	t.logAudit(r.Context(), r, "create_override", req.Service, map[string]any{"type": req.Type, "target_dc": req.TargetDc, "namespace": req.Namespace})
+	t.logAudit(r.Context(), r, "create_override", req.Service, map[string]any{"type": req.Type, "target_dc": req.TargetDc, "namespace": req.Namespace, "force": req.Force})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = fmt.Fprint(w, `{"status":"applied"}`)

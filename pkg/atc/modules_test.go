@@ -366,7 +366,7 @@ func TestApplyFailoverOverride(t *testing.T) {
 		coreLogger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	err := atc.ApplyFailoverOverride(context.Background(), "payment-service", "dc2", "", "")
+	err := atc.ApplyFailoverOverride(context.Background(), "payment-service", "dc2", "", "", false)
 	if err != nil {
 		t.Fatalf("ApplyFailoverOverride failed: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestTriggerManualRedirect(t *testing.T) {
 		coreLogger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	err := atc.TriggerManualRedirect(context.Background(), "payment-service", "dc2", "", "")
+	err := atc.TriggerManualRedirect(context.Background(), "payment-service", "dc2", "", "", false)
 	if err != nil {
 		t.Fatalf("TriggerManualRedirect failed: %v", err)
 	}
@@ -437,6 +437,11 @@ func TestApiOverridesHandler(t *testing.T) {
 	var method string
 	var path string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			// Ownership check before writing: no existing resolver for this service.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		method = r.Method
 		path = r.URL.Path
 		_, _ = io.ReadAll(r.Body)

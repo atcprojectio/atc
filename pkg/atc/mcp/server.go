@@ -18,8 +18,8 @@ type Service interface {
 	PurgeServiceResolver(ctx context.Context, name string) error
 	IsLeader() bool
 	GetFederationStatus(ctx context.Context) (map[string]string, error)
-	ApplyFailoverOverride(ctx context.Context, service string, targetDc string, targetNs string, duration string) error
-	TriggerManualRedirect(ctx context.Context, service string, redirectDc string, redirectNs string, duration string) error
+	ApplyFailoverOverride(ctx context.Context, service string, targetDc string, targetNs string, duration string, force bool) error
+	TriggerManualRedirect(ctx context.Context, service string, redirectDc string, redirectNs string, duration string, force bool) error
 	GetPredefinedStrategies(ctx context.Context) (string, error)
 	ListActiveOverrides(ctx context.Context) ([]map[string]any, error)
 	TriggerConfigReload() error
@@ -204,8 +204,9 @@ func NewHandler(svc Service) http.Handler {
 		TargetDc  string `json:"target_dc"`
 		Namespace string `json:"namespace,omitempty"`
 		Duration  string `json:"duration,omitempty"`
+		Force     bool   `json:"force,omitempty" jsonschema:"replace a service-resolver that ATC did not create; it is deleted when the override is cleared"`
 	}) (*mcp.CallToolResult, any, error) {
-		err := svc.ApplyFailoverOverride(ctx, input.Service, input.TargetDc, input.Namespace, input.Duration)
+		err := svc.ApplyFailoverOverride(ctx, input.Service, input.TargetDc, input.Namespace, input.Duration, input.Force)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -232,8 +233,9 @@ func NewHandler(svc Service) http.Handler {
 		RedirectDc string `json:"redirect_dc"`
 		Namespace  string `json:"namespace,omitempty"`
 		Duration   string `json:"duration,omitempty"`
+		Force      bool   `json:"force,omitempty" jsonschema:"replace a service-resolver that ATC did not create; it is deleted when the override is cleared"`
 	}) (*mcp.CallToolResult, any, error) {
-		err := svc.TriggerManualRedirect(ctx, input.Service, input.RedirectDc, input.Namespace, input.Duration)
+		err := svc.TriggerManualRedirect(ctx, input.Service, input.RedirectDc, input.Namespace, input.Duration, input.Force)
 		if err != nil {
 			return nil, nil, err
 		}

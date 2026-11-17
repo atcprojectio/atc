@@ -480,7 +480,17 @@ jobs:
           <li><code>atc.enabled=true</code>: Enrolls the service in ATC reconciliation. Without this tag, ATC will not touch the service.</li>
           <li><code>atc.failover=&lt;strategy-name&gt;</code>: Binds the service to a predefined failover strategy defined in the config. If omitted, and a strategy named <code>default</code> is defined under <code>strategies.failover</code>, ATC automatically falls back to that default strategy.</li>
           <li><code>atc.redirect=&lt;strategy-name&gt;</code>: Binds the service to a predefined redirect strategy defined in the config. If omitted, and a strategy named <code>default</code> is defined under <code>strategies.redirect</code>, ATC automatically falls back to that default strategy.</li>
+          <li><code>atc.adopt=true</code>: Lets ATC take over a <code>service-resolver</code> that already exists and was not created by ATC. See <em>Existing resolvers</em> below.</li>
         </ul>
+
+        <h2>Existing resolvers</h2>
+        <p>ATC writes whole <code>service-resolver</code> entries. If an <code>atc.enabled</code> service already has a resolver that ATC did not create (for example one with hand-written subsets or load-balancing settings), ATC <strong>leaves it untouched</strong>: it logs a warning once, counts it in the <code>atc_foreign_resolvers</code> metric, and the dashboard shows the service as <em>Not managed by ATC</em>. Automatic failover and redirects are then not applied to that service.</p>
+        <p>To let ATC manage it, add the tag <code>atc.adopt=true</code>. ATC then replaces the existing entry with its own on the next reconciliation, which drops any fields ATC does not manage.</p>
+        <p>Manual overrides refuse to replace such a resolver unless <code>force</code> is set, because clearing the override later deletes the entry and the original configuration would be lost.</p>
+
+        <h2>Reconciliation and resync</h2>
+        <p>ATC reconciles when the Consul catalog changes, when the configuration is reloaded, and after a resolver is purged (for example when an override is cleared or expires). In addition, the leader runs a full resync every <code>resync_interval</code> (default <code>60s</code>, <code>"0s"</code> disables it). The resync retries writes that failed, for example during a Consul hiccup, and repairs resolvers that were changed or deleted outside ATC.</p>
+        <p>ATC also records each service's redirect intent in its resolver's metadata (<code>atc-redirect-on-removal</code> and <code>atc-dampening-on-removal</code>), so the configured redirect is applied even when a different node has become leader by the time the service disappears.</p>
 
         <div class="glass-panel" style="padding: 1.2rem; margin: 1.5rem 0; border-left: 4px solid var(--accent-indigo);">
           <strong>Default Strategies Fallback:</strong> If a strategy named <code>default</code> is configured in the ATC configuration file (e.g., under <code>strategies.failover.default</code> or <code>strategies.redirect.default</code>), service teams can register their services in Consul using only the <code>atc.enabled=true</code> tag. ATC will automatically resolve and apply the default strategy for failover or redirect if the respective specific tag is not provided.
@@ -841,14 +851,17 @@ make up-atc</code></pre>
   "service": "payment-service",
   "type": "failover|redirect",
   "target_dc": "dc2",
-  "duration": "1h"
+  "duration": "1h",
+  "force": false
 }</code></pre>
+        <p>Set <code>force</code> to <code>true</code> to replace a <code>service-resolver</code> that ATC did not create. Clearing the override later deletes that entry, so the original configuration is lost.</p>
         <p>The optional <code>duration</code> parameter specifies a Time-To-Live (TTL) for the manual override (e.g. <code>"5m"</code>, <code>"15m"</code>, <code>"1h"</code>, <code>"24h"</code>). Once expired, a background task loop automatically purges the override resolver from Consul.</p>
 
         <h3>Response Codes</h3>
         <ul>
           <li><code>200 OK</code>: Override successfully applied.</li>
           <li><code>400 Bad Request</code>: Invalid body, missing fields, or invalid type/duration format.</li>
+          <li><code>409 Conflict</code>: The service already has a resolver ATC did not create, and <code>force</code> was not set.</li>
           <li><code>500 Internal Server Error</code>: Consul write failed.</li>
         </ul>
 
@@ -1021,13 +1034,13 @@ curl -N -H "Accept: application/json, text/event-stream" \
             </tr>
             <tr>
               <td><code>apply_failover_override</code></td>
-              <td><code>service</code> (string), <code>target_dc</code> (string), <code>duration</code> (string, optional)</td>
-              <td>Apply a manual failover override targeting a datacenter with optional TTL.</td>
+              <td><code>service</code> (string), <code>target_dc</code> (string), <code>namespace</code> (string, optional), <code>duration</code> (string, optional), <code>force</code> (bool, optional)</td>
+              <td>Apply a manual failover override targeting a datacenter with optional TTL. Refuses to replace a resolver ATC did not create unless <code>force</code> is set.</td>
             </tr>
             <tr>
               <td><code>trigger_manual_redirect</code></td>
-              <td><code>service</code> (string), <code>target_service</code> (string), <code>target_dc</code> (string), <code>duration</code> (string, optional)</td>
-              <td>Trigger a manual redirect to a fallback service and datacenter with optional TTL.</td>
+              <td><code>service</code> (string), <code>redirect_dc</code> (string), <code>namespace</code> (string, optional), <code>duration</code> (string, optional), <code>force</code> (bool, optional)</td>
+              <td>Trigger a manual redirect of the service to a datacenter with optional TTL. Refuses to replace a resolver ATC did not create unless <code>force</code> is set.</td>
             </tr>
           </tbody>
         </table>

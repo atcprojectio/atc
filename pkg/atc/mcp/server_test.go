@@ -21,10 +21,10 @@ func (m *mockService) IsLeader() bool                                           
 func (m *mockService) GetFederationStatus(ctx context.Context) (map[string]string, error) {
 	return nil, nil
 }
-func (m *mockService) ApplyFailoverOverride(ctx context.Context, service, targetDc, targetNs, duration string) error {
+func (m *mockService) ApplyFailoverOverride(ctx context.Context, service, targetDc, targetNs, duration string, force bool) error {
 	return nil
 }
-func (m *mockService) TriggerManualRedirect(ctx context.Context, service, redirectDc, redirectNs, duration string) error {
+func (m *mockService) TriggerManualRedirect(ctx context.Context, service, redirectDc, redirectNs, duration string, force bool) error {
 	return nil
 }
 func (m *mockService) GetPredefinedStrategies(ctx context.Context) (string, error) { return "", nil }
@@ -65,14 +65,14 @@ func (m *testService) IsLeader() bool {
 func (m *testService) GetFederationStatus(ctx context.Context) (map[string]string, error) {
 	return m.fedStatus, nil
 }
-func (m *testService) ApplyFailoverOverride(ctx context.Context, service, targetDc, targetNs, duration string) error {
+func (m *testService) ApplyFailoverOverride(ctx context.Context, service, targetDc, targetNs, duration string, force bool) error {
 	m.overrideSvc = service
 	m.overrideDc = targetDc
 	m.overrideNs = targetNs
 	m.overrideDur = duration
 	return nil
 }
-func (m *testService) TriggerManualRedirect(ctx context.Context, service, redirectDc, redirectNs, duration string) error {
+func (m *testService) TriggerManualRedirect(ctx context.Context, service, redirectDc, redirectNs, duration string, force bool) error {
 	m.redirectSvc = service
 	m.redirectDc = redirectDc
 	m.redirectNs = redirectNs

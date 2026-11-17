@@ -2,6 +2,7 @@ package forwarder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -60,6 +61,8 @@ type Forwarder struct {
 	mu              sync.RWMutex
 	strategiesCache map[string]cachedStrategies
 	consulClient    *api.Client
+	resyncInterval  time.Duration
+	foreign         *ForeignTracker
 
 	// Hysteresis scheduling state
 	schedMu       sync.Mutex
@@ -139,6 +142,7 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 	}
 
 	f := &Forwarder{
+		resyncInterval:          DefaultResyncInterval,
 		logger:                  logger,
 		consulAddr:              consulAddr,
 		consulToken:             consulToken,
@@ -177,6 +181,7 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 		return nil, err
 	}
 
+	f.foreign = NewForeignTracker(meter, "forwarder", logger)
 	return f, nil
 }
 
@@ -262,19 +267,53 @@ func (f *Forwarder) stopScheduledWrites(ctx context.Context) {
 	f.inflightWrites.Wait()
 }
 
+// reconcileWithCurrentClient reconciles with the current Consul client, so connection
+// changes applied through SetConnection or UpdateConfig take effect on the next run.
+func (f *Forwarder) reconcileWithCurrentClient(ctx context.Context) error {
+	client, err := f.getConsulClient()
+	if err != nil {
+		return fmt.Errorf("failed to create consul client: %w", err)
+	}
+	return f.reconcile(ctx, client)
+}
+
+// DefaultResyncInterval is how often a running module reconciles even without catalog events.
+const DefaultResyncInterval = 60 * time.Second
+
+// SetResyncInterval sets the periodic resync interval (0 disables it). It takes effect when
+// Run next starts.
+func (f *Forwarder) SetResyncInterval(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resyncInterval = d
+}
+
+// SetConnection updates the Consul connection settings. When they change, the cached client
+// is dropped so the next reconciliation and scheduled write use the new settings.
+func (f *Forwarder) SetConnection(addr, token, dc, ns string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.consulAddr == addr && f.consulToken == token && f.consulDC == dc && f.consulNamespace == ns {
+		return
+	}
+	f.consulAddr, f.consulToken, f.consulDC, f.consulNamespace = addr, token, dc, ns
+	f.consulClient = nil
+	f.logger.Info("Consul connection settings changed", slog.String("consul_addr", addr), slog.String("consul_dc", dc), slog.String("consul_namespace", ns))
+}
+
 func (f *Forwarder) Run(ctx context.Context) error {
 	f.schedMu.Lock()
 	f.runCtx = ctx
 	f.schedMu.Unlock()
 	defer f.stopScheduledWrites(ctx)
 
-	client, err := f.getConsulClient()
-	if err != nil {
+	if _, err := f.getConsulClient(); err != nil {
 		return fmt.Errorf("failed to create consul client: %w", err)
 	}
 
 	f.mu.RLock()
 	w := f.watcher
+	resyncInterval := f.resyncInterval
 	f.mu.RUnlock()
 
 	events := w.Events.Subscribe()
@@ -288,14 +327,23 @@ func (f *Forwarder) Run(ctx context.Context) error {
 
 	g.Go(func() error {
 		f.logger.InfoContext(ctx, "Starting initial forwarder catalog reconciliation")
-		if err := f.reconcile(ctx, client); err != nil {
+		if err := f.reconcileWithCurrentClient(ctx); err != nil {
 			f.logger.ErrorContext(ctx, "Initial reconciliation failed", slog.Any("error", err))
 		}
 
 		var (
 			debounceTimer *time.Timer
 			timerChan     <-chan time.Time
+			resyncChan    <-chan time.Time
 		)
+
+		// Periodic full resync: retries failed writes and repairs drift that no catalog
+		// event would reveal (e.g. a resolver deleted out-of-band or an expired override).
+		if resyncInterval > 0 {
+			resyncTicker := time.NewTicker(resyncInterval)
+			defer resyncTicker.Stop()
+			resyncChan = resyncTicker.C
+		}
 
 		defer func() {
 			if debounceTimer != nil {
@@ -326,7 +374,7 @@ func (f *Forwarder) Run(ctx context.Context) error {
 
 				if rateLimit <= 0 {
 					f.logger.DebugContext(ctx, "No write rate limit set, running reconciliation immediately")
-					if err := f.reconcile(ctx, client); err != nil {
+					if err := f.reconcileWithCurrentClient(ctx); err != nil {
 						f.logger.ErrorContext(ctx, "Reconciliation failed", slog.Any("error", err))
 					}
 				} else {
@@ -341,10 +389,16 @@ func (f *Forwarder) Run(ctx context.Context) error {
 					timerChan = debounceTimer.C
 				}
 
+			case <-resyncChan:
+				f.logger.DebugContext(ctx, "Periodic resync, running reconciliation")
+				if err := f.reconcileWithCurrentClient(ctx); err != nil {
+					f.logger.ErrorContext(ctx, "Periodic reconciliation failed", slog.Any("error", err))
+				}
+
 			case <-timerChan:
 				timerChan = nil
 				f.logger.InfoContext(ctx, "Coalescing window elapsed, running reconciliation")
-				if err := f.reconcile(ctx, client); err != nil {
+				if err := f.reconcileWithCurrentClient(ctx); err != nil {
 					f.logger.ErrorContext(ctx, "Reconciliation failed", slog.Any("error", err))
 				}
 			}
@@ -356,6 +410,10 @@ func (f *Forwarder) Run(ctx context.Context) error {
 
 func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err error) {
 	ctx, span := tracer.Start(ctx, "reconcile")
+	// Failed writes are collected and returned so the run is counted as failed and the
+	// next periodic resync retries them, instead of being logged and forgotten.
+	var writeErrs []error
+	foreign := map[string]struct{}{}
 	defer span.End()
 
 	startTime := time.Now()
@@ -491,7 +549,15 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 				}
 			}
 
+			// Record what should happen if the service later disappears from the catalog, so any
+			// leader can apply the right redirect even if it never saw this service's tags.
+			removalIntent := RemovalIntentMeta(tags)
+
 			existing, exists := existingResolverEntries[svcName]
+			if !MayManage(existing, exists, tags) {
+				foreign[svcName] = struct{}{}
+				continue
+			}
 			needsCreateOrUpdate := !exists ||
 				existing.Meta == nil ||
 				existing.Meta["created-by"] != "atc" ||
@@ -499,6 +565,7 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 				len(existing.Failover) == 0 ||
 				existing.Meta["failover-strategy"] != failoverStrategyName ||
 				existing.Meta["redirect-strategy"] != "" ||
+				!removalIntentMatches(existing.Meta, removalIntent) ||
 				existing.ConnectTimeout != connectTimeout
 
 			if !needsCreateOrUpdate && existing.Failover != nil {
@@ -522,10 +589,10 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 				entry := &api.ServiceResolverConfigEntry{
 					Kind: "service-resolver",
 					Name: svcName,
-					Meta: map[string]string{
+					Meta: withRemovalIntent(map[string]string{
 						"created-by":        "atc",
 						"failover-strategy": failoverStrategyName,
-					},
+					}, removalIntent),
 					ConnectTimeout: connectTimeout,
 					Failover: map[string]api.ServiceResolverFailover{
 						"*": {
@@ -549,6 +616,7 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 						})
 						if err != nil {
 							f.logger.ErrorContext(ctx, "Failed to set failover service-resolver", slog.String("service", svcName), slog.Any("error", err))
+							writeErrs = append(writeErrs, err)
 						}
 					}
 				} else {
@@ -576,6 +644,7 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 						})
 						if err != nil {
 							f.logger.ErrorContext(ctx, "Failed to delete service-resolver", slog.String("service", svcName), slog.Any("error", err))
+							writeErrs = append(writeErrs, err)
 						}
 					}
 				}
@@ -583,7 +652,8 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 		}
 	}
 
-	return nil
+	f.foreign.Update(ctx, foreign)
+	return errors.Join(writeErrs...)
 }
 
 func getLocalDatacenter(client *api.Client, configDC string) string {
@@ -847,4 +917,36 @@ func (f *Forwarder) UpdateConfig(failoverStrategies map[string]FailoverStrategy,
 		slog.String("write_rate_limit", writeRateLimit),
 		slog.Bool("dry_run", dryRun),
 	)
+}
+
+// Metadata keys that persist a service's redirect intent in its resolver entry. They are
+// distinct from "redirect-strategy", which marks an entry that IS a redirect.
+const (
+	MetaRedirectOnRemoval  = "atc-redirect-on-removal"
+	MetaDampeningOnRemoval = "atc-dampening-on-removal"
+)
+
+// RemovalIntentMeta extracts the redirect and dampening tags that apply when the service is
+// removed from the catalog. Empty values are omitted.
+func RemovalIntentMeta(tags []string) map[string]string {
+	intent := map[string]string{}
+	if v := getStrategyFromTags(tags, "atc.redirect="); v != "" {
+		intent[MetaRedirectOnRemoval] = v
+	}
+	if v := getStrategyFromTags(tags, "atc.dampening="); v != "" {
+		intent[MetaDampeningOnRemoval] = v
+	}
+	return intent
+}
+
+func removalIntentMatches(meta, intent map[string]string) bool {
+	return meta[MetaRedirectOnRemoval] == intent[MetaRedirectOnRemoval] &&
+		meta[MetaDampeningOnRemoval] == intent[MetaDampeningOnRemoval]
+}
+
+func withRemovalIntent(meta, intent map[string]string) map[string]string {
+	for k, v := range intent {
+		meta[k] = v
+	}
+	return meta
 }

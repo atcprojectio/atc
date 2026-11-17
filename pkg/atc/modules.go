@@ -89,6 +89,7 @@ func (t *Atc) initForwarder() error {
 	if t.Watcher != nil {
 		forward.SetWatcher(t.Watcher)
 	}
+	forward.SetResyncInterval(resyncInterval(t.Cfg))
 	t.Forwarder = forward
 	return nil
 }
@@ -116,6 +117,7 @@ func (t *Atc) initRedirector() error {
 	if t.Watcher != nil {
 		redirect.SetWatcher(t.Watcher)
 	}
+	redirect.SetResyncInterval(resyncInterval(t.Cfg))
 	t.Redirector = redirect
 	return nil
 }
