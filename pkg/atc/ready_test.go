@@ -78,3 +78,25 @@ func TestReadiness(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, probe(a, a.healthHandler))
 	})
 }
+
+func TestActiveOverridesCountIsCached(t *testing.T) {
+	var lists atomic.Int32
+	consul := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/config/service-resolver" {
+			lists.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"Kind":"service-resolver","Name":"payments","Meta":{"created-by":"atc-override"}}]`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer consul.Close()
+
+	a := newReadinessAtc(consul.Listener.Addr().String())
+	for i := 0; i < 5; i++ {
+		n, ok := a.activeOverridesCount(context.Background())
+		require.True(t, ok)
+		assert.Equal(t, int64(1), n)
+	}
+	assert.Equal(t, int32(1), lists.Load(), "scrapes within the TTL must not query Consul again")
+}

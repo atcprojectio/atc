@@ -23,7 +23,6 @@ type Config struct {
 	HTTPListenPort    int    `yaml:"http_listen_port" mapstructure:"http_listen_port"`
 	MetricsListenPort int    `yaml:"metrics_listen_port" mapstructure:"metrics_listen_port"`
 	McpListenPort     int    `yaml:"mcp_port" mapstructure:"mcp_port"`
-	MetricsNamespace  string `yaml:"metrics_namespace" mapstructure:"metrics_namespace"`
 	LogFormat         string `yaml:"log_format" mapstructure:"log_format"`
 	LogLevel          string `yaml:"log_level" mapstructure:"log_level"`
 	UiEnabled         bool   `yaml:"ui_enabled" mapstructure:"ui_enabled"`

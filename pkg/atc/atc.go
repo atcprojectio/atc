@@ -107,6 +107,10 @@ type Atc struct {
 
 	shutdownRequested atomic.Bool
 
+	overridesCountMu sync.Mutex
+	overridesCount   int64
+	overridesCountAt time.Time
+
 	readyMu        sync.Mutex
 	readyCheckedAt time.Time
 	readyErr       error
@@ -237,9 +241,8 @@ func New(cfg Config) (*Atc, error) {
 		"atc_overrides_active",
 		metric.WithDescription("Number of active manual overrides in Consul"),
 		metric.WithInt64Callback(func(ctx context.Context, obsrv metric.Int64Observer) error {
-			overrides, err := atc.ListActiveOverrides(ctx)
-			if err == nil {
-				obsrv.Observe(int64(len(overrides)))
+			if n, ok := atc.activeOverridesCount(ctx); ok {
+				obsrv.Observe(n)
 			}
 			return nil
 		}),
@@ -615,6 +618,28 @@ func (t *Atc) readyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Fprintf(w, "OK")
+}
+
+// overridesGaugeTTL bounds how often the atc_overrides_active gauge queries Consul. Without it
+// every metrics scrape (and OTLP export) on every replica listed all service-resolvers.
+var overridesGaugeTTL = 30 * time.Second
+
+// activeOverridesCount returns the number of active manual overrides, cached for
+// overridesGaugeTTL. ok is false when no value is available yet and Consul cannot be queried.
+func (t *Atc) activeOverridesCount(ctx context.Context) (n int64, ok bool) {
+	t.overridesCountMu.Lock()
+	defer t.overridesCountMu.Unlock()
+	if !t.overridesCountAt.IsZero() && time.Since(t.overridesCountAt) < overridesGaugeTTL {
+		return t.overridesCount, true
+	}
+	overrides, err := t.ListActiveOverrides(ctx)
+	if err != nil {
+		// Keep reporting the last known value rather than dropping the series.
+		return t.overridesCount, !t.overridesCountAt.IsZero()
+	}
+	t.overridesCount = int64(len(overrides))
+	t.overridesCountAt = time.Now()
+	return t.overridesCount, true
 }
 
 // readinessCacheTTL bounds how often readiness probes hit Consul. Var for tests.

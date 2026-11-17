@@ -79,7 +79,6 @@ func ApplyViperDefaults(v *viper.Viper, cfg *Config) {
 	} else if hasEnv("ATC_ALLOW_UNAUTHENTICATED") {
 		cfg.Auth.AllowUnauthenticated = false
 	}
-	cfg.Server.MetricsNamespace = "atc"
 	if v.GetBool("dry_run") || hasEnv("ATC_DRY_RUN") {
 		cfg.DryRun = v.GetBool("dry_run")
 	}
