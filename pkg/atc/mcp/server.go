@@ -25,6 +25,11 @@ type Service interface {
 	TriggerConfigReload() error
 }
 
+// ReadinessChecker is optionally implemented by a Service to report readiness.
+type ReadinessChecker interface {
+	CheckReadiness(ctx context.Context) error
+}
+
 type Auditor interface {
 	LogAudit(ctx context.Context, action, service string, details map[string]any)
 }
@@ -51,10 +56,16 @@ func NewHandler(svc Service) http.Handler {
 		Name:        "check_readiness",
 		Description: "Checks the readiness state of the ATC service (corresponds to /ready endpoint)",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+		text := "OK"
+		if rc, ok := svc.(ReadinessChecker); ok {
+			if err := rc.CheckReadiness(ctx); err != nil {
+				text = "NOT READY: " + err.Error()
+			}
+		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
-					Text: "OK",
+					Text: text,
 				},
 			},
 		}, nil, nil

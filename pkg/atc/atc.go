@@ -3,6 +3,7 @@ package atc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -103,6 +104,12 @@ type Atc struct {
 
 	tokenCacheMu sync.RWMutex
 	tokenCache   map[string]time.Time
+
+	shutdownRequested atomic.Bool
+
+	readyMu        sync.Mutex
+	readyCheckedAt time.Time
+	readyErr       error
 
 	isLeader         atomic.Bool
 	forwarderLeader  atomic.Bool
@@ -315,11 +322,9 @@ func (t *Atc) Run(ctx context.Context) error {
 		}()
 	}
 
-	var shutdownRequested atomic.Bool
-
 	if t.Server != nil {
-		t.Server.Mux.HandleFunc("/health", t.healthHandler(&shutdownRequested))
-		t.Server.Mux.HandleFunc("/ready", t.healthHandler(&shutdownRequested))
+		t.Server.Mux.HandleFunc("/health", t.healthHandler)
+		t.Server.Mux.HandleFunc("/ready", t.readyHandler)
 		t.Server.Mux.Handle("GET /services", t.authMiddleware(http.HandlerFunc(t.servicesHandler)))
 	}
 
@@ -355,7 +360,7 @@ func (t *Atc) Run(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		shutdownRequested.Store(true)
+		t.shutdownRequested.Store(true)
 	}()
 
 	err := g.Wait()
@@ -591,15 +596,73 @@ func (t *Atc) runModuleLeaderElection(ctx context.Context, moduleName string, ru
 	}
 }
 
-func (t *Atc) healthHandler(shutdownRequested *atomic.Bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if shutdownRequested.Load() {
-			t.coreLogger.Debug("application is stopping")
-			http.Error(w, "Application is stopping", http.StatusServiceUnavailable)
-			return
-		}
-		fmt.Fprintf(w, "OK")
+// healthHandler is the liveness probe. It deliberately does not depend on Consul: a Consul
+// outage must not make the orchestrator restart every ATC replica.
+func (t *Atc) healthHandler(w http.ResponseWriter, _ *http.Request) {
+	if t.shutdownRequested.Load() {
+		t.coreLogger.Debug("application is stopping")
+		http.Error(w, "Application is stopping", http.StatusServiceUnavailable)
+		return
 	}
+	fmt.Fprintf(w, "OK")
+}
+
+// readyHandler is the readiness probe: the instance can serve API/MCP requests only while it
+// is not shutting down and can reach a Consul cluster that has a leader.
+func (t *Atc) readyHandler(w http.ResponseWriter, r *http.Request) {
+	if err := t.CheckReadiness(r.Context()); err != nil {
+		http.Error(w, "Not ready: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	fmt.Fprintf(w, "OK")
+}
+
+// readinessCacheTTL bounds how often readiness probes hit Consul. Var for tests.
+var readinessCacheTTL = 5 * time.Second
+
+// CheckReadiness reports why this instance cannot serve requests, or nil if it can.
+// The Consul check uses ATC's own token and is cached for readinessCacheTTL.
+func (t *Atc) CheckReadiness(ctx context.Context) error {
+	if t.shutdownRequested.Load() {
+		return errors.New("application is stopping")
+	}
+
+	t.readyMu.Lock()
+	if !t.readyCheckedAt.IsZero() && time.Since(t.readyCheckedAt) < readinessCacheTTL {
+		err := t.readyErr
+		t.readyMu.Unlock()
+		return err
+	}
+	t.readyMu.Unlock()
+
+	err := t.probeConsul(ctx)
+
+	t.readyMu.Lock()
+	t.readyCheckedAt = time.Now()
+	t.readyErr = err
+	t.readyMu.Unlock()
+	return err
+}
+
+func (t *Atc) probeConsul(ctx context.Context) error {
+	t.cfgMu.RLock()
+	addr, token, dc, ns := t.Cfg.ConsulAddr, t.Cfg.ConsulToken, t.Cfg.ConsulDC, t.Cfg.ConsulNamespace
+	t.cfgMu.RUnlock()
+
+	client, err := t.getOrCreateConsulClient(addr, token, dc, ns)
+	if err != nil {
+		return fmt.Errorf("consul client: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	leader, err := client.Status().LeaderWithQueryOptions((&api.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return fmt.Errorf("consul unreachable: %w", err)
+	}
+	if leader == "" {
+		return errors.New("consul cluster has no leader")
+	}
+	return nil
 }
 
 func (t *Atc) GetEnabledModulesTable() string {

@@ -925,13 +925,10 @@ make up-atc</code></pre>
   }
 }</code></pre>
 
-        <h2>9. GET /ready</h2>
-        <p>A simple health check endpoint returning HTTP <code>200 OK</code> if the daemon is running normally and accepting traffic, or HTTP <code>503 Service Unavailable</code> when a shutdown is in progress.</p>
-
-        <h3>Response Schema</h3>
-        <pre><code class="language-json">{
-  "status": "ok"
-}</code></pre>
+        <h2>9. GET /ready and GET /health</h2>
+        <p><code>/ready</code> is the readiness probe. It returns <code>200 OK</code> with the plain-text body <code>OK</code> when the instance can serve requests: it is not shutting down and it can reach a Consul cluster that has a leader. Otherwise it returns <code>503 Service Unavailable</code> with the reason (for example <code>Not ready: consul unreachable: ...</code>). The Consul check uses ATC's own token and is cached for 5 seconds. The <code>check_readiness</code> MCP tool reports the same result.</p>
+        <p><code>/health</code> is the liveness probe. It returns <code>200 OK</code> unless a shutdown is in progress, and deliberately does not check Consul, so a Consul outage does not cause orchestrators to restart ATC.</p>
+        <p>Both endpoints skip authentication and Host/Origin checks so that orchestrator probes keep working.</p>
 
         <h2>10. GET /services</h2>
         <p>Returns an ASCII representation of the active services catalog and their routing configurations (intended for quick terminal debugging).</p>
