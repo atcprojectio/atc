@@ -65,6 +65,7 @@ type Forwarder struct {
 	foreign         *ForeignTracker
 
 	unknownStrategyWarn *WarnTracker
+	aclFilteredWarn     *WarnTracker
 	noTargetWarn        *WarnTracker
 
 	// Hysteresis scheduling state
@@ -189,6 +190,7 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 	}
 
 	f.foreign = NewForeignTracker(meter, "forwarder", logger)
+	f.aclFilteredWarn = NewWarnTracker(logger, "Consul filtered the service catalog by ACLs: services the token cannot read are invisible to ATC")
 	f.unknownStrategyWarn = NewWarnTracker(logger, "Service tag names a failover strategy that is not configured; using the default target")
 	f.noTargetWarn = NewWarnTracker(logger, "Not writing a failover resolver: only one datacenter is known")
 	return f, nil
@@ -446,13 +448,21 @@ func (f *Forwarder) reconcile(ctx context.Context, client *api.Client) (err erro
 	}()
 
 	var services map[string][]string
+	var servicesMeta *api.QueryMeta
 	err = f.traceConsulCall(ctx, "list_services", func() error {
 		var err error
-		services, _, err = client.Catalog().Services((&api.QueryOptions{}).WithContext(ctx))
+		services, servicesMeta, err = client.Catalog().Services((&api.QueryOptions{}).WithContext(ctx))
 		return err
 	})
 	if err != nil {
 		return fmt.Errorf("failed to fetch consul services: %w", err)
+	}
+	// Consul hides what the token may not read instead of failing, so a token without
+	// service:read / node:read makes ATC see no services and silently do nothing.
+	if servicesMeta != nil && servicesMeta.ResultsFilteredByACLs {
+		f.aclFilteredWarn.Update(ctx, map[string]string{"catalog": "the Consul token cannot read every service; see the ATC ACL policy"})
+	} else {
+		f.aclFilteredWarn.Update(ctx, nil)
 	}
 
 	f.mu.RLock()

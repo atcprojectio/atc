@@ -589,6 +589,39 @@ jobs:
           <li><strong>When Active:</strong> The resolver is configured for failover. The metadata reports <code>failover-strategy</code> and removes <code>redirect-strategy</code>.</li>
           <li><strong>When Offline:</strong> The resolver is configured for redirect. The metadata reports <code>redirect-strategy</code> and removes <code>failover-strategy</code>.</li>
         </ul>
+      
+        <h2>Consul ACL policy</h2>
+        <p>ATC's own Consul token (<code>consul_token</code>, <code>ATC_CONSUL_TOKEN</code>, or <code>consulToken.existingSecret</code> in the Helm chart) needs the policy below, shipped as <code>deploy/consul/atc-policy.hcl</code>. An integration test runs ATC with exactly this policy against a default-deny Consul, and removing any rule breaks at least one ATC function.</p>
+<pre><code class="language-bash">consul acl policy create -name atc -rules @deploy/consul/atc-policy.hcl
+consul acl token create -description "ATC" -policy-name atc</code></pre>
+<pre><code class="language-hcl"># Read and write service-resolver config entries. Consul requires service:write on a service
+# to change its resolver. This also allows registering services under those names; if your
+# ATC-managed services share a naming convention, narrow the prefix accordingly.
+service_prefix &quot;&quot; {
+  policy = &quot;write&quot;
+}
+
+# Read the service catalog (without node:read Consul hides services from ATC instead of
+# failing) and datacenter membership for /api/federation.
+node_prefix &quot;&quot; {
+  policy = &quot;read&quot;
+}
+
+# Detect the local datacenter and check delegated tokens (agent/self).
+agent_prefix &quot;&quot; {
+  policy = &quot;read&quot;
+}
+
+# HA leader election: the lock keys under ha.lock_key (default &quot;atc/leader/&quot;).
+key_prefix &quot;atc/leader/&quot; {
+  policy = &quot;write&quot;
+}
+
+# Sessions that hold the leader locks; also needed by &quot;atc leader force-unlock&quot;.
+session_prefix &quot;&quot; {
+  policy = &quot;write&quot;
+}</code></pre>
+        <p><code>service:write</code> is needed because Consul only lets a token change a service's resolver when it may write that service. It also allows registering services with those names; if the services ATC manages share a naming convention, narrow <code>service_prefix</code> to it. If the token cannot read every service, Consul hides them instead of failing; ATC then logs <em>Consul filtered the service catalog by ACLs</em> once.</p>
       </section>
 
       <!-- Hysteresis Section -->
