@@ -431,4 +431,3 @@ func TestMcpWriteToolsAuditOutcomesAndForce(t *testing.T) {
 	assert.Len(t, svc.recorded, 5)
 	assert.Equal(t, "failed", svc.recorded[4].details["outcome"])
 }
-
