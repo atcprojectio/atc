@@ -320,3 +320,12 @@ func TestMcpToolsCall(t *testing.T) {
 	assert.Contains(t, text, "Configuration reloaded successfully")
 	assert.True(t, svc.reloadTriggered)
 }
+
+type dryRunService struct{ mockService }
+
+func (*dryRunService) IsDryRun() bool { return true }
+
+func TestWriteToolsReportDryRun(t *testing.T) {
+	assert.True(t, strings.HasPrefix(dryRunText(&dryRunService{}, "Successfully purged x"), "[DRY RUN] Nothing was written"))
+	assert.Equal(t, "Successfully purged x", dryRunText(&mockService{}, "Successfully purged x"))
+}

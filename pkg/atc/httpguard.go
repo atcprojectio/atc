@@ -56,6 +56,10 @@ func originAllowed(origin, requestHost string, allowed []string) bool {
 	return isLoopbackHost(u.Hostname()) && isLoopbackHost(hostWithoutPort(requestHost))
 }
 
+const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; " +
+	"img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; " +
+	"base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+
 // requestGuard rejects requests that browsers could be tricked into sending:
 //   - cross-origin requests from origins that are not allowed (CSRF / malicious web pages);
 //   - when running unauthenticated on loopback, requests whose Host header is not a loopback
@@ -74,6 +78,10 @@ func (t *Atc) requestGuard(withCORS bool) func(http.Handler) http.Handler {
 
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("X-Frame-Options", "DENY")
+			// Only ATC's own origin may supply scripts, styles, fonts and API calls, so an
+			// injected script could not load code or send the stored token elsewhere.
+			w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
+			w.Header().Set("Referrer-Policy", "no-referrer")
 
 			// Health probes carry no sensitive data and may come from orchestrators using a pod IP.
 			if r.URL.Path == "/health" || r.URL.Path == "/ready" {

@@ -131,24 +131,26 @@ func TestDelegatedAuthReportsConsulOutage(t *testing.T) {
 	a.Cfg.Auth = AuthConfig{Enabled: true, ConsulTokenDelegation: true}
 	a.tokenCache = make(map[string]time.Time)
 	h := a.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	call := func() *httptest.ResponseRecorder {
+	// Each phase uses its own token: a token Consul rejected is answered from a short negative
+	// cache, which is the intended behaviour, not what this test is about.
+	call := func(token string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/api/services", nil)
-		req.Header.Set("X-Consul-Token", "some-token")
+		req.Header.Set("X-Consul-Token", token)
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
 		return rr
 	}
 
 	status.Store(http.StatusForbidden)
-	assert.Equal(t, http.StatusUnauthorized, call().Code, "Consul rejecting the token is an auth failure")
+	assert.Equal(t, http.StatusUnauthorized, call("rejected-token").Code, "Consul rejecting the token is an auth failure")
 
 	status.Store(http.StatusInternalServerError)
-	rr := call()
+	rr := call("token-during-5xx")
 	assert.Equal(t, http.StatusServiceUnavailable, rr.Code, "Consul failing is not the caller's fault")
 	assert.Contains(t, rr.Body.String(), "consul_unavailable")
 
 	consul.Close()
-	assert.Equal(t, http.StatusServiceUnavailable, call().Code, "unreachable Consul is reported as unavailable")
+	assert.Equal(t, http.StatusServiceUnavailable, call("token-while-unreachable").Code, "unreachable Consul is reported as unavailable")
 }
 
 func TestActiveOverridesCountIsCached(t *testing.T) {

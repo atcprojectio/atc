@@ -34,7 +34,8 @@ func TestDelegatedTokensDoNotGrowClientCache(t *testing.T) {
 		req.Header.Set("X-ATC-Token", fmt.Sprintf("random-token-%d", i))
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
-		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+		// Rejected by Consul (401) or, once the check budget is used up, refused (429).
+		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusTooManyRequests}, rr.Code)
 	}
 
 	a.consulClientsMu.RLock()

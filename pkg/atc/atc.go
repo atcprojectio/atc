@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/time/rate"
 
 	"github.com/atcprojectio/atc/pkg/atc/forwarder"
 	"github.com/atcprojectio/atc/pkg/atc/redirector"
@@ -105,8 +106,12 @@ type Atc struct {
 	requestHTTPClient     *http.Client
 	requestHTTPClientErr  error
 
-	tokenCacheMu sync.RWMutex
-	tokenCache   map[string]time.Time
+	tokenCacheMu   sync.RWMutex
+	tokenCache     map[string]time.Time // accepted delegated tokens, keyed by SHA-256
+	rejectedTokens map[string]time.Time // tokens Consul rejected, keyed by SHA-256
+
+	tokenLimiterOnce sync.Once
+	tokenLimiter     *rate.Limiter
 
 	shutdownRequested atomic.Bool
 
@@ -317,6 +322,8 @@ func (t *Atc) Run(ctx context.Context) error {
 	haEnabled := t.Cfg.HA.Enabled
 	t.cfgMu.RUnlock()
 
+	t.warnIfTokensInPlaintext()
+
 	for _, module := range targets {
 		if !slices.Contains(UserVisibleModules, module) {
 			return fmt.Errorf("selected target (%s) is an internal module or invalid target, which is not allowed", module)
@@ -400,6 +407,29 @@ func managedByOf(e *api.ServiceResolverConfigEntry, tags []string) string {
 	}
 }
 
+// ErrInvalidOverride marks override requests that are invalid as sent (HTTP 400).
+var ErrInvalidOverride = errors.New("invalid override")
+
+// parseOverrideDuration accepts a positive Go duration such as "15m"; zero or negative TTLs
+// would expire immediately.
+func parseOverrideDuration(duration string) (time.Duration, error) {
+	d, err := time.ParseDuration(duration)
+	if err != nil {
+		return 0, fmt.Errorf("%w: duration %q is not a valid duration such as \"15m\" or \"1h\"", ErrInvalidOverride, duration)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%w: duration %q must be positive", ErrInvalidOverride, duration)
+	}
+	return d, nil
+}
+
+// IsDryRun reports whether ATC only logs changes instead of writing them to Consul.
+func (t *Atc) IsDryRun() bool {
+	t.cfgMu.RLock()
+	defer t.cfgMu.RUnlock()
+	return t.Cfg.DryRun
+}
+
 // ErrForeignResolver is returned when an override would replace a service-resolver that ATC
 // did not create. Clearing the override later deletes the entry, so the original would be lost.
 var ErrForeignResolver = errors.New("service already has a service-resolver that ATC did not create")
@@ -421,6 +451,19 @@ func checkOverrideAllowed(ctx context.Context, client *api.Client, service strin
 		return fmt.Errorf("%w: %q. Applying an override replaces it, and clearing the override later deletes it, so the original configuration would be lost. Retry with force to replace it anyway", ErrForeignResolver, service)
 	}
 	return nil
+}
+
+// warnIfTokensInPlaintext warns when clients send API tokens (static keys or Consul ACL
+// tokens) over plain HTTP from other hosts. That is fine behind a TLS-terminating proxy, which
+// ATC cannot detect, so this is a warning rather than an error.
+func (t *Atc) warnIfTokensInPlaintext() {
+	t.cfgMu.RLock()
+	srv, auth := t.Cfg.Server, t.Cfg.Auth
+	t.cfgMu.RUnlock()
+	if t.Server == nil || !auth.Enabled || srv.TLSEnabled() || IsLoopbackListenAddress(srv.ListenAddress) {
+		return
+	}
+	t.coreLogger.Warn("API tokens are sent over plain HTTP. Terminate TLS in front of ATC, or set server.tls_cert_file and server.tls_key_file.")
 }
 
 // cancelPendingWrites drops writes queued on this node for a service after an operator changed
@@ -1143,9 +1186,9 @@ func (t *Atc) ApplyFailoverOverride(ctx context.Context, service string, targetD
 		"created-by": "atc-override",
 	}
 	if duration != "" {
-		d, err := time.ParseDuration(duration)
+		d, err := parseOverrideDuration(duration)
 		if err != nil {
-			return fmt.Errorf("invalid duration format %q: %w", duration, err)
+			return err
 		}
 		meta["atc-override-expires-at"] = time.Now().Add(d).Format(time.RFC3339)
 	}
@@ -1206,9 +1249,9 @@ func (t *Atc) TriggerManualRedirect(ctx context.Context, service string, redirec
 		"created-by": "atc-override",
 	}
 	if duration != "" {
-		d, err := time.ParseDuration(duration)
+		d, err := parseOverrideDuration(duration)
 		if err != nil {
-			return fmt.Errorf("invalid duration format %q: %w", duration, err)
+			return err
 		}
 		meta["atc-override-expires-at"] = time.Now().Add(d).Format(time.RFC3339)
 	}
@@ -1269,14 +1312,22 @@ func (t *Atc) apiServicesDeleteHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if strings.Contains(err.Error(), "not created by ATC") {
+			t.logAudit(r.Context(), r, "purge_resolver", svcName, map[string]any{"outcome": "rejected", "error": err.Error()})
 			writeJSONError(w, http.StatusForbidden, err.Error())
 			return
 		}
+		t.logAudit(r.Context(), r, "purge_resolver", svcName, map[string]any{"outcome": "failed", "error": err.Error()})
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	t.logAudit(r.Context(), r, "purge_resolver", svcName, nil)
+	if t.IsDryRun() {
+		t.logAudit(r.Context(), r, "purge_resolver", svcName, map[string]any{"outcome": "dry_run"})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"status":"dry_run","message":"Dry-run mode: the purge was logged but nothing was deleted in Consul."}`)
+		return
+	}
+	t.logAudit(r.Context(), r, "purge_resolver", svcName, map[string]any{"outcome": "purged"})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1593,8 +1644,11 @@ func (t *Atc) ListActiveOverrides(ctx context.Context) ([]map[string]any, error)
 	return overrides, nil
 }
 
+// overrideSweepInterval is how often expired overrides are purged. Var for tests.
+var overrideSweepInterval = 10 * time.Second
+
 func (t *Atc) sweepExpiredOverrides(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(overrideSweepInterval)
 	defer ticker.Stop()
 
 	t.coreLogger.InfoContext(ctx, "Starting override expiration sweep loop")
@@ -1604,57 +1658,63 @@ func (t *Atc) sweepExpiredOverrides(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !t.isSweepOwner() {
-				continue
-			}
-			overrides, err := t.ListActiveOverrides(ctx)
-			if err != nil {
-				t.coreLogger.ErrorContext(ctx, "Failed to list active overrides during sweep", slog.Any("error", err))
-				continue
-			}
+			t.sweepExpiredOverridesOnce(ctx)
+		}
+	}
+}
 
-			now := time.Now()
-			for _, o := range overrides {
-				svcName, _ := o["service"].(string)
-				expiresAtStr, _ := o["expires_at"].(string)
-				if expiresAtStr == "" || expiresAtStr == "never" {
-					continue
-				}
+// sweepExpiredOverridesOnce purges overrides whose TTL has passed. Only one node sweeps
+// (see isSweepOwner).
+func (t *Atc) sweepExpiredOverridesOnce(ctx context.Context) {
+	if !t.isSweepOwner() {
+		return
+	}
+	overrides, err := t.ListActiveOverrides(ctx)
+	if err != nil {
+		t.coreLogger.ErrorContext(ctx, "Failed to list active overrides during sweep", slog.Any("error", err))
+		return
+	}
 
-				exp, err := time.Parse(time.RFC3339, expiresAtStr)
+	now := time.Now()
+	for _, o := range overrides {
+		svcName, _ := o["service"].(string)
+		expiresAtStr, _ := o["expires_at"].(string)
+		if expiresAtStr == "" || expiresAtStr == "never" {
+			continue
+		}
+
+		exp, err := time.Parse(time.RFC3339, expiresAtStr)
+		if err != nil {
+			t.coreLogger.ErrorContext(ctx, "Failed to parse override expiration time", slog.String("service", svcName), slog.String("expires_at", expiresAtStr), slog.Any("error", err))
+			continue
+		}
+
+		if now.After(exp) {
+			t.coreLogger.InfoContext(ctx, "Override expired, purging", slog.String("service", svcName), slog.Time("expires_at", exp))
+
+			purgeCtx, span := coreTracer.Start(ctx, "PurgeExpiredOverride", trace.WithAttributes(attribute.String("service", svcName)))
+
+			t.cfgMu.RLock()
+			dryRun := t.Cfg.DryRun
+			t.cfgMu.RUnlock()
+
+			if dryRun {
+				span.AddEvent("dry_run_purge_expired_override", trace.WithAttributes(attribute.String("service", svcName)))
+				t.coreLogger.InfoContext(purgeCtx, "[DRY RUN] Would purge expired service-resolver override", slog.String("service", svcName))
+			} else {
+				span.AddEvent("purge_expired_override", trace.WithAttributes(attribute.String("service", svcName)))
+				err = t.PurgeServiceResolver(purgeCtx, svcName)
 				if err != nil {
-					t.coreLogger.ErrorContext(ctx, "Failed to parse override expiration time", slog.String("service", svcName), slog.String("expires_at", expiresAtStr), slog.Any("error", err))
-					continue
-				}
-
-				if now.After(exp) {
-					t.coreLogger.InfoContext(ctx, "Override expired, purging", slog.String("service", svcName), slog.Time("expires_at", exp))
-
-					purgeCtx, span := coreTracer.Start(ctx, "PurgeExpiredOverride", trace.WithAttributes(attribute.String("service", svcName)))
-
-					t.cfgMu.RLock()
-					dryRun := t.Cfg.DryRun
-					t.cfgMu.RUnlock()
-
-					if dryRun {
-						span.AddEvent("dry_run_purge_expired_override", trace.WithAttributes(attribute.String("service", svcName)))
-						t.coreLogger.InfoContext(purgeCtx, "[DRY RUN] Would purge expired service-resolver override", slog.String("service", svcName))
-					} else {
-						span.AddEvent("purge_expired_override", trace.WithAttributes(attribute.String("service", svcName)))
-						err = t.PurgeServiceResolver(purgeCtx, svcName)
-						if err != nil {
-							t.coreLogger.ErrorContext(purgeCtx, "Failed to purge expired override", slog.String("service", svcName), slog.Any("error", err))
-							span.RecordError(err)
-						} else {
-							t.coreLogger.InfoContext(purgeCtx, "Purged expired service-resolver override", slog.String("service", svcName))
-							if t.overridesPurgedCounter != nil {
-								t.overridesPurgedCounter.Add(purgeCtx, 1)
-							}
-						}
+					t.coreLogger.ErrorContext(purgeCtx, "Failed to purge expired override", slog.String("service", svcName), slog.Any("error", err))
+					span.RecordError(err)
+				} else {
+					t.coreLogger.InfoContext(purgeCtx, "Purged expired service-resolver override", slog.String("service", svcName))
+					if t.overridesPurgedCounter != nil {
+						t.overridesPurgedCounter.Add(purgeCtx, 1)
 					}
-					span.End()
 				}
 			}
+			span.End()
 		}
 	}
 }

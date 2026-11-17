@@ -63,6 +63,7 @@ type Redirector struct {
 	foreign        *forwarder.ForeignTracker
 
 	unknownStrategyWarn *forwarder.WarnTracker
+	aclFilteredWarn     *forwarder.WarnTracker
 	noTargetWarn        *forwarder.WarnTracker
 	strategiesCache     map[string]cachedStrategies
 
@@ -190,6 +191,7 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 	}
 
 	r.foreign = forwarder.NewForeignTracker(meter, "redirector", logger)
+	r.aclFilteredWarn = forwarder.NewWarnTracker(logger, "Consul filtered the service catalog by ACLs: services the token cannot read are invisible to ATC")
 	r.unknownStrategyWarn = forwarder.NewWarnTracker(logger, "Service tag names a redirect strategy that is not configured; the default target will be used if the service disappears")
 	r.noTargetWarn = forwarder.NewWarnTracker(logger, "Not writing a redirect resolver: only one datacenter is known")
 	return r, nil
@@ -466,13 +468,21 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 	}()
 
 	var services map[string][]string
+	var servicesMeta *api.QueryMeta
 	err = r.traceConsulCall(ctx, "list_services", func() error {
 		var err error
-		services, _, err = client.Catalog().Services((&api.QueryOptions{}).WithContext(ctx))
+		services, servicesMeta, err = client.Catalog().Services((&api.QueryOptions{}).WithContext(ctx))
 		return err
 	})
 	if err != nil {
 		return fmt.Errorf("failed to fetch consul services: %w", err)
+	}
+	// Consul hides what the token may not read instead of failing, so a token without
+	// service:read / node:read makes ATC see no services and silently do nothing.
+	if !r.forwarderEnabled && servicesMeta != nil && servicesMeta.ResultsFilteredByACLs {
+		r.aclFilteredWarn.Update(ctx, map[string]string{"catalog": "the Consul token cannot read every service; see the ATC ACL policy"})
+	} else {
+		r.aclFilteredWarn.Update(ctx, nil)
 	}
 
 	r.mu.RLock()
@@ -769,6 +779,17 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 	}
 
 	r.foreign.Update(ctx, foreign)
+	// Forget services that are gone from the catalog and have no resolver left: there is
+	// nothing to redirect for them any more, and the cache would otherwise only grow.
+	r.mu.Lock()
+	for name := range r.strategiesCache {
+		_, inCatalog := services[name]
+		_, hasEntry := existingResolverEntries[name]
+		if !inCatalog && !hasEntry {
+			delete(r.strategiesCache, name)
+		}
+	}
+	r.mu.Unlock()
 	r.unknownStrategyWarn.Update(ctx, unknownStrategy)
 	r.noTargetWarn.Update(ctx, noTarget)
 	return errors.Join(writeErrs...)

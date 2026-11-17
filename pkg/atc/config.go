@@ -74,6 +74,19 @@ func ApplyViperDefaults(v *viper.Viper, cfg *Config) {
 			cfg.Server.ListenAddress = val
 		}
 	}
+	for _, k := range []struct {
+		key, env string
+		dst      *string
+	}{
+		{"tls_cert_file", "ATC_TLS_CERT_FILE", &cfg.Server.TLSCertFile},
+		{"tls_key_file", "ATC_TLS_KEY_FILE", &cfg.Server.TLSKeyFile},
+	} {
+		if !v.IsSet("server."+k.key) || hasEnv(k.env) {
+			if val := v.GetString(k.key); val != "" {
+				*k.dst = val
+			}
+		}
+	}
 	if v.GetBool("allow_unauthenticated") {
 		cfg.Auth.AllowUnauthenticated = true
 	} else if hasEnv("ATC_ALLOW_UNAUTHENTICATED") {

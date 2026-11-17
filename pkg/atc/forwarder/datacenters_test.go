@@ -100,3 +100,40 @@ func TestReconcileConcurrentWithSetConnection(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestACLFilteredCatalogIsReported: without node:read/service:read Consul silently hides
+// services, so ATC would do nothing without any error. It must say so, once.
+func TestACLFilteredCatalogIsReported(t *testing.T) {
+	fc := newFakeConsul(t)
+	fc.aclFiltered.Store(true)
+	var warns atomic.Int32
+	logger := slog.New(countingHandler{Handler: slog.NewTextHandler(io.Discard, nil), warns: &warns})
+	f, err := New(logger, fc.addr(), "", "dc1", "", "", nil, "", "", false)
+	require.NoError(t, err)
+	client, err := api.NewClient(&api.Config{Address: fc.addr()})
+	require.NoError(t, err)
+
+	require.NoError(t, f.reconcile(context.Background(), client))
+	require.NoError(t, f.reconcile(context.Background(), client))
+	assert.Equal(t, int32(1), warns.Load())
+
+	fc.aclFiltered.Store(false)
+	require.NoError(t, f.reconcile(context.Background(), client))
+	fc.aclFiltered.Store(true)
+	require.NoError(t, f.reconcile(context.Background(), client))
+	assert.Equal(t, int32(2), warns.Load(), "warns again if the problem comes back")
+}
+
+func TestStrategyCacheForgetsGoneServices(t *testing.T) {
+	fc := newFakeConsul(t) // catalog: payments only; no resolvers
+	f := newTestForwarder(t, fc.addr())
+	f.strategiesCache["retired-long-ago"] = cachedStrategies{failover: "x"}
+	client, err := api.NewClient(&api.Config{Address: fc.addr()})
+	require.NoError(t, err)
+
+	require.NoError(t, f.reconcile(context.Background(), client))
+	_, gone := f.strategiesCache["retired-long-ago"]
+	_, kept := f.strategiesCache["payments"]
+	assert.False(t, gone, "a service with no catalog entry and no resolver is forgotten")
+	assert.True(t, kept)
+}

@@ -277,6 +277,59 @@ describe('ATC Dashboard App', () => {
     });
   });
 
+  it('tells the user when an override only ran in dry-run mode', async () => {
+    const origImpl = window.fetch.getMockImplementation();
+    window.fetch.mockImplementation((url, options) => {
+      if (url.includes('/api/overrides')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ status: 'dry_run', message: 'Dry-run mode: the override was logged but not written to Consul.' })
+        });
+      }
+      return origImpl(url, options);
+    });
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+
+    render(<App />);
+    fireEvent.click((await screen.findAllByRole('button', { name: /Apply Manual Override/i }))[0]);
+    fireEvent.click(screen.getByRole('button', { name: /Apply Override/i }));
+
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledWith(expect.stringMatching(/not written to Consul/)));
+  });
+
+  describe('API token storage', () => {
+    beforeEach(() => {
+      window.localStorage.clear();
+      window.sessionStorage.clear();
+    });
+
+    it('keeps the token in session storage, not local storage', async () => {
+      const origImpl = window.fetch.getMockImplementation();
+      window.fetch.mockImplementation((url, options) => {
+        if (url.includes('/api/leader')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ leader: true, auth_enabled: true, components: {} }) });
+        }
+        return origImpl(url, options);
+      });
+
+      render(<App />);
+      const input = await screen.findByPlaceholderText('Enter API Token...');
+      fireEvent.change(input, { target: { value: 'secret-token' } });
+      fireEvent.blur(input);
+
+      await waitFor(() => expect(window.sessionStorage.getItem('atc-api-token')).toBe('secret-token'));
+      expect(window.localStorage.getItem('atc-api-token')).toBeNull();
+    });
+
+    it('removes a token left in local storage by older versions', async () => {
+      window.localStorage.setItem('atc-api-token', 'old-token');
+      render(<App />);
+      await screen.findByText('payment-service');
+      expect(window.localStorage.getItem('atc-api-token')).toBeNull();
+    });
+  });
+
   describe('resolvers not created by ATC', () => {
     const withForeignService = (origImpl, overrideResponses) => (url, options) => {
       if (url.includes('/api/services') && !(options && options.method)) {

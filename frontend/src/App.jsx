@@ -1,22 +1,32 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
+// The API token is kept in sessionStorage: it is gone when the tab or browser closes, which
+// limits how long a stolen or forgotten token lingers. Older versions used localStorage, so
+// any copy left there is removed. Storage access can throw (private mode, blocked storage).
 const getLocalStorageItem = (key) => {
-  if (typeof window !== 'undefined' && window.localStorage) {
-    return window.localStorage.getItem(key) || '';
+  try {
+    window.localStorage?.removeItem(key);
+    return window.sessionStorage?.getItem(key) || '';
+  } catch {
+    return '';
   }
-  return '';
 };
 
 const setLocalStorageItem = (key, val) => {
-  if (typeof window !== 'undefined' && window.localStorage) {
-    window.localStorage.setItem(key, val);
+  try {
+    window.sessionStorage?.setItem(key, val);
+  } catch {
+    // storage unavailable: the token lives only in memory for this page
   }
 };
 
 const removeLocalStorageItem = (key) => {
-  if (typeof window !== 'undefined' && window.localStorage) {
-    window.localStorage.removeItem(key);
+  try {
+    window.sessionStorage?.removeItem(key);
+    window.localStorage?.removeItem(key);
+  } catch {
+    // nothing stored
   }
 };
 
@@ -278,6 +288,17 @@ function App() {
   };
 
 
+  // In dry-run mode ATC answers {"status":"dry_run","message":...}: tell the user nothing changed.
+  const reportDryRun = async (res) => {
+    if (res.status === 204 || typeof res.json !== 'function') return;
+    try {
+      const body = await res.json();
+      if (body && body.status === 'dry_run') alert(body.message);
+    } catch {
+      // not JSON: nothing to report
+    }
+  };
+
   const handleApplyOverride = async (serviceName, force = false) => {
     if (!overrideTargetDc) {
       alert('Please specify a target datacenter.');
@@ -321,6 +342,7 @@ function App() {
         const text = await res.text();
         throw new Error(text || `Failed to apply override: ${res.statusText}`);
       }
+      await reportDryRun(res);
       setActiveOverrideForm(null);
       setOverrideTargetDc('');
       setOverrideNamespace('');
@@ -356,6 +378,7 @@ function App() {
         const text = await res.text();
         throw new Error(text || `Failed to purge resolver: ${res.statusText}`);
       }
+      await reportDryRun(res);
       fetchServices();
     } catch (err) {
       alert(err.message);

@@ -330,6 +330,18 @@ brew install atc</code></pre>
               <td>Interface the API/UI and MCP listeners bind to (<code>server.listen_address</code>). Empty means all interfaces. The metrics listener always binds to all interfaces.</td>
             </tr>
             <tr>
+              <td><code>--tls-cert-file</code></td>
+              <td><code>ATC_TLS_CERT_FILE</code></td>
+              <td>""</td>
+              <td>Serve the API/UI and MCP over HTTPS with this certificate (<code>server.tls_cert_file</code>, requires <code>--tls-key-file</code>). The files are re-read when they change, so rotated certificates are picked up without a restart. The metrics listener stays HTTP.</td>
+            </tr>
+            <tr>
+              <td><code>--tls-key-file</code></td>
+              <td><code>ATC_TLS_KEY_FILE</code></td>
+              <td>""</td>
+              <td>Private key for <code>--tls-cert-file</code> (<code>server.tls_key_file</code>).</td>
+            </tr>
+            <tr>
               <td><code>--allow-unauthenticated</code></td>
               <td><code>ATC_ALLOW_UNAUTHENTICATED</code></td>
               <td>false</td>
@@ -577,6 +589,39 @@ jobs:
           <li><strong>When Active:</strong> The resolver is configured for failover. The metadata reports <code>failover-strategy</code> and removes <code>redirect-strategy</code>.</li>
           <li><strong>When Offline:</strong> The resolver is configured for redirect. The metadata reports <code>redirect-strategy</code> and removes <code>failover-strategy</code>.</li>
         </ul>
+      
+        <h2>Consul ACL policy</h2>
+        <p>ATC's own Consul token (<code>consul_token</code>, <code>ATC_CONSUL_TOKEN</code>, or <code>consulToken.existingSecret</code> in the Helm chart) needs the policy below, shipped as <code>deploy/consul/atc-policy.hcl</code>. An integration test runs ATC with exactly this policy against a default-deny Consul, and removing any rule breaks at least one ATC function.</p>
+<pre><code class="language-bash">consul acl policy create -name atc -rules @deploy/consul/atc-policy.hcl
+consul acl token create -description "ATC" -policy-name atc</code></pre>
+<pre><code class="language-hcl"># Read and write service-resolver config entries. Consul requires service:write on a service
+# to change its resolver. This also allows registering services under those names; if your
+# ATC-managed services share a naming convention, narrow the prefix accordingly.
+service_prefix &quot;&quot; {
+  policy = &quot;write&quot;
+}
+
+# Read the service catalog (without node:read Consul hides services from ATC instead of
+# failing) and datacenter membership for /api/federation.
+node_prefix &quot;&quot; {
+  policy = &quot;read&quot;
+}
+
+# Detect the local datacenter and check delegated tokens (agent/self).
+agent_prefix &quot;&quot; {
+  policy = &quot;read&quot;
+}
+
+# HA leader election: the lock keys under ha.lock_key (default &quot;atc/leader/&quot;).
+key_prefix &quot;atc/leader/&quot; {
+  policy = &quot;write&quot;
+}
+
+# Sessions that hold the leader locks; also needed by &quot;atc leader force-unlock&quot;.
+session_prefix &quot;&quot; {
+  policy = &quot;write&quot;
+}</code></pre>
+        <p><code>service:write</code> is needed because Consul only lets a token change a service's resolver when it may write that service. It also allows registering services with those names; if the services ATC manages share a naming convention, narrow <code>service_prefix</code> to it. If the token cannot read every service, Consul hides them instead of failing; ATC then logs <em>Consul filtered the service catalog by ACLs</em> once.</p>
       </section>
 
       <!-- Hysteresis Section -->
@@ -910,6 +955,7 @@ make up-atc</code></pre>
         <h3>Response Codes</h3>
         <ul>
           <li><code>204 No Content</code>: Purge succeeded. ATC reconciles right away, so automatic routing for the service is restored.</li>
+          <li><code>200 OK</code> with <code>{"status":"dry_run",...}</code>: dry-run mode; the purge was only logged.</li>
           <li><code>400 Bad Request</code>: Missing service name parameter.</li>
           <li><code>403 Forbidden</code>: The entry was not created by ATC (cannot purge).</li>
           <li><code>404 Not Found</code>: The config entry does not exist in Consul.</li>
@@ -932,8 +978,8 @@ make up-atc</code></pre>
 
         <h3>Response Codes</h3>
         <ul>
-          <li><code>200 OK</code>: Override successfully applied.</li>
-          <li><code>400 Bad Request</code>: Invalid body, missing fields, or invalid type/duration format.</li>
+          <li><code>200 OK</code>: Override applied (<code>{"status":"applied"}</code>), or in dry-run mode only logged (<code>{"status":"dry_run","message":...}</code>).</li>
+          <li><code>400 Bad Request</code>: Invalid body, missing fields, invalid type, or a <code>duration</code> that is not a positive Go duration (e.g. <code>"-5m"</code> or <code>"10/s"</code>).</li>
           <li><code>409 Conflict</code>: The service already has a resolver ATC did not create, and <code>force</code> was not set.</li>
           <li><code>500 Internal Server Error</code>: Consul write failed.</li>
         </ul>
@@ -1180,7 +1226,12 @@ curl -N -H "Accept: application/json, text/event-stream" \
           <li>If <code>consul_token_delegation</code> is enabled, ATC forwards the token to the local Consul agent via the <code>/v1/agent/self</code> API. If Consul accepts the token as valid, authorization succeeds. Furthermore, for Consul read/write queries, ATC dynamically propagates this delegated token in the Consul context, enforcing user-level Consul ACLs natively.</li>
         </ol>
 
+        <p>Verification results are cached: a token Consul accepts for 30 seconds, a token it rejects for 10 seconds. Checks that are not cached are limited to 20 per second (bursts of 40); beyond that, requests with unknown tokens get <code>429 Too Many Requests</code> instead of a Consul call, so unauthenticated clients cannot turn requests into load on Consul. Cached valid tokens are not affected.</p>
         <p>MCP sessions are bound to the token that created them: a request that reuses an MCP session ID with a different token is rejected, so one caller cannot run tools with another caller's Consul permissions.</p>
+
+        <h2>Transport security</h2>
+        <p>API tokens, including users' Consul ACL tokens when token delegation is enabled, are sent with every request. Serve ATC over HTTPS: either terminate TLS in front of it (ingress, load balancer, service mesh) or let ATC serve HTTPS itself with <code>server.tls_cert_file</code> and <code>server.tls_key_file</code> (or <code>--tls-cert-file</code> / <code>--tls-key-file</code>). ATC re-reads the files when they change, so certificates rotated by cert-manager or Vault are picked up without a restart. When auth is enabled, ATC is reachable from other hosts and does not serve HTTPS itself, it logs a warning at startup.</p>
+        <p>Every response carries a strict <code>Content-Security-Policy</code> (only ATC's own origin may provide scripts, styles, fonts and API endpoints) and <code>Referrer-Policy: no-referrer</code>. With TLS enabled, responses also set <code>Strict-Transport-Security</code>. The dashboard keeps the API token in the browser's session storage, so it is gone when the tab is closed.</p>
 
         <h2>4. Browser Origins & DNS Rebinding</h2>
         <p>Requests carrying an <code>Origin</code> header are only accepted when they are same-origin (e.g. the embedded dashboard), listed in <code>server.allowed_origins</code>, or come from a <code>localhost</code> page to a locally bound ATC. The MCP listener echoes allowed origins in its CORS headers instead of <code>*</code>. When auth is disabled on loopback, requests whose <code>Host</code> header is not a loopback name are rejected to block DNS-rebinding attacks.</p>
@@ -1192,7 +1243,7 @@ curl -N -H "Accept: application/json, text/event-stream" \
         <h2>5. High-Priority JSON Audit Logging</h2>
         <p>All state-changing actions (manual overrides and purges) write structured JSON logs directly to the process's standard output or error stream:</p>
         <pre><code class="language-json">{"time":"2026-06-23T15:02:53+02:00","level":"INFO","msg":"audit event","module":"audit","audit":true,"client_ip":"127.0.0.1","actor":"atc-super...","action":"create_override","target_service":"payment-service","params":{"target_dc":"dc2","type":"failover"}}</code></pre>
-        <p>Sensitive tokens are automatically masked in the <code>actor</code> attribute to prevent secret exposure in logs.</p>
+        <p>Sensitive tokens are automatically masked in the <code>actor</code> attribute to prevent secret exposure in logs. Override and purge entries carry an <code>outcome</code>: <code>applied</code> / <code>purged</code>, <code>dry_run</code>, <code>rejected</code> (invalid request or a resolver ATC did not create) or <code>failed</code> (with the error), so refused and failed attempts are audited too.</p>
       </section>
     </main>
 

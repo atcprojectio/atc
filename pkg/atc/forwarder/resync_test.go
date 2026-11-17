@@ -29,6 +29,7 @@ type fakeConsul struct {
 	datacenters   atomic.Value // JSON list, nearest first
 	lastPut       atomic.Value // body of the last config write
 	current       atomic.Value // JSON of the single "payments" resolver, "" = not found
+	aclFiltered   atomic.Bool  // mark catalog responses as filtered by ACLs
 }
 
 func newFakeConsul(t *testing.T) *fakeConsul {
@@ -46,9 +47,15 @@ func newFakeConsul(t *testing.T) *fakeConsul {
 			return
 		}
 		w.Header().Set("X-Consul-Index", "1")
+		// Real Consul always sends these; the client stops parsing query metadata without them.
+		w.Header().Set("X-Consul-LastContact", "0")
+		w.Header().Set("X-Consul-KnownLeader", "true")
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/v1/catalog/services":
+			if fc.aclFiltered.Load() {
+				w.Header().Set("X-Consul-Results-Filtered-By-ACLs", "true")
+			}
 			_ = json.NewEncoder(w).Encode(map[string][]string{"payments": fc.tags.Load().([]string)})
 		case r.URL.Path == "/v1/health/state/any":
 			_, _ = w.Write([]byte(`[]`))

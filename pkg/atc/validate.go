@@ -1,6 +1,7 @@
 package atc
 
 import (
+	"crypto/tls"
 	"fmt"
 	"slices"
 	"time"
@@ -38,6 +39,14 @@ func ValidateConfig(cfg Config) []error {
 		mdp, err2 := time.ParseDuration(cfg.MinDampeningPeriod)
 		if err1 == nil && err2 == nil && dp < mdp {
 			errs = append(errs, fmt.Errorf("dampening_period %q cannot be less than min_dampening_period %q", cfg.DampeningPeriod, cfg.MinDampeningPeriod))
+		}
+	}
+
+	if (cfg.Server.TLSCertFile == "") != (cfg.Server.TLSKeyFile == "") {
+		errs = append(errs, fmt.Errorf("server.tls_cert_file and server.tls_key_file must be set together"))
+	} else if cfg.Server.TLSEnabled() {
+		if _, err := tls.LoadX509KeyPair(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile); err != nil {
+			errs = append(errs, fmt.Errorf("invalid TLS certificate or key: %w", err))
 		}
 	}
 

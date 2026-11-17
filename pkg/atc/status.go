@@ -293,18 +293,35 @@ func (t *Atc) apiOverridesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if errors.Is(err, ErrForeignResolver) {
-		writeJSONError(w, http.StatusConflict, err.Error())
-		return
-	}
+	details := map[string]any{"type": req.Type, "target_dc": req.TargetDc, "namespace": req.Namespace, "force": req.Force}
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to apply override: %v", err))
+		// Failed and refused attempts are audited too.
+		status, outcome := http.StatusInternalServerError, "failed"
+		switch {
+		case errors.Is(err, ErrForeignResolver):
+			status, outcome = http.StatusConflict, "rejected"
+		case errors.Is(err, ErrInvalidOverride):
+			status, outcome = http.StatusBadRequest, "rejected"
+		}
+		details["outcome"], details["error"] = outcome, err.Error()
+		t.logAudit(r.Context(), r, "create_override", req.Service, details)
+		if status == http.StatusInternalServerError {
+			writeJSONError(w, status, fmt.Sprintf("failed to apply override: %v", err))
+		} else {
+			writeJSONError(w, status, err.Error())
+		}
 		return
 	}
 
-	t.logAudit(r.Context(), r, "create_override", req.Service, map[string]any{"type": req.Type, "target_dc": req.TargetDc, "namespace": req.Namespace, "force": req.Force})
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	if t.IsDryRun() {
+		details["outcome"] = "dry_run"
+		t.logAudit(r.Context(), r, "create_override", req.Service, details)
+		_, _ = fmt.Fprint(w, `{"status":"dry_run","message":"Dry-run mode: the override was logged but not written to Consul."}`)
+		return
+	}
+	details["outcome"] = "applied"
+	t.logAudit(r.Context(), r, "create_override", req.Service, details)
 	_, _ = fmt.Fprint(w, `{"status":"applied"}`)
 }
 
