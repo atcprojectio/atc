@@ -21,11 +21,17 @@ type fakeConsul struct {
 	resolverLists atomic.Int32
 	puts          atomic.Int32
 	failPuts      atomic.Bool
+	catalog       atomic.Value // JSON service catalog
+	resolvers     atomic.Value // JSON list of service-resolver entries
+	current       atomic.Value // JSON of the single "payments" resolver, "" = not found
 }
 
 func newFakeConsul(t *testing.T) *fakeConsul {
 	t.Helper()
 	fc := &fakeConsul{}
+	fc.catalog.Store(`{"payments":["atc.enabled=true"]}`)
+	fc.resolvers.Store(`[]`)
+	fc.current.Store("")
 	fc.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("index") != "" {
 			<-r.Context().Done() // blocking watch query
@@ -37,12 +43,18 @@ func newFakeConsul(t *testing.T) *fakeConsul {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/v1/catalog/services":
-			_, _ = w.Write([]byte(`{"payments":["atc.enabled=true"]}`))
+			_, _ = w.Write([]byte(fc.catalog.Load().(string)))
 		case r.URL.Path == "/v1/catalog/datacenters":
 			_, _ = w.Write([]byte(`["dc1","dc2"]`))
+		case r.URL.Path == "/v1/config/service-resolver/payments" && r.Method == http.MethodGet:
+			if cur := fc.current.Load().(string); cur != "" {
+				_, _ = w.Write([]byte(cur))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
 		case r.URL.Path == "/v1/config/service-resolver" && r.Method == http.MethodGet:
 			fc.resolverLists.Add(1)
-			_, _ = w.Write([]byte(`[]`))
+			_, _ = w.Write([]byte(fc.resolvers.Load().(string)))
 		case r.Method == http.MethodPut:
 			fc.puts.Add(1)
 			if fc.failPuts.Load() {
@@ -111,4 +123,25 @@ func TestRedirectorSetConnectionSwitchesConsul(t *testing.T) {
 
 	assert.Equal(t, int32(1), oldConsul.resolverLists.Load(), "old Consul must no longer be used")
 	assert.Equal(t, int32(1), newConsul.resolverLists.Load())
+}
+
+func TestRedirectorReloadedResyncIntervalAppliesWhileRunning(t *testing.T) {
+	fc := newFakeConsul(t)
+	fc.failPuts.Store(true)
+	r := newStandaloneRedirector(t, fc.addr())
+	r.SetResyncInterval(0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	defer func() { cancel(); require.NoError(t, <-done) }()
+
+	require.Eventually(t, func() bool { return fc.puts.Load() >= 1 }, 2*time.Second, 10*time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
+	settled := fc.puts.Load()
+	fc.failPuts.Store(false)
+
+	r.SetResyncInterval(100 * time.Millisecond) // hot reload
+	assert.Eventually(t, func() bool { return fc.puts.Load() > settled }, 2*time.Second, 20*time.Millisecond,
+		"the new resync interval must take effect without restarting Run")
 }
