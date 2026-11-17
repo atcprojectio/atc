@@ -18,7 +18,7 @@ linux: build-frontend
 snapshot: build-frontend
 	goreleaser release --snapshot --clean
 tag:
-	git tag $(shell svu next)
+	git tag $(shell svu next --v0)
 	git push --tags
 release: tag build-frontend
 	goreleaser --clean

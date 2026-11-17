@@ -101,6 +101,14 @@ make test-frontend
 
 ---
 
+## Versioning
+
+Releases are tagged `vX.Y.Z` in git; every artifact (binaries, packages, Homebrew, container image, Helm chart) uses `X.Y.Z`. Image tags: `X.Y.Z` (fixed), `X.Y`, `X` and `latest` (full releases only, never pre-releases).
+
+ATC is pre-1.0: patch releases contain fixes only, and **minor releases may contain breaking changes**, listed under *Breaking changes* in the release notes. Pin `X.Y.Z` or `X.Y` in production. See the [versioning policy](https://atc-project.io/#versioning).
+
+---
+
 ## Documentation & Resources
 
 For detailed technical specifications, architecture records, and integrations, see:

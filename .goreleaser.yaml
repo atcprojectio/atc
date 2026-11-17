@@ -25,6 +25,8 @@ homebrew_casks:
       - "{{.ProjectName}}"
     homepage: "https://github.com/atcprojectio/atc"
     description: "Active Traffic Control (ATC) automatic Consul traffic control and failover agent."
+    # Do not publish pre-releases to Homebrew users.
+    skip_upload: auto
     repository:
       owner: atcprojectio
       name: homebrew-tap
@@ -74,10 +76,14 @@ builds:
 dockers_v2:
   - images:
       - "ghcr.io/atcprojectio/{{.ProjectName}}"
+    # Versioning (see docs "Versioning"): git tags are vX.Y.Z, every artifact uses X.Y.Z.
+    # The floating tags (X.Y, X, latest) only move for full releases, never for
+    # pre-releases (vX.Y.Z-rc.N) or nightlies. Empty tags are skipped.
     tags:
       - "{{ .Version }}"
-      - "v{{ .Major }}"
-      - "{{ if not .IsNightly }}latest{{ end }}"
+      - "{{ if and (not .Prerelease) (not .IsNightly) }}{{ .Major }}.{{ .Minor }}{{ end }}"
+      - "{{ if and (not .Prerelease) (not .IsNightly) }}{{ .Major }}{{ end }}"
+      - "{{ if and (not .Prerelease) (not .IsNightly) }}latest{{ end }}"
     labels:
       "org.opencontainers.image.description": "Active Traffic Control (ATC) automatic Consul traffic control and failover agent."
       "org.opencontainers.image.name": "{{.ProjectName}}"
@@ -101,13 +107,33 @@ sboms:
   - artifacts: archive
 release:
   prerelease: auto
+  header: |
+    ATC is versioned as `X.Y.Z` (this release is tagged `{{ .Tag }}` in git).
+    Before 1.0, minor releases may contain breaking changes; they are listed under
+    **Breaking changes** below. See https://atc-project.io/#versioning
 checksum:
   name_template: 'checksums.txt'
 snapshot:
-  version_template: "{{ .Tag }}-next"
+  # Plain X.Y.Z like every other artifact, e.g. 0.4.1-next after v0.4.0.
+  version_template: "{{ incpatch .Version }}-next"
 changelog:
   sort: asc
   filters:
     exclude:
       - '^docs:'
       - '^test:'
+  # Commits are squash-merged, so the PR title is the commit subject. Mark breaking
+  # changes with "!" in the PR title (e.g. "feat(auth)!: ...") so they get their own
+  # section; before 1.0 they ship in minor releases.
+  groups:
+    - title: "Breaking changes"
+      regexp: '^\w+(\([^)]*\))?!:'
+      order: 0
+    - title: "Features"
+      regexp: '^feat(\([^)]*\))?:'
+      order: 1
+    - title: "Fixes"
+      regexp: '^fix(\([^)]*\))?:'
+      order: 2
+    - title: "Other changes"
+      order: 999
