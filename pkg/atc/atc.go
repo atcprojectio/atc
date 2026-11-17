@@ -1613,8 +1613,11 @@ func (t *Atc) ListActiveOverrides(ctx context.Context) ([]map[string]any, error)
 	return overrides, nil
 }
 
+// overrideSweepInterval is how often expired overrides are purged. Var for tests.
+var overrideSweepInterval = 10 * time.Second
+
 func (t *Atc) sweepExpiredOverrides(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(overrideSweepInterval)
 	defer ticker.Stop()
 
 	t.coreLogger.InfoContext(ctx, "Starting override expiration sweep loop")
@@ -1624,57 +1627,63 @@ func (t *Atc) sweepExpiredOverrides(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !t.isSweepOwner() {
-				continue
-			}
-			overrides, err := t.ListActiveOverrides(ctx)
-			if err != nil {
-				t.coreLogger.ErrorContext(ctx, "Failed to list active overrides during sweep", slog.Any("error", err))
-				continue
-			}
+			t.sweepExpiredOverridesOnce(ctx)
+		}
+	}
+}
 
-			now := time.Now()
-			for _, o := range overrides {
-				svcName, _ := o["service"].(string)
-				expiresAtStr, _ := o["expires_at"].(string)
-				if expiresAtStr == "" || expiresAtStr == "never" {
-					continue
-				}
+// sweepExpiredOverridesOnce purges overrides whose TTL has passed. Only one node sweeps
+// (see isSweepOwner).
+func (t *Atc) sweepExpiredOverridesOnce(ctx context.Context) {
+	if !t.isSweepOwner() {
+		return
+	}
+	overrides, err := t.ListActiveOverrides(ctx)
+	if err != nil {
+		t.coreLogger.ErrorContext(ctx, "Failed to list active overrides during sweep", slog.Any("error", err))
+		return
+	}
 
-				exp, err := time.Parse(time.RFC3339, expiresAtStr)
+	now := time.Now()
+	for _, o := range overrides {
+		svcName, _ := o["service"].(string)
+		expiresAtStr, _ := o["expires_at"].(string)
+		if expiresAtStr == "" || expiresAtStr == "never" {
+			continue
+		}
+
+		exp, err := time.Parse(time.RFC3339, expiresAtStr)
+		if err != nil {
+			t.coreLogger.ErrorContext(ctx, "Failed to parse override expiration time", slog.String("service", svcName), slog.String("expires_at", expiresAtStr), slog.Any("error", err))
+			continue
+		}
+
+		if now.After(exp) {
+			t.coreLogger.InfoContext(ctx, "Override expired, purging", slog.String("service", svcName), slog.Time("expires_at", exp))
+
+			purgeCtx, span := coreTracer.Start(ctx, "PurgeExpiredOverride", trace.WithAttributes(attribute.String("service", svcName)))
+
+			t.cfgMu.RLock()
+			dryRun := t.Cfg.DryRun
+			t.cfgMu.RUnlock()
+
+			if dryRun {
+				span.AddEvent("dry_run_purge_expired_override", trace.WithAttributes(attribute.String("service", svcName)))
+				t.coreLogger.InfoContext(purgeCtx, "[DRY RUN] Would purge expired service-resolver override", slog.String("service", svcName))
+			} else {
+				span.AddEvent("purge_expired_override", trace.WithAttributes(attribute.String("service", svcName)))
+				err = t.PurgeServiceResolver(purgeCtx, svcName)
 				if err != nil {
-					t.coreLogger.ErrorContext(ctx, "Failed to parse override expiration time", slog.String("service", svcName), slog.String("expires_at", expiresAtStr), slog.Any("error", err))
-					continue
-				}
-
-				if now.After(exp) {
-					t.coreLogger.InfoContext(ctx, "Override expired, purging", slog.String("service", svcName), slog.Time("expires_at", exp))
-
-					purgeCtx, span := coreTracer.Start(ctx, "PurgeExpiredOverride", trace.WithAttributes(attribute.String("service", svcName)))
-
-					t.cfgMu.RLock()
-					dryRun := t.Cfg.DryRun
-					t.cfgMu.RUnlock()
-
-					if dryRun {
-						span.AddEvent("dry_run_purge_expired_override", trace.WithAttributes(attribute.String("service", svcName)))
-						t.coreLogger.InfoContext(purgeCtx, "[DRY RUN] Would purge expired service-resolver override", slog.String("service", svcName))
-					} else {
-						span.AddEvent("purge_expired_override", trace.WithAttributes(attribute.String("service", svcName)))
-						err = t.PurgeServiceResolver(purgeCtx, svcName)
-						if err != nil {
-							t.coreLogger.ErrorContext(purgeCtx, "Failed to purge expired override", slog.String("service", svcName), slog.Any("error", err))
-							span.RecordError(err)
-						} else {
-							t.coreLogger.InfoContext(purgeCtx, "Purged expired service-resolver override", slog.String("service", svcName))
-							if t.overridesPurgedCounter != nil {
-								t.overridesPurgedCounter.Add(purgeCtx, 1)
-							}
-						}
+					t.coreLogger.ErrorContext(purgeCtx, "Failed to purge expired override", slog.String("service", svcName), slog.Any("error", err))
+					span.RecordError(err)
+				} else {
+					t.coreLogger.InfoContext(purgeCtx, "Purged expired service-resolver override", slog.String("service", svcName))
+					if t.overridesPurgedCounter != nil {
+						t.overridesPurgedCounter.Add(purgeCtx, 1)
 					}
-					span.End()
 				}
 			}
+			span.End()
 		}
 	}
 }
