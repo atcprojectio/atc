@@ -113,18 +113,6 @@ func init() {
 	serverCmd.PersistentFlags().String("log_level", "info", "Only log messages with the given severity or above.")
 	_ = viper.BindPFlag("log_level", serverCmd.PersistentFlags().Lookup("log_level"))
 
-	serverCmd.PersistentFlags().String("consul_addr", "", "Consul HTTP address.")
-	_ = viper.BindPFlag("consul_addr", serverCmd.PersistentFlags().Lookup("consul_addr"))
-
-	serverCmd.PersistentFlags().String("consul_token", "", "Consul ACL token.")
-	_ = viper.BindPFlag("consul_token", serverCmd.PersistentFlags().Lookup("consul_token"))
-
-	serverCmd.PersistentFlags().String("consul_dc", "", "Consul datacenter.")
-	_ = viper.BindPFlag("consul_dc", serverCmd.PersistentFlags().Lookup("consul_dc"))
-
-	serverCmd.PersistentFlags().String("node-name", "", "Unique node identity for HA leader election (defaults to hostname-based identity).")
-	_ = viper.BindPFlag("node_name", serverCmd.PersistentFlags().Lookup("node-name"))
-
 	serverCmd.PersistentFlags().Bool("ui-enabled", true, "Enable serving the embedded web UI dashboard.")
 	_ = viper.BindPFlag("ui_enabled", serverCmd.PersistentFlags().Lookup("ui-enabled"))
 
@@ -142,9 +130,6 @@ func init() {
 
 	serverCmd.PersistentFlags().Bool("dry-run", false, "Disable writing to Consul, log actions instead.")
 	_ = viper.BindPFlag("dry_run", serverCmd.PersistentFlags().Lookup("dry-run"))
-
-	serverCmd.PersistentFlags().String("consul-namespace", "", "Consul Enterprise Namespace.")
-	_ = viper.BindPFlag("consul_namespace", serverCmd.PersistentFlags().Lookup("consul-namespace"))
 
 	serverCmd.PersistentFlags().String("write-rate-limit", "1s", "Coalesce write events within this duration window (e.g. 1s, 500ms).")
 	_ = viper.BindPFlag("write_rate_limit", serverCmd.PersistentFlags().Lookup("write-rate-limit"))

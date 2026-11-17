@@ -309,7 +309,13 @@ func New(cfg Config) (*Atc, error) {
 }
 
 func (t *Atc) Run(ctx context.Context) error {
-	for _, module := range t.Cfg.Target {
+	// The config file watcher is already running, so read config under the lock.
+	t.cfgMu.RLock()
+	targets := t.Cfg.Target
+	haEnabled := t.Cfg.HA.Enabled
+	t.cfgMu.RUnlock()
+
+	for _, module := range targets {
 		if !slices.Contains(UserVisibleModules, module) {
 			return fmt.Errorf("selected target (%s) is an internal module or invalid target, which is not allowed", module)
 		}
@@ -339,7 +345,7 @@ func (t *Atc) Run(ctx context.Context) error {
 		})
 	}
 
-	if t.Cfg.HA.Enabled {
+	if haEnabled {
 		g.Go(func() error {
 			return t.runLeaderElection(ctx)
 		})
@@ -838,6 +844,9 @@ func (t *Atc) GetAtcEnabledServices(ctx context.Context) ([]string, error) {
 
 func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	t.cfgMu.RLock()
+	consulNamespace := t.Cfg.ConsulNamespace
+	t.cfgMu.RUnlock()
 	client, err := t.getConsulClient(ctx)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("failed to connect to consul: %v", err))
@@ -951,7 +960,7 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 
 			resultMap[svcName] = ServiceItem{
 				Name:             svcName,
-				Namespace:        t.Cfg.ConsulNamespace,
+				Namespace:        consulNamespace,
 				Tags:             tags,
 				ResolverType:     resType,
 				Status:           "active",
@@ -1016,7 +1025,7 @@ func (t *Atc) apiServicesHandler(w http.ResponseWriter, r *http.Request) {
 
 						ns := res.Namespace
 						if ns == "" {
-							ns = t.Cfg.ConsulNamespace
+							ns = consulNamespace
 						}
 
 						resultMap[res.Name] = ServiceItem{

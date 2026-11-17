@@ -15,21 +15,15 @@ var validateCmd = &cobra.Command{
 	Short: "Validate and lint the configuration file.",
 	Long:  "Parse the strategies config file and check it against semantic validation and schema constraints.",
 	Run: func(cmd *cobra.Command, args []string) {
-		var cfg atc.Config
 		configFile := viper.GetString("config")
 		if configFile == "" {
 			fmt.Fprintln(os.Stderr, "Error: --config flag is required for validation")
 			os.Exit(1)
 		}
 
-		viper.SetConfigFile(configFile)
-		if err := viper.ReadInConfig(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading config file %s: %v\n", configFile, err)
-			os.Exit(1)
-		}
-
-		if err := viper.Unmarshal(&cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "Error unmarshaling configuration: %v\n", err)
+		cfg, err := loadCLIConfig()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 

@@ -41,6 +41,14 @@ func ValidateConfig(cfg Config) []error {
 		}
 	}
 
+	if cfg.WriteRateLimit != "" {
+		if d, err := time.ParseDuration(cfg.WriteRateLimit); err != nil {
+			errs = append(errs, fmt.Errorf("invalid write_rate_limit %q: must be a duration such as \"1s\" or \"500ms\": %w", cfg.WriteRateLimit, err))
+		} else if d < 0 {
+			errs = append(errs, fmt.Errorf("write_rate_limit %q must not be negative", cfg.WriteRateLimit))
+		}
+	}
+
 	if cfg.ResyncInterval != "" {
 		if d, err := time.ParseDuration(cfg.ResyncInterval); err != nil {
 			errs = append(errs, fmt.Errorf("invalid resync_interval %q: %w", cfg.ResyncInterval, err))

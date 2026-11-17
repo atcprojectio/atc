@@ -19,7 +19,7 @@ var modulesCmd = &cobra.Command{
 		logLevel := viper.GetString("log_level")
 		cfg := atc.Config{}
 		cfg.Server.LogLevel = logLevel
-		t, _ := atc.New(cfg)
+		t := atc.NewCLI(cfg) // a static listing needs no telemetry, servers or watchers
 		allDeps := t.DependenciesForModule(atc.All)
 
 		for _, m := range t.UserVisibleModuleNames() {
