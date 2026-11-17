@@ -19,17 +19,13 @@ var serverCmd = &cobra.Command{
 		configFile := viper.GetString("config")
 		if configFile != "" {
 			viper.SetConfigFile(configFile)
-			if err := viper.ReadInConfig(); err != nil {
-				return fmt.Errorf("failed to read config file %s: %w", configFile, err)
-			}
 		}
+		load := func() (atc.Config, error) { return loadServerConfig(cmd) }
 
-		cfg, err := atc.LoadConfigFromViper(viper.GetViper())
+		cfg, err := load()
 		if err != nil {
 			return err
 		}
-		applyChangedServerFlags(cmd, &cfg)
-
 		if errs := atc.ValidateConfig(cfg); len(errs) > 0 {
 			return fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
 		}
@@ -38,25 +34,36 @@ var serverCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		// Reloads (file watcher, API, MCP) use the same loader, so flags keep precedence.
+		t.SetConfigLoader(load)
 
 		if configFile != "" {
 			viper.OnConfigChange(func(e fsnotify.Event) {
-				newCfg, err := atc.LoadConfigFromViper(viper.GetViper())
-				if err != nil {
-					return
-				}
-				applyChangedServerFlags(cmd, &newCfg)
-				if errs := atc.ValidateConfig(newCfg); len(errs) > 0 {
-					return
-				}
-
-				t.ReloadConfig(newCfg)
+				// Errors are logged and counted by TriggerConfigReload.
+				_ = t.TriggerConfigReload()
 			})
 			viper.WatchConfig()
 		}
 
 		return t.Run(cmd.Context())
 	},
+}
+
+// loadServerConfig resolves the server configuration: flags, then ATC_* environment
+// variables, then the config file.
+func loadServerConfig(cmd *cobra.Command) (atc.Config, error) {
+	if configFile := viper.GetString("config"); configFile != "" {
+		viper.SetConfigFile(configFile)
+		if err := viper.ReadInConfig(); err != nil {
+			return atc.Config{}, fmt.Errorf("failed to read config file %s: %w", configFile, err)
+		}
+	}
+	cfg, err := atc.LoadConfigFromViper(viper.GetViper())
+	if err != nil {
+		return cfg, err
+	}
+	applyChangedServerFlags(cmd, &cfg)
+	return cfg, nil
 }
 
 func applyChangedServerFlags(cmd *cobra.Command, cfg *atc.Config) {

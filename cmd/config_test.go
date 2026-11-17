@@ -71,3 +71,20 @@ func TestLeaderStatusAcceptsConsulFlags(t *testing.T) {
 	require.NoError(t, rootCmd.Execute(), "connection flags must be accepted by admin commands")
 	assert.Positive(t, kvReads.Load(), "leader status must query the Consul given by --consul_addr")
 }
+
+// TestReloadKeepsFlagOverrides: reloads use loadServerConfig, so flags keep precedence over
+// values set explicitly in the file. Before, a reload re-read the file without the flags,
+// e.g. replacing --listen-address 127.0.0.1 with the file's 0.0.0.0, which then failed the
+// auth check for an unauthenticated server.
+func TestReloadKeepsFlagOverrides(t *testing.T) {
+	setFlag(t, "config", writeConfig(t, "server:\n  listen_address: \"0.0.0.0\"\nwrite_rate_limit: \"3s\"\n"))
+	f := serverCmd.PersistentFlags().Lookup("listen-address")
+	require.NotNil(t, f)
+	t.Cleanup(func() { _ = f.Value.Set(""); f.Changed = false })
+	require.NoError(t, serverCmd.ParseFlags([]string{"--listen-address", "127.0.0.1"}))
+
+	cfg, err := loadServerConfig(serverCmd)
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1", cfg.Server.ListenAddress, "--listen-address must survive a reload")
+	assert.Equal(t, "3s", cfg.WriteRateLimit)
+}

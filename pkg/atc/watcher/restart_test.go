@@ -78,3 +78,34 @@ func TestSetConnectionWithoutChangeDoesNotRestart(t *testing.T) {
 	w.SetNamespace("other")
 	assert.Len(t, w.restartCh, 1)
 }
+
+// TestWatcherDoesNotWatchHealthChecks: reconciliation only reads the service catalog, so the
+// watcher must not poll every health check in the datacenter (each flap caused a reconcile).
+func TestWatcherDoesNotWatchHealthChecks(t *testing.T) {
+	var healthQueries, catalogQueries atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/health/state/any":
+			healthQueries.Add(1)
+		case "/v1/catalog/services":
+			catalogQueries.Add(1)
+		}
+		if r.URL.Query().Get("index") != "" {
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("X-Consul-Index", "1")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	w := New(slog.New(slog.NewTextHandler(io.Discard, nil)), srv.Listener.Addr().String(), "", "", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	require.Eventually(t, func() bool { return catalogQueries.Load() >= 2 }, 2*time.Second, 10*time.Millisecond)
+	cancel()
+	require.NoError(t, <-done)
+	assert.Zero(t, healthQueries.Load())
+}

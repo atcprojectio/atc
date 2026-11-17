@@ -114,6 +114,8 @@ type Atc struct {
 	overridesCount   int64
 	overridesCountAt time.Time
 
+	configLoader func() (Config, error)
+
 	consulStatusMu sync.Mutex
 	consulStatus   ConsulStatus
 
@@ -1474,21 +1476,35 @@ func (t *Atc) ReloadConfig(cfg Config) {
 	t.requestReconcile("config_reload")
 }
 
+// SetConfigLoader sets how TriggerConfigReload builds the new configuration. The server
+// command uses it so reloads apply the same precedence as startup, including command-line
+// flags (without it, a reload silently dropped flags such as --dry-run).
+func (t *Atc) SetConfigLoader(load func() (Config, error)) {
+	t.cfgMu.Lock()
+	defer t.cfgMu.Unlock()
+	t.configLoader = load
+}
+
+// TriggerConfigReload reloads the configuration (file watcher, POST /api/reload and the MCP
+// reload_config tool all use it). An invalid configuration is rejected, logged and counted
+// as a failed reload; the running configuration stays in place.
 func (t *Atc) TriggerConfigReload() error {
-	t.coreLogger.Info("Triggering manual configuration reload")
-	if configFile := viper.GetString("config"); configFile != "" {
-		if err := viper.ReadInConfig(); err != nil {
-			if t.configReloadsCounter != nil {
-				t.configReloadsCounter.Add(context.Background(), 1, metric.WithAttributes(
-					attribute.String("status", "failure"),
-				))
-			}
-			return fmt.Errorf("failed to read config file %s: %w", configFile, err)
-		}
+	t.coreLogger.Info("Reloading configuration")
+	t.cfgMu.RLock()
+	load := t.configLoader
+	t.cfgMu.RUnlock()
+	if load == nil {
+		load = loadConfigFromGlobalViper
 	}
 
-	newCfg, err := LoadConfigFromViper(viper.GetViper())
+	newCfg, err := load()
+	if err == nil {
+		if errs := ValidateConfig(newCfg); len(errs) > 0 {
+			err = fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
+		}
+	}
 	if err != nil {
+		t.coreLogger.Error("Configuration reload failed; keeping the running configuration", slog.Any("error", err))
 		if t.configReloadsCounter != nil {
 			t.configReloadsCounter.Add(context.Background(), 1, metric.WithAttributes(
 				attribute.String("status", "failure"),
@@ -1497,17 +1513,18 @@ func (t *Atc) TriggerConfigReload() error {
 		return err
 	}
 
-	if errs := ValidateConfig(newCfg); len(errs) > 0 {
-		if t.configReloadsCounter != nil {
-			t.configReloadsCounter.Add(context.Background(), 1, metric.WithAttributes(
-				attribute.String("status", "failure"),
-			))
-		}
-		return fmt.Errorf("invalid configuration on reload: %v", errs[0])
-	}
-
 	t.ReloadConfig(newCfg)
 	return nil
+}
+
+func loadConfigFromGlobalViper() (Config, error) {
+	if configFile := viper.GetString("config"); configFile != "" {
+		viper.SetConfigFile(configFile)
+		if err := viper.ReadInConfig(); err != nil {
+			return Config{}, fmt.Errorf("failed to read config file %s: %w", configFile, err)
+		}
+	}
+	return LoadConfigFromViper(viper.GetViper())
 }
 
 func (t *Atc) ListActiveOverrides(ctx context.Context) ([]map[string]any, error) {
