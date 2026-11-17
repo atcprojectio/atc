@@ -95,7 +95,7 @@ job "atc" {
       driver = "docker"
 
       config {
-        image = "atcprojectio/atc:${var.image_tag}"
+        image = "ghcr.io/atcprojectio/atc:${var.image_tag}"
         ports = ["http", "metrics", "mcp"]
         args = [
           "server",
