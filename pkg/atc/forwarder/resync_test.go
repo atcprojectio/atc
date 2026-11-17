@@ -28,6 +28,7 @@ type fakeConsul struct {
 	resolvers     atomic.Value // JSON list returned for service-resolver entries
 	datacenters   atomic.Value // JSON list, nearest first
 	lastPut       atomic.Value // body of the last config write
+	current       atomic.Value // JSON of the single "payments" resolver, "" = not found
 }
 
 func newFakeConsul(t *testing.T) *fakeConsul {
@@ -37,6 +38,7 @@ func newFakeConsul(t *testing.T) *fakeConsul {
 	fc.resolvers.Store(`[]`)
 	fc.datacenters.Store(`["dc1","dc2"]`)
 	fc.lastPut.Store("")
+	fc.current.Store("")
 	fc.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Blocking watch queries carry an index: hang like a real Consul until the client gives up.
 		if r.URL.Query().Get("index") != "" {
@@ -52,6 +54,12 @@ func newFakeConsul(t *testing.T) *fakeConsul {
 			_, _ = w.Write([]byte(`[]`))
 		case r.URL.Path == "/v1/catalog/datacenters":
 			_, _ = w.Write([]byte(fc.datacenters.Load().(string)))
+		case r.URL.Path == "/v1/config/service-resolver/payments" && r.Method == http.MethodGet:
+			if cur := fc.current.Load().(string); cur != "" {
+				_, _ = w.Write([]byte(cur))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
 		case r.URL.Path == "/v1/config/service-resolver" && r.Method == http.MethodGet:
 			fc.resolverLists.Add(1)
 			_, _ = w.Write([]byte(fc.resolvers.Load().(string)))

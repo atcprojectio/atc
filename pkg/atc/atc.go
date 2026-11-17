@@ -423,6 +423,18 @@ func checkOverrideAllowed(ctx context.Context, client *api.Client, service strin
 	return nil
 }
 
+// cancelPendingWrites drops writes queued on this node for a service after an operator changed
+// its resolver directly. Writes queued on another node (when this one is a standby) are
+// dropped by that node's re-check just before they fire.
+func (t *Atc) cancelPendingWrites(ctx context.Context, service string) {
+	if t.Forwarder != nil {
+		t.Forwarder.CancelPendingWrite(ctx, service)
+	}
+	if t.Redirector != nil {
+		t.Redirector.CancelPendingWrite(ctx, service)
+	}
+}
+
 // requestReconcile asks running forwarder/redirector loops on this node to reconcile, for
 // changes that produce no catalog event (config reloads, deleted resolvers). On a standby
 // node nothing is subscribed; the leader's periodic resync picks the change up instead.
@@ -1108,6 +1120,8 @@ func (t *Atc) PurgeServiceResolver(ctx context.Context, name string) error {
 			span.RecordError(err)
 			return fmt.Errorf("failed to delete config entry: %w", err)
 		}
+		// A write queued during the dampening window would otherwise put the entry back.
+		t.cancelPendingWrites(ctx, name)
 		// Deleting a resolver changes no catalog data, so without this the service would have
 		// no resolver until an unrelated catalog event (e.g. after clearing an override).
 		t.requestReconcile("resolver_purged")
@@ -1172,6 +1186,7 @@ func (t *Atc) ApplyFailoverOverride(ctx context.Context, service string, targetD
 		if err != nil {
 			return fmt.Errorf("failed to set failover override: %w", err)
 		}
+		t.cancelPendingWrites(ctx, service) // a queued automatic write must not replace the override
 		t.coreLogger.InfoContext(ctx, "Applied manual failover override", slog.String("service", service), slog.String("target_dc", targetDc), slog.String("target_ns", targetNs))
 	}
 
@@ -1228,6 +1243,7 @@ func (t *Atc) TriggerManualRedirect(ctx context.Context, service string, redirec
 		if err != nil {
 			return fmt.Errorf("failed to set redirect override: %w", err)
 		}
+		t.cancelPendingWrites(ctx, service) // a queued automatic write must not replace the override
 		t.coreLogger.InfoContext(ctx, "Applied manual redirect override", slog.String("service", service), slog.String("redirect_dc", redirectDc), slog.String("redirect_ns", redirectNs))
 	}
 

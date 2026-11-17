@@ -69,7 +69,10 @@ type Redirector struct {
 	// Hysteresis scheduling state
 	schedMu       sync.Mutex
 	pendingWrites map[string]*api.ServiceResolverConfigEntry
-	writeTimers   map[string]*time.Timer
+	// pendingOwner records who controlled each resolver when its write was scheduled; the
+	// write is dropped if that changed before it fires (purged, overridden, taken over).
+	pendingOwner map[string]string
+	writeTimers  map[string]*time.Timer
 	// runCtx is the context of the current Run (i.e. the leadership term). Scheduled writes
 	// derive from it so they cannot outlive a step-down. nil means Run was never started.
 	runCtx context.Context
@@ -160,6 +163,7 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 		dryRun:                  dryRun,
 		strategiesCache:         make(map[string]cachedStrategies),
 		pendingWrites:           make(map[string]*api.ServiceResolverConfigEntry),
+		pendingOwner:            make(map[string]string),
 		writeTimers:             make(map[string]*time.Timer),
 		reconcileCounter:        reconcileCounter,
 		reconcileDuration:       reconcileDuration,
@@ -253,6 +257,7 @@ func (r *Redirector) CancelPendingWrite(ctx context.Context, svcName string) {
 		delete(r.writeTimers, svcName)
 	}
 	delete(r.pendingWrites, svcName)
+	delete(r.pendingOwner, svcName)
 }
 
 func (r *Redirector) CancelAllPendingWrites(ctx context.Context) {
@@ -266,6 +271,8 @@ func (r *Redirector) CancelAllPendingWrites(ctx context.Context) {
 		timer.Stop()
 		delete(r.writeTimers, svcName)
 		delete(r.pendingWrites, svcName)
+		delete(r.pendingOwner, svcName)
+		delete(r.pendingOwner, svcName)
 	}
 }
 
@@ -608,7 +615,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 					}
 				} else {
 					r.logger.InfoContext(ctx, "Scheduling base service-resolver write", slog.String("service", svcName), slog.Duration("dampening", dampening))
-					r.scheduleWrite(svcName, entry, dampening)
+					r.scheduleWrite(svcName, entry, dampening, forwarder.OwnerState(existing, exists))
 				}
 			}
 		} else {
@@ -754,7 +761,7 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 						}
 					} else {
 						r.logger.InfoContext(ctx, "Scheduling redirect service-resolver write", slog.String("service", name), slog.Duration("dampening", dampening))
-						r.scheduleWrite(name, entry, dampening)
+						r.scheduleWrite(name, entry, dampening, forwarder.OwnerState(existing, true))
 					}
 				}
 			}
@@ -864,7 +871,7 @@ func entriesEqual(a, b *api.ServiceResolverConfigEntry) bool {
 	return true
 }
 
-func (r *Redirector) scheduleWrite(svcName string, entry *api.ServiceResolverConfigEntry, dampening time.Duration) {
+func (r *Redirector) scheduleWrite(svcName string, entry *api.ServiceResolverConfigEntry, dampening time.Duration, owner string) {
 	r.schedMu.Lock()
 	defer r.schedMu.Unlock()
 
@@ -876,10 +883,12 @@ func (r *Redirector) scheduleWrite(svcName string, entry *api.ServiceResolverCon
 		if !entriesEqual(r.pendingWrites[svcName], entry) {
 			r.logger.Info("Resetting dampening timer for pending write", slog.String("service", svcName), slog.Duration("dampening", dampening))
 			r.pendingWrites[svcName] = entry
+			r.pendingOwner[svcName] = owner
 			timer.Reset(dampening)
 		}
 	} else {
 		r.pendingWrites[svcName] = entry
+		r.pendingOwner[svcName] = owner
 		r.writeTimers[svcName] = time.AfterFunc(dampening, func() {
 			r.executeScheduledWrite(svcName)
 		})
@@ -889,7 +898,10 @@ func (r *Redirector) scheduleWrite(svcName string, entry *api.ServiceResolverCon
 func (r *Redirector) executeScheduledWrite(svcName string) {
 	r.schedMu.Lock()
 	entry, ok := r.pendingWrites[svcName]
+	owner, haveOwner := r.pendingOwner[svcName]
+	delete(r.pendingOwner, svcName)
 	delete(r.pendingWrites, svcName)
+	delete(r.pendingOwner, svcName)
 	delete(r.writeTimers, svcName)
 	parent := r.runCtx
 	if parent == nil {
@@ -921,6 +933,23 @@ func (r *Redirector) executeScheduledWrite(svcName string) {
 		r.logger.Error("Failed to create Consul client for scheduled write", slog.String("service", svcName), slog.Any("error", err))
 		span.RecordError(err)
 		return
+	}
+
+	// The resolver may have changed during the dampening window: purged (possibly through
+	// another ATC node), replaced by a manual override, or written by someone else. Then this
+	// write is stale; drop it and let the next reconcile decide with current state.
+	if haveOwner {
+		current, err := forwarder.CurrentOwnerState(ctx, client, svcName)
+		if err != nil {
+			r.logger.Error("Dropping scheduled redirect write: could not re-check the resolver; the next resync retries", slog.String("service", svcName), slog.Any("error", err))
+			span.RecordError(err)
+			return
+		}
+		if current != owner {
+			r.logger.Info("Dropping scheduled redirect write: the resolver changed while the write was pending", slog.String("service", svcName), slog.String("was", owner), slog.String("now", current))
+			span.AddEvent("scheduled_write_dropped_resolver_changed")
+			return
+		}
 	}
 
 	r.mu.RLock()
