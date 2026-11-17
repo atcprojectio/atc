@@ -955,6 +955,7 @@ make up-atc</code></pre>
         <h3>Response Codes</h3>
         <ul>
           <li><code>204 No Content</code>: Purge succeeded. ATC reconciles right away, so automatic routing for the service is restored.</li>
+          <li><code>200 OK</code> with <code>{"status":"dry_run",...}</code>: dry-run mode; the purge was only logged.</li>
           <li><code>400 Bad Request</code>: Missing service name parameter.</li>
           <li><code>403 Forbidden</code>: The entry was not created by ATC (cannot purge).</li>
           <li><code>404 Not Found</code>: The config entry does not exist in Consul.</li>
@@ -977,8 +978,8 @@ make up-atc</code></pre>
 
         <h3>Response Codes</h3>
         <ul>
-          <li><code>200 OK</code>: Override successfully applied.</li>
-          <li><code>400 Bad Request</code>: Invalid body, missing fields, or invalid type/duration format.</li>
+          <li><code>200 OK</code>: Override applied (<code>{"status":"applied"}</code>), or in dry-run mode only logged (<code>{"status":"dry_run","message":...}</code>).</li>
+          <li><code>400 Bad Request</code>: Invalid body, missing fields, invalid type, or a <code>duration</code> that is not a positive Go duration (e.g. <code>"-5m"</code> or <code>"10/s"</code>).</li>
           <li><code>409 Conflict</code>: The service already has a resolver ATC did not create, and <code>force</code> was not set.</li>
           <li><code>500 Internal Server Error</code>: Consul write failed.</li>
         </ul>
@@ -1242,7 +1243,7 @@ curl -N -H "Accept: application/json, text/event-stream" \
         <h2>5. High-Priority JSON Audit Logging</h2>
         <p>All state-changing actions (manual overrides and purges) write structured JSON logs directly to the process's standard output or error stream:</p>
         <pre><code class="language-json">{"time":"2026-06-23T15:02:53+02:00","level":"INFO","msg":"audit event","module":"audit","audit":true,"client_ip":"127.0.0.1","actor":"atc-super...","action":"create_override","target_service":"payment-service","params":{"target_dc":"dc2","type":"failover"}}</code></pre>
-        <p>Sensitive tokens are automatically masked in the <code>actor</code> attribute to prevent secret exposure in logs.</p>
+        <p>Sensitive tokens are automatically masked in the <code>actor</code> attribute to prevent secret exposure in logs. Override and purge entries carry an <code>outcome</code>: <code>applied</code> / <code>purged</code>, <code>dry_run</code>, <code>rejected</code> (invalid request or a resolver ATC did not create) or <code>failed</code> (with the error), so refused and failed attempts are audited too.</p>
       </section>
     </main>
 

@@ -277,6 +277,27 @@ describe('ATC Dashboard App', () => {
     });
   });
 
+  it('tells the user when an override only ran in dry-run mode', async () => {
+    const origImpl = window.fetch.getMockImplementation();
+    window.fetch.mockImplementation((url, options) => {
+      if (url.includes('/api/overrides')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ status: 'dry_run', message: 'Dry-run mode: the override was logged but not written to Consul.' })
+        });
+      }
+      return origImpl(url, options);
+    });
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+
+    render(<App />);
+    fireEvent.click((await screen.findAllByRole('button', { name: /Apply Manual Override/i }))[0]);
+    fireEvent.click(screen.getByRole('button', { name: /Apply Override/i }));
+
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledWith(expect.stringMatching(/not written to Consul/)));
+  });
+
   describe('API token storage', () => {
     beforeEach(() => {
       window.localStorage.clear();

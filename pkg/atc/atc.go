@@ -407,6 +407,29 @@ func managedByOf(e *api.ServiceResolverConfigEntry, tags []string) string {
 	}
 }
 
+// ErrInvalidOverride marks override requests that are invalid as sent (HTTP 400).
+var ErrInvalidOverride = errors.New("invalid override")
+
+// parseOverrideDuration accepts a positive Go duration such as "15m"; zero or negative TTLs
+// would expire immediately.
+func parseOverrideDuration(duration string) (time.Duration, error) {
+	d, err := time.ParseDuration(duration)
+	if err != nil {
+		return 0, fmt.Errorf("%w: duration %q is not a valid duration such as \"15m\" or \"1h\"", ErrInvalidOverride, duration)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%w: duration %q must be positive", ErrInvalidOverride, duration)
+	}
+	return d, nil
+}
+
+// IsDryRun reports whether ATC only logs changes instead of writing them to Consul.
+func (t *Atc) IsDryRun() bool {
+	t.cfgMu.RLock()
+	defer t.cfgMu.RUnlock()
+	return t.Cfg.DryRun
+}
+
 // ErrForeignResolver is returned when an override would replace a service-resolver that ATC
 // did not create. Clearing the override later deletes the entry, so the original would be lost.
 var ErrForeignResolver = errors.New("service already has a service-resolver that ATC did not create")
@@ -1163,9 +1186,9 @@ func (t *Atc) ApplyFailoverOverride(ctx context.Context, service string, targetD
 		"created-by": "atc-override",
 	}
 	if duration != "" {
-		d, err := time.ParseDuration(duration)
+		d, err := parseOverrideDuration(duration)
 		if err != nil {
-			return fmt.Errorf("invalid duration format %q: %w", duration, err)
+			return err
 		}
 		meta["atc-override-expires-at"] = time.Now().Add(d).Format(time.RFC3339)
 	}
@@ -1226,9 +1249,9 @@ func (t *Atc) TriggerManualRedirect(ctx context.Context, service string, redirec
 		"created-by": "atc-override",
 	}
 	if duration != "" {
-		d, err := time.ParseDuration(duration)
+		d, err := parseOverrideDuration(duration)
 		if err != nil {
-			return fmt.Errorf("invalid duration format %q: %w", duration, err)
+			return err
 		}
 		meta["atc-override-expires-at"] = time.Now().Add(d).Format(time.RFC3339)
 	}
@@ -1289,14 +1312,22 @@ func (t *Atc) apiServicesDeleteHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if strings.Contains(err.Error(), "not created by ATC") {
+			t.logAudit(r.Context(), r, "purge_resolver", svcName, map[string]any{"outcome": "rejected", "error": err.Error()})
 			writeJSONError(w, http.StatusForbidden, err.Error())
 			return
 		}
+		t.logAudit(r.Context(), r, "purge_resolver", svcName, map[string]any{"outcome": "failed", "error": err.Error()})
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	t.logAudit(r.Context(), r, "purge_resolver", svcName, nil)
+	if t.IsDryRun() {
+		t.logAudit(r.Context(), r, "purge_resolver", svcName, map[string]any{"outcome": "dry_run"})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"status":"dry_run","message":"Dry-run mode: the purge was logged but nothing was deleted in Consul."}`)
+		return
+	}
+	t.logAudit(r.Context(), r, "purge_resolver", svcName, map[string]any{"outcome": "purged"})
 	w.WriteHeader(http.StatusNoContent)
 }
 

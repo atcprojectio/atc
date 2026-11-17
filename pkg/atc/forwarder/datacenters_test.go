@@ -123,3 +123,17 @@ func TestACLFilteredCatalogIsReported(t *testing.T) {
 	require.NoError(t, f.reconcile(context.Background(), client))
 	assert.Equal(t, int32(2), warns.Load(), "warns again if the problem comes back")
 }
+
+func TestStrategyCacheForgetsGoneServices(t *testing.T) {
+	fc := newFakeConsul(t) // catalog: payments only; no resolvers
+	f := newTestForwarder(t, fc.addr())
+	f.strategiesCache["retired-long-ago"] = cachedStrategies{failover: "x"}
+	client, err := api.NewClient(&api.Config{Address: fc.addr()})
+	require.NoError(t, err)
+
+	require.NoError(t, f.reconcile(context.Background(), client))
+	_, gone := f.strategiesCache["retired-long-ago"]
+	_, kept := f.strategiesCache["payments"]
+	assert.False(t, gone, "a service with no catalog entry and no resolver is forgotten")
+	assert.True(t, kept)
+}

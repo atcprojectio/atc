@@ -779,6 +779,17 @@ func (r *Redirector) reconcile(ctx context.Context, client *api.Client) (err err
 	}
 
 	r.foreign.Update(ctx, foreign)
+	// Forget services that are gone from the catalog and have no resolver left: there is
+	// nothing to redirect for them any more, and the cache would otherwise only grow.
+	r.mu.Lock()
+	for name := range r.strategiesCache {
+		_, inCatalog := services[name]
+		_, hasEntry := existingResolverEntries[name]
+		if !inCatalog && !hasEntry {
+			delete(r.strategiesCache, name)
+		}
+	}
+	r.mu.Unlock()
 	r.unknownStrategyWarn.Update(ctx, unknownStrategy)
 	r.noTargetWarn.Update(ctx, noTarget)
 	return errors.Join(writeErrs...)

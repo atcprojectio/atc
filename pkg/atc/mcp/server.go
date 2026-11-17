@@ -30,6 +30,19 @@ type ReadinessChecker interface {
 	CheckReadiness(ctx context.Context) error
 }
 
+// DryRunReporter is optionally implemented by a Service; in dry-run mode, write tools report
+// that nothing was changed instead of claiming success.
+type DryRunReporter interface {
+	IsDryRun() bool
+}
+
+func dryRunText(svc Service, text string) string {
+	if d, ok := svc.(DryRunReporter); ok && d.IsDryRun() {
+		return "[DRY RUN] Nothing was written to Consul. Would have done: " + text
+	}
+	return text
+}
+
 // ConsulStatusReporter is optionally implemented by a Service to report Consul connectivity.
 type ConsulStatusReporter interface {
 	ConsulStatusMessage(ctx context.Context) (reachable bool, message string)
@@ -189,7 +202,7 @@ func NewHandler(svc Service) http.Handler {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
-					Text: fmt.Sprintf("Successfully purged service-resolver config entry for %s", input.Name),
+					Text: dryRunText(svc, fmt.Sprintf("Successfully purged service-resolver config entry for %s", input.Name)),
 				},
 			},
 		}, nil, nil
@@ -218,7 +231,7 @@ func NewHandler(svc Service) http.Handler {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
-					Text: fmt.Sprintf("Successfully applied failover override for service %s to datacenter %s", input.Service, input.TargetDc),
+					Text: dryRunText(svc, fmt.Sprintf("Successfully applied failover override for service %s to datacenter %s", input.Service, input.TargetDc)),
 				},
 			},
 		}, nil, nil
@@ -247,7 +260,7 @@ func NewHandler(svc Service) http.Handler {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
 				&mcp.TextContent{
-					Text: fmt.Sprintf("Successfully triggered manual redirect for service %s to datacenter %s", input.Service, input.RedirectDc),
+					Text: dryRunText(svc, fmt.Sprintf("Successfully triggered manual redirect for service %s to datacenter %s", input.Service, input.RedirectDc)),
 				},
 			},
 		}, nil, nil

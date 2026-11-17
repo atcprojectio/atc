@@ -288,6 +288,17 @@ function App() {
   };
 
 
+  // In dry-run mode ATC answers {"status":"dry_run","message":...}: tell the user nothing changed.
+  const reportDryRun = async (res) => {
+    if (res.status === 204 || typeof res.json !== 'function') return;
+    try {
+      const body = await res.json();
+      if (body && body.status === 'dry_run') alert(body.message);
+    } catch {
+      // not JSON: nothing to report
+    }
+  };
+
   const handleApplyOverride = async (serviceName, force = false) => {
     if (!overrideTargetDc) {
       alert('Please specify a target datacenter.');
@@ -331,6 +342,7 @@ function App() {
         const text = await res.text();
         throw new Error(text || `Failed to apply override: ${res.statusText}`);
       }
+      await reportDryRun(res);
       setActiveOverrideForm(null);
       setOverrideTargetDc('');
       setOverrideNamespace('');
@@ -366,6 +378,7 @@ function App() {
         const text = await res.text();
         throw new Error(text || `Failed to purge resolver: ${res.statusText}`);
       }
+      await reportDryRun(res);
       fetchServices();
     } catch (err) {
       alert(err.message);
