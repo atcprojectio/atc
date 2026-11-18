@@ -193,6 +193,7 @@ func (w *ConsulWatcher) runWatchPlansOnce(ctx context.Context) (restart bool, er
 		span.SetStatus(codes.Error, err.Error())
 		return false, fmt.Errorf("failed to create services watcher plan: %w", err)
 	}
+	guardStoppedPlan(servicesWatcher)
 	servicesWatcher.HybridHandler = func(_ watch.BlockingParamVal, _ any) {
 		w.logger.DebugContext(ctx, "Watcher received services update from Consul")
 		span.AddEvent("services_update_received")
@@ -255,4 +256,23 @@ func consulCfg(addr, token, dc, ns string) *api.Config {
 		cfg.Namespace = ns
 	}
 	return cfg
+}
+
+// guardStoppedPlan works around a race in consul/api/watch: if Plan.Stop runs after the run
+// loop's stop check but before the query has registered its cancel func, the query's deferred
+// p.cancelFunc() is nil and panics. A panic from a plan that has been stopped is turned into an
+// error (the run loop then sees the stop and returns); any other panic is re-raised.
+func guardStoppedPlan(p *watch.Plan) {
+	query := p.Watcher
+	p.Watcher = func(p *watch.Plan) (_ watch.BlockingParamVal, _ any, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				if !p.IsStopped() {
+					panic(r)
+				}
+				err = fmt.Errorf("watch plan stopped during query: %v", r)
+			}
+		}()
+		return query(p)
+	}
 }
