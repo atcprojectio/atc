@@ -24,6 +24,12 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
+// DurationBucketsSeconds are histogram boundaries for durations recorded in seconds. The SDK's
+// default boundaries (0, 5, 10, ... 10000) are meant for milliseconds: with them every
+// millisecond-scale reconcile or Consul call lands in the first bucket and percentiles come out
+// in whole seconds.
+var DurationBucketsSeconds = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
+
 // GlobalPrometheusHandler is stored so that modules.go can retrieve and serve it.
 var GlobalPrometheusHandler http.Handler
 
