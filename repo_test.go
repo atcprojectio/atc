@@ -239,3 +239,37 @@ func TestEveryMCPToolIsDocumented(t *testing.T) {
 		}
 	}
 }
+
+// TestHomebrewDocsMatchCaskPlatforms: the docs must not promise Homebrew on platforms the
+// GoReleaser cask is not built for.
+func TestHomebrewDocsMatchCaskPlatforms(t *testing.T) {
+	v := viper.New()
+	v.SetConfigFile(".goreleaser.yaml")
+	require.NoError(t, v.ReadInConfig())
+	casks, ok := v.Get("homebrew_casks").([]any)
+	require.True(t, ok && len(casks) > 0)
+	platforms := map[string]bool{}
+	for _, c := range casks {
+		for _, id := range c.(map[string]any)["ids"].([]any) {
+			platforms[id.(string)] = true
+		}
+	}
+
+	raw, err := os.ReadFile("docs/index.html")
+	require.NoError(t, err)
+	docs := string(raw)
+	start := strings.Index(docs, "Install using Homebrew")
+	require.NotEqual(t, -1, start)
+	end := strings.Index(docs[start:], "<h2>")
+	section := docs[start : start+end]
+
+	if !platforms["linux"] {
+		// Judge each paragraph on its own: one may offer Homebrew (macOS), another Linux packages.
+		for _, p := range regexp.MustCompile(`(?s)<p>(.*?)</p>`).FindAllStringSubmatch(section, -1) {
+			text := strings.ToLower(p[1])
+			assert.False(t, strings.Contains(text, "homebrew") && strings.Contains(text, "linux"),
+				"the cask is macOS-only, so the docs must not offer Homebrew on Linux: %q", p[1])
+		}
+	}
+	assert.Contains(t, section, "--cask", "ATC is published as a cask")
+}
