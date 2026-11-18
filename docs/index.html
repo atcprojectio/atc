@@ -223,12 +223,13 @@ make build</code></pre>
         <p>This generates the static binary under <code>dist/atc</code>.</p>
 
         <h2>2. Install using Homebrew</h2>
-        <p>ATC can be installed on macOS and Linux using Homebrew via the official tap:</p>
+        <p>On macOS, ATC can be installed with Homebrew from the official tap:</p>
         <pre><code class="language-bash"># Tap the repository
 brew tap atcprojectio/tap
 
-# Install ATC
-brew install atc</code></pre>
+# Install ATC (a cask)
+brew install --cask atc</code></pre>
+        <p>On Linux, install the <code>.deb</code> or <code>.rpm</code> package or the archive from the <a href="https://github.com/atcprojectio/atc/releases">GitHub releases</a>, or run the container image <code>ghcr.io/atcprojectio/atc</code>.</p>
 
         <h2>3. Running the Daemon</h2>
         <p>Launch the server command by passing the path to the predefined strategies configuration file:</p>
