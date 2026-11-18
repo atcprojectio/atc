@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/atcprojectio/atc/pkg/atc/forwarder"
+	"github.com/atcprojectio/atc/pkg/atc/telemetry"
 	"github.com/atcprojectio/atc/pkg/atc/watcher"
 	"github.com/hashicorp/consul/api"
 	"go.opentelemetry.io/otel"
@@ -104,6 +105,8 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 	reconcileDuration, err := meter.Float64Histogram(
 		"atc_redirector_reconcile_duration_seconds",
 		metric.WithDescription("Duration of redirector reconciliation runs in seconds"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.DurationBucketsSeconds...),
 	)
 	if err != nil {
 		return nil, err
@@ -120,6 +123,8 @@ func New(logger *slog.Logger, consulAddr, consulToken, consulDC, consulNamespace
 	consulDurationHistogram, err := meter.Float64Histogram(
 		"atc_consul_request_duration_seconds",
 		metric.WithDescription("Duration of Consul API requests from redirector in seconds"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.DurationBucketsSeconds...),
 	)
 	if err != nil {
 		return nil, err
